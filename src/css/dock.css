@@ -1,0 +1,90 @@
+/* ============================================
+   TaskFlow — Floating Dock
+   ============================================ */
+
+.dock {
+    position: fixed;
+    bottom: var(--space-lg);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 200;
+    background: var(--bg-dock);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-xl);
+    padding: var(--space-xs) var(--space-md);
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    box-shadow: var(--shadow-dock);
+    animation: dock-appear 0.3s ease-out;
+}
+
+@keyframes dock-appear {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) translateY(0);
+    }
+}
+
+.dock__btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-lg);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    transition: all var(--transition-fast);
+    position: relative;
+    white-space: nowrap;
+}
+
+.dock__btn:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.dock__btn--active {
+    color: var(--text-primary);
+}
+
+/* Active indicator line */
+.dock__btn--active::after {
+    content: '';
+    position: absolute;
+    bottom: 2px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 20px;
+    height: 3px;
+    background: var(--accent-color);
+    border-radius: 2px;
+    box-shadow: 0 0 6px var(--accent-glow);
+}
+
+.dock__btn svg {
+    width: 18px;
+    height: 18px;
+}
+
+.dock__separator {
+    width: 1px;
+    height: 24px;
+    background: var(--border-default);
+    margin: 0 var(--space-xs);
+}
+
+/* ─── Dock hidden state ─── */
+.dock--hidden {
+    transform: translateX(-50%) translateY(100px);
+    opacity: 0;
+    pointer-events: none;
+    transition: all var(--transition-normal);
+}

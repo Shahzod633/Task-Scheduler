@@ -1,0 +1,462 @@
+/* ============================================
+   TaskFlow — Board View (Kanban)
+   ============================================ */
+
+/* ─── Board Columns Container ─── */
+.board {
+    flex: 1;
+    display: flex;
+    gap: var(--space-md);
+    padding: 0 var(--space-lg) var(--space-lg);
+    overflow-x: auto;
+    overflow-y: hidden;
+    align-items: flex-start;
+    scroll-behavior: smooth;
+    padding-bottom: calc(var(--dock-height) + var(--space-2xl));
+}
+
+/* ─── Column ─── */
+.column {
+    width: var(--column-width);
+    min-width: var(--column-width);
+    max-height: calc(100vh - var(--header-height) - 44px - var(--dock-height) - 60px);
+    background: var(--bg-column);
+    border-radius: var(--radius-lg);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    transition: box-shadow var(--transition-fast);
+}
+
+.column:hover {
+    box-shadow: var(--shadow-md);
+}
+
+/* Column being dragged */
+.column.sortable-ghost {
+    opacity: 0.5;
+    transform: rotate(2deg);
+}
+
+.column.sortable-chosen {
+    box-shadow: var(--shadow-lg);
+}
+
+/* ─── Column Header ─── */
+.column__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-sm) var(--space-md);
+    cursor: grab;
+    min-height: 40px;
+}
+
+.column__header:active {
+    cursor: grabbing;
+}
+
+.column__title-wrapper {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    flex: 1;
+    min-width: 0;
+}
+
+.column__title {
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-secondary);
+    padding: 2px var(--space-xs);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: background var(--transition-fast);
+}
+
+.column__title:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.column__title-input {
+    width: 100%;
+    padding: 4px var(--space-sm);
+    background: var(--bg-input-focus);
+    border: 2px solid var(--accent-color);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-semibold);
+}
+
+.column__count {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    background: var(--bg-card);
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    font-weight: var(--font-weight-medium);
+}
+
+.column__menu-btn {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    opacity: 0;
+    transition: all var(--transition-fast);
+}
+
+.column:hover .column__menu-btn {
+    opacity: 1;
+}
+
+.column__menu-btn:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+/* ─── Column Cards List ─── */
+.column__cards {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 var(--space-sm);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    min-height: 2px;
+}
+
+.column__cards::-webkit-scrollbar {
+    width: 6px;
+}
+
+.column__cards::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+}
+
+/* ─── Card ─── */
+.card {
+    background: var(--bg-card);
+    border-radius: var(--radius-md);
+    padding: var(--space-sm) var(--space-md);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    border: 1px solid transparent;
+    position: relative;
+}
+
+.card:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--border-hover);
+    box-shadow: var(--shadow-card-hover);
+    transform: translateY(-1px);
+}
+
+/* Card being dragged */
+.card.sortable-ghost {
+    opacity: 0.4;
+    transform: rotate(3deg);
+}
+
+.card.sortable-chosen {
+    box-shadow: var(--shadow-lg);
+    border-color: var(--accent-color);
+}
+
+.card.sortable-drag {
+    box-shadow: var(--shadow-xl);
+}
+
+/* ─── Card Labels ─── */
+.card__labels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: var(--space-xs);
+}
+
+.card__label {
+    width: 40px;
+    height: 8px;
+    border-radius: 4px;
+    transition: height var(--transition-fast);
+}
+
+.card:hover .card__label {
+    height: 12px;
+}
+
+/* ─── Card Title ─── */
+.card__title {
+    font-size: var(--font-size-md);
+    color: var(--text-primary);
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+/* ─── Card Metadata ─── */
+.card__meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+    flex-wrap: wrap;
+}
+
+.card__meta-item {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+}
+
+.card__meta-item svg {
+    width: 14px;
+    height: 14px;
+}
+
+.card__meta-item--due {
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.card__meta-item--due.overdue {
+    background: rgba(235, 90, 70, 0.2);
+    color: var(--color-danger);
+}
+
+/* ─── Card Edit Button (on hover) ─── */
+.card__edit-btn {
+    position: absolute;
+    top: var(--space-xs);
+    right: var(--space-xs);
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    background: var(--bg-column);
+    color: var(--text-muted);
+    opacity: 0;
+    transition: all var(--transition-fast);
+    box-shadow: var(--shadow-sm);
+}
+
+.card:hover .card__edit-btn {
+    opacity: 1;
+}
+
+.card__edit-btn:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.card__edit-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* ─── Add Card Button ─── */
+.column__add-card {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    margin: var(--space-xs) var(--space-sm) var(--space-sm);
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    font-size: var(--font-size-md);
+    transition: all var(--transition-fast);
+}
+
+.column__add-card:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.column__add-card svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* ─── Add Card Form ─── */
+.add-card-form {
+    padding: 0 var(--space-sm) var(--space-sm);
+}
+
+.add-card-form__textarea {
+    width: 100%;
+    min-height: 54px;
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-card);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    resize: none;
+    overflow: hidden;
+    line-height: 1.4;
+    transition: border-color var(--transition-fast);
+}
+
+.add-card-form__textarea:focus {
+    border-color: var(--accent-color);
+}
+
+.add-card-form__textarea::placeholder {
+    color: var(--text-placeholder);
+}
+
+.add-card-form__actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+}
+
+.add-card-form__submit {
+    padding: 6px 16px;
+    background: var(--accent-color);
+    color: var(--text-primary);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-medium);
+    transition: all var(--transition-fast);
+}
+
+.add-card-form__submit:hover {
+    background: var(--accent-hover);
+}
+
+.add-card-form__cancel {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    transition: all var(--transition-fast);
+}
+
+.add-card-form__cancel:hover {
+    color: var(--text-primary);
+    background: var(--bg-card-hover);
+}
+
+.add-card-form__cancel svg {
+    width: 20px;
+    height: 20px;
+}
+
+/* ─── Add Column Button ─── */
+.add-column {
+    min-width: var(--column-width);
+    width: var(--column-width);
+    flex-shrink: 0;
+}
+
+.add-column__btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    width: 100%;
+    padding: var(--space-md) var(--space-lg);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px dashed var(--border-default);
+    border-radius: var(--radius-lg);
+    color: var(--text-muted);
+    font-size: var(--font-size-md);
+    transition: all var(--transition-fast);
+}
+
+.add-column__btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: var(--border-hover);
+    color: var(--text-primary);
+}
+
+.add-column__btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* ─── Add Column Form ─── */
+.add-column__form {
+    background: var(--bg-column);
+    border-radius: var(--radius-lg);
+    padding: var(--space-sm);
+}
+
+.add-column__input {
+    width: 100%;
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-input-focus);
+    border: 2px solid var(--accent-color);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-semibold);
+}
+
+.add-column__input::placeholder {
+    color: var(--text-placeholder);
+    font-weight: var(--font-weight-normal);
+}
+
+.add-column__actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+}
+
+.add-column__submit {
+    padding: 6px 16px;
+    background: var(--accent-color);
+    color: var(--text-primary);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-medium);
+    transition: all var(--transition-fast);
+}
+
+.add-column__submit:hover {
+    background: var(--accent-hover);
+}
+
+.add-column__cancel {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    transition: all var(--transition-fast);
+}
+
+.add-column__cancel:hover {
+    color: var(--text-primary);
+    background: var(--bg-card-hover);
+}
+
+/* ─── Empty Column Placeholder ─── */
+.column__empty {
+    padding: var(--space-xl) var(--space-md);
+    text-align: center;
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+}

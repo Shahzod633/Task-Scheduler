@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskFlow</title>
+    
+    <!-- CSS -->
+    <link rel="stylesheet" href="css/variables.css">
+    <link rel="stylesheet" href="css/reset.css">
+    <link rel="stylesheet" href="css/layout.css">
+    <link rel="stylesheet" href="css/components.css">
+    <link rel="stylesheet" href="css/hub.css">
+    <link rel="stylesheet" href="css/board.css">
+    <link rel="stylesheet" href="css/dock.css">
+    
+    <!-- Sortable.js (loaded locally from node_modules or CDN, but since offline is required, we use the npm installed version in tauri, wait, since we are purely offline HTML, let's include it via script tag. For the sake of simplicity, I'll add Sortable.js logic here or rely on the bundler. Since there's no bundler, I will download sortable.js locally or just link it. Wait, the prompt says "полностью работающее офлайн", so we need the JS file locally.) -->
+    <script src="../node_modules/sortablejs/Sortable.min.js"></script>
+</head>
+<body>
+    <div id="app">
+        <!-- Content will be injected by app.js -->
+    </div>
+
+    <!-- App Logic -->
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>

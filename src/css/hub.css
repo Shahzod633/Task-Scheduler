@@ -1,0 +1,353 @@
+/* ============================================
+   TaskFlow — Hub View (Dashboard)
+   ============================================ */
+
+/* ─── Hub Container ─── */
+.hub {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-xl) var(--space-2xl);
+}
+
+/* ─── Templates Banner ─── */
+.hub__templates {
+    margin-bottom: var(--space-2xl);
+    position: relative;
+}
+
+.hub__templates-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--space-lg);
+}
+
+.hub__templates-title {
+    font-size: var(--font-size-lg);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-primary);
+}
+
+.hub__templates-close {
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    transition: all var(--transition-fast);
+}
+
+.hub__templates-close:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.hub__templates-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: var(--space-md);
+}
+
+.hub__template-card {
+    padding: var(--space-lg);
+    background: var(--accent-color);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 60px;
+}
+
+.hub__template-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+    filter: brightness(1.1);
+}
+
+.hub__template-name {
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-medium);
+    color: var(--text-primary);
+}
+
+.hub__template-icon {
+    width: 20px;
+    height: 20px;
+    color: rgba(255, 255, 255, 0.7);
+}
+
+/* ─── Boards Section ─── */
+.hub__boards-section {
+    margin-bottom: var(--space-2xl);
+}
+
+.hub__section-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-lg);
+}
+
+.hub__section-icon {
+    width: 20px;
+    height: 20px;
+    color: var(--text-muted);
+}
+
+.hub__section-title {
+    font-size: var(--font-size-lg);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-primary);
+}
+
+/* ─── Boards Grid ─── */
+.hub__boards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: var(--space-md);
+}
+
+/* ─── Board Card ─── */
+.hub__board-card {
+    height: 96px;
+    border-radius: var(--radius-md);
+    padding: var(--space-md) var(--space-lg);
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: flex-end;
+    transition: all var(--transition-fast);
+}
+
+.hub__board-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, transparent 40%, rgba(0, 0, 0, 0.5) 100%);
+    z-index: 1;
+}
+
+.hub__board-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+}
+
+.hub__board-card:hover::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(255, 255, 255, 0.06);
+    z-index: 2;
+}
+
+.hub__board-name {
+    position: relative;
+    z-index: 3;
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-bold);
+    color: var(--text-primary);
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+/* ─── Board Star ─── */
+.hub__board-star {
+    position: absolute;
+    top: var(--space-sm);
+    right: var(--space-sm);
+    z-index: 4;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    opacity: 0;
+    color: var(--color-warning);
+    transition: all var(--transition-fast);
+}
+
+.hub__board-card:hover .hub__board-star {
+    opacity: 1;
+}
+
+.hub__board-star:hover {
+    transform: scale(1.2);
+}
+
+.hub__board-star--active {
+    opacity: 1;
+}
+
+.hub__board-star svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* ─── Create Board Card ─── */
+.hub__create-board {
+    height: 96px;
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+    border: 1px solid transparent;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: var(--space-xs);
+    cursor: pointer;
+    transition: all var(--transition-normal);
+    position: relative;
+    overflow: hidden;
+}
+
+/* Animated gradient border */
+.hub__create-board::before {
+    content: '';
+    position: absolute;
+    inset: -2px;
+    border-radius: calc(var(--radius-md) + 2px);
+    background: conic-gradient(
+        from 0deg,
+        var(--accent-color),
+        #764ba2,
+        #f093fb,
+        #f5576c,
+        #fee140,
+        #43e97b,
+        var(--accent-color)
+    );
+    opacity: 0;
+    transition: opacity var(--transition-normal);
+    z-index: -2;
+    animation: rotate-gradient 3s linear infinite;
+}
+
+.hub__create-board::after {
+    content: '';
+    position: absolute;
+    inset: 2px;
+    border-radius: calc(var(--radius-md) - 1px);
+    background: var(--bg-secondary);
+    z-index: -1;
+}
+
+.hub__create-board:hover::before {
+    opacity: 1;
+}
+
+.hub__create-board:hover {
+    background: transparent;
+}
+
+@keyframes rotate-gradient {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.hub__create-board-text {
+    font-size: var(--font-size-md);
+    color: var(--text-secondary);
+    font-weight: var(--font-weight-medium);
+    z-index: 1;
+}
+
+.hub__create-board-icon {
+    width: 24px;
+    height: 24px;
+    color: var(--text-muted);
+    z-index: 1;
+}
+
+/* ─── Workspace Header in Hub ─── */
+.hub__workspace-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-xl);
+    padding-bottom: var(--space-lg);
+    border-bottom: 1px solid var(--border-default);
+}
+
+.hub__workspace-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-bold);
+    flex-shrink: 0;
+}
+
+.hub__workspace-info {
+    flex: 1;
+}
+
+.hub__workspace-name {
+    font-size: var(--font-size-xl);
+    font-weight: var(--font-weight-bold);
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.hub__workspace-edit {
+    width: 20px;
+    height: 20px;
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0;
+    transition: all var(--transition-fast);
+}
+
+.hub__workspace-name:hover .hub__workspace-edit {
+    opacity: 1;
+}
+
+.hub__workspace-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    margin-top: var(--space-xs);
+}
+
+.hub__workspace-badge {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+}
+
+.hub__workspace-badge svg {
+    width: 12px;
+    height: 12px;
+}
+
+/* ─── Closed Boards Link ─── */
+.hub__closed-boards {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-lg);
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    border-radius: var(--radius-sm);
+    transition: all var(--transition-fast);
+    cursor: pointer;
+}
+
+.hub__closed-boards:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
