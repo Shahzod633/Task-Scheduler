@@ -1,9 +1,7 @@
 use rusqlite::params;
-use std::sync::Mutex;
 use tauri::State;
 use crate::db::DbState;
-use crate::models::{Workspace, Board, Column, Card, Label};
-use serde_json::Value;
+use crate::models::{Workspace, Board, Column, Card};
 
 // Error handling helper
 type CmdResult<T> = Result<T, String>;
@@ -341,7 +339,7 @@ pub fn move_card(id: i64, new_column_id: i64, new_position: i64, state: State<'_
 }
 
 #[tauri::command]
-pub fn export_board(board_id: i64, state: State<'_, DbState>) -> CmdResult<String> {
+pub fn export_board(_board_id: i64, _state: State<'_, DbState>) -> CmdResult<String> {
     // Just a stub for exporting, returning some JSON
     Ok(r#"{"status": "exported"}"#.to_string())
 }
