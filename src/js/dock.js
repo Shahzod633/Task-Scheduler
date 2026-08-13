@@ -5,44 +5,43 @@
 import Icons from './icons.js';
 import { createElement, $ } from './utils.js';
 
-let currentDockView = 'board';
-
 /**
- * Render the floating dock
+ * Render the floating dock.
+ * @param {string} activeView - which dock-driven view is currently active: 'board' | 'inbox' | 'planner'
  */
-export function renderDock() {
+export function renderDock(activeView = 'board') {
     // Remove existing dock
     const existing = $('#floating-dock');
     if (existing) existing.remove();
-    
+
     const dock = createElement('div', { className: 'dock', id: 'floating-dock' });
-    
+
     // Inbox button
     dock.appendChild(createDockButton('inbox', Icons.inbox, 'Inbox', () => {
-        setActiveDockButton('inbox');
-    }));
-    
+        window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'inbox' } }));
+    }, activeView === 'inbox'));
+
     // Planner button
     dock.appendChild(createDockButton('planner', Icons.calendar, 'Планировщик', () => {
-        setActiveDockButton('planner');
-    }));
-    
+        window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'planner' } }));
+    }, activeView === 'planner'));
+
     // Separator
     dock.appendChild(createElement('div', { className: 'dock__separator' }));
-    
-    // Board button (active by default)
+
+    // Board button
     dock.appendChild(createDockButton('board', Icons.boards, 'Доска', () => {
-        setActiveDockButton('board');
-    }, true));
-    
+        window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'board' } }));
+    }, activeView === 'board'));
+
     // Separator
     dock.appendChild(createElement('div', { className: 'dock__separator' }));
-    
+
     // Switch board button
     dock.appendChild(createDockButton('switch', Icons.switchBoard, 'Выбрать другую доску', () => {
         window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'hub' } }));
     }));
-    
+
     document.body.appendChild(dock);
 }
 
@@ -58,19 +57,6 @@ function createDockButton(id, icon, label, onClick, isActive = false) {
     });
     btn.addEventListener('click', onClick);
     return btn;
-}
-
-/**
- * Set active dock button
- */
-function setActiveDockButton(viewId) {
-    const buttons = document.querySelectorAll('.dock__btn');
-    buttons.forEach(btn => btn.classList.remove('dock__btn--active'));
-    
-    const activeBtn = $(`#dock-btn-${viewId}`);
-    if (activeBtn) activeBtn.classList.add('dock__btn--active');
-    
-    currentDockView = viewId;
 }
 
 /**

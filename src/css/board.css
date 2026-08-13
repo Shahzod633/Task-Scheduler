@@ -268,6 +268,72 @@
     height: 14px;
 }
 
+/* ─── Card Menu Button (⋯, mistake tracking) ─── */
+.card__menu-btn {
+    position: absolute;
+    top: var(--space-xs);
+    right: 36px;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    background: var(--bg-column);
+    color: var(--text-muted);
+    opacity: 0;
+    transition: all var(--transition-fast);
+    box-shadow: var(--shadow-sm);
+}
+
+.card:hover .card__menu-btn {
+    opacity: 1;
+}
+
+.card__menu-btn:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.card__menu-btn svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* ─── Mistake Tracking Tag ─── */
+.card__mistake-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    margin-bottom: var(--space-xs);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-medium);
+    background: rgba(235, 90, 70, 0.15);
+    color: var(--color-danger);
+    width: fit-content;
+}
+
+.card__mistake-tag--resolved {
+    background: rgba(97, 189, 79, 0.15);
+    color: var(--color-success);
+}
+
+.card__mistake-tag svg {
+    width: 12px;
+    height: 12px;
+}
+
+.context-menu__item--info {
+    cursor: default;
+    color: var(--text-muted);
+}
+
+.context-menu__item--info:hover {
+    background: transparent;
+}
+
 /* ─── Add Card Button ─── */
 .column__add-card {
     display: flex;

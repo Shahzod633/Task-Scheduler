@@ -4,10 +4,13 @@
 
 import * as api from './api.js';
 import Icons from './icons.js';
+import { TEMPLATE_DEFS, createBoardFromTemplate } from './templates.js';
 import { createElement, $, $$, showToast, debounce, getRandomGradient, getGradients, escapeHtml } from './utils.js';
 
 let currentWorkspaceId = null;
 let showTemplates = true;
+
+const DEFAULT_COLUMNS = ['Новые', 'В работе', 'На проверке', 'Готово'];
 
 /**
  * Render the hub/dashboard view
@@ -147,15 +150,8 @@ function createTemplatesSection() {
     section.appendChild(header);
     
     const grid = createElement('div', { className: 'hub__templates-grid' });
-    
-    const templates = [
-        'Управление проектами',
-        'Kanban',
-        'Отслеживание ошибок',
-        'Дизайн-процесс'
-    ];
-    
-    for (const name of templates) {
+
+    for (const name of Object.keys(TEMPLATE_DEFS)) {
         const card = createElement('div', { className: 'hub__template-card' });
         card.appendChild(createElement('span', { className: 'hub__template-name' }, name));
         card.appendChild(createElement('span', {
@@ -163,43 +159,13 @@ function createTemplatesSection() {
             innerHTML: Icons.arrowUpRight
         }));
         card.addEventListener('click', async () => {
-            await createBoardFromTemplate(name);
+            await createBoardFromTemplate(currentWorkspaceId, name);
         });
         grid.appendChild(card);
     }
-    
+
     section.appendChild(grid);
     return section;
-}
-
-/**
- * Create board from template
- */
-async function createBoardFromTemplate(templateName) {
-    try {
-        const gradient = getRandomGradient();
-        const board = await api.createBoard(currentWorkspaceId, templateName, gradient);
-        
-        // Create default columns based on template
-        const defaultColumns = {
-            'Управление проектами': ['Бэклог', 'В работе', 'На проверке', 'Готово'],
-            'Kanban': ['Сделать', 'В процессе', 'Готово'],
-            'Отслеживание ошибок': ['Новые', 'В работе', 'Тестирование', 'Закрыто'],
-            'Дизайн-процесс': ['Идеи', 'Дизайн', 'Разработка', 'Завершено']
-        };
-        
-        const columns = defaultColumns[templateName] || ['Сделать', 'В процессе', 'Готово'];
-        for (const colName of columns) {
-            await api.createColumn(board.id, colName);
-        }
-        
-        showToast(`Доска "${templateName}" создана`);
-        
-        // Navigate to the board
-        window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'board', boardId: board.id } }));
-    } catch (e) {
-        showToast('Ошибка создания доски', 'error');
-    }
 }
 
 /**
@@ -233,7 +199,7 @@ function createBoardsSection(boards) {
 /**
  * Create a board card
  */
-function createBoardCard(board) {
+export function createBoardCard(board) {
     const card = createElement('div', {
         className: 'hub__board-card',
         style: { background: board.gradient },
@@ -254,6 +220,7 @@ function createBoardCard(board) {
         board.is_starred = newStarred;
         starBtn.innerHTML = newStarred ? Icons.starFilled : Icons.star;
         starBtn.className = `hub__board-star ${newStarred ? 'hub__board-star--active' : ''}`;
+        window.dispatchEvent(new CustomEvent('board-star-toggled', { detail: { boardId: board.id, starred: newStarred } }));
     });
     card.appendChild(starBtn);
     
@@ -355,6 +322,9 @@ function showCreateBoardModal() {
         
         try {
             const board = await api.createBoard(currentWorkspaceId, name, selectedGradient);
+            for (const colName of DEFAULT_COLUMNS) {
+                await api.createColumn(board.id, colName);
+            }
             overlay.remove();
             showToast(`Доска "${name}" создана`);
             window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'board', boardId: board.id } }));

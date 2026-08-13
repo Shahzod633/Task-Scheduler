@@ -37,13 +37,34 @@ pub fn run() {
             commands::update_column,
             commands::archive_column,
             commands::reorder_columns,
-            
+
             commands::get_cards,
             commands::create_card,
             commands::update_card,
             commands::archive_card,
-            commands::move_card,
+            commands::update_card_position,
             commands::export_board,
+
+            commands::get_labels,
+            commands::create_label,
+            commands::add_label_to_card,
+            commands::remove_label_from_card,
+
+            commands::get_notifications,
+            commands::mark_all_notifications_read,
+
+            commands::get_user_profile,
+            commands::update_user_profile,
+
+            commands::record_board_view,
+            commands::get_recent_boards,
+
+            commands::get_inbox_column,
+            commands::get_cards_with_due_dates,
+
+            commands::mark_card_mistake,
+            commands::resolve_card_mistake,
+            commands::get_mistake_cards,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

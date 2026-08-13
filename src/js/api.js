@@ -90,8 +90,8 @@ export async function updateCard(id, title, description, dueDate) {
     return await invoke('update_card', { id, title, description, dueDate });
 }
 
-export async function moveCard(id, newColumnId, newPosition) {
-    return await invoke('move_card', { id, newColumnId, newPosition });
+export async function updateCardPosition(id, newColumnId, newPosition) {
+    return await invoke('update_card_position', { id, newColumnId, newPosition });
 }
 
 export async function reorderCards(columnId, cardIds) {
@@ -128,4 +128,60 @@ export async function exportBoard(boardId) {
 
 export async function importBoard(workspaceId, jsonData) {
     return await invoke('import_board', { workspaceId, jsonData });
+}
+
+// ─── Notifications ───
+
+export async function getNotifications() {
+    return await invoke('get_notifications');
+}
+
+export async function markAllNotificationsRead() {
+    return await invoke('mark_all_notifications_read');
+}
+
+// ─── User profile ───
+
+export async function getUserProfile() {
+    return await invoke('get_user_profile');
+}
+
+export async function updateUserProfile(displayName, avatarInitials, theme) {
+    return await invoke('update_user_profile', { displayName, avatarInitials, theme });
+}
+
+// ─── Recently viewed boards ───
+
+export async function recordBoardView(boardId) {
+    return await invoke('record_board_view', { boardId });
+}
+
+export async function getRecentBoards(workspaceId, limit) {
+    return await invoke('get_recent_boards', { workspaceId, limit });
+}
+
+// ─── Inbox ───
+
+export async function getInboxColumn(workspaceId) {
+    return await invoke('get_inbox_column', { workspaceId });
+}
+
+// ─── Planner ───
+
+export async function getCardsWithDueDates(workspaceId) {
+    return await invoke('get_cards_with_due_dates', { workspaceId });
+}
+
+// ─── Mistake tracking ───
+
+export async function markCardMistake(cardId) {
+    return await invoke('mark_card_mistake', { cardId });
+}
+
+export async function resolveCardMistake(cardId) {
+    return await invoke('resolve_card_mistake', { cardId });
+}
+
+export async function getMistakeCards(workspaceId) {
+    return await invoke('get_mistake_cards', { workspaceId });
 }

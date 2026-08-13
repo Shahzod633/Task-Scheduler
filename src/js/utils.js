@@ -144,3 +144,18 @@ export function escapeHtml(str) {
     div.textContent = str;
     return div.innerHTML;
 }
+
+/**
+ * Returns an array of 'YYYY-MM-DD' date strings for the last `n` days,
+ * oldest first, ending today.
+ */
+export function lastNDays(n) {
+    const days = [];
+    const now = new Date();
+    for (let i = n - 1; i >= 0; i--) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        days.push(d.toISOString().slice(0, 10));
+    }
+    return days;
+}

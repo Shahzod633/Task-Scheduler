@@ -4,14 +4,53 @@
 
 import * as api from './api.js';
 import Icons from './icons.js';
-import { renderBoard, getCurrentBoardId } from './board.js';
-import { renderHub, filterBoards, getCurrentWorkspaceId } from './hub.js';
-import { renderDock, showDock, hideDock, removeDock } from './dock.js';
+import { renderBoard } from './board.js';
+import { renderHub, filterBoards } from './hub.js';
+import { renderDock, showDock, removeDock } from './dock.js';
 import { renderWorkspaceSidebar, ensureDefaultWorkspace } from './workspace.js';
+import { initHeaderInteractions } from './header.js';
+import { renderTemplatesPage } from './templates.js';
+import { renderHomePage } from './home.js';
+import { renderSettingsPage } from './settings.js';
+import { renderInboxPage } from './inbox.js';
+import { renderPlannerPage } from './planner.js';
+import { renderRecentPage } from './recent.js';
+import { renderFavoritesPage } from './favorites.js';
+import { renderMistakesPage } from './mistakes.js';
 import { $, debounce, showToast } from './utils.js';
 
-let currentView = 'hub'; // 'hub' | 'board'
+let currentView = { name: 'hub', params: {} };
 let defaultWorkspaceId = null;
+let lastBoardId = null;
+
+// Views that show the left sidebar (workspace/hub-style navigation)
+const SIDEBAR_VIEWS = new Set(['hub', 'templates', 'home', 'settings', 'recent', 'favorites', 'mistakes']);
+// Views that show the floating dock (board working context)
+const DOCK_VIEWS = new Set(['board', 'inbox', 'planner']);
+// view name -> sidebar top-level item id
+const SIDEBAR_ITEM_IDS = { hub: 'sidebar-boards', templates: 'sidebar-templates', home: 'sidebar-home', settings: 'sidebar-settings' };
+
+const ROUTES = {
+    hub: (params) => renderHub(params.workspaceId || defaultWorkspaceId),
+    board: async (params) => {
+        const boardId = params.boardId || lastBoardId;
+        if (!boardId) {
+            showToast('Сначала откройте доску', 'error');
+            return;
+        }
+        lastBoardId = boardId;
+        await api.recordBoardView(boardId);
+        await renderBoard(boardId);
+    },
+    templates: (params) => renderTemplatesPage(params.workspaceId || defaultWorkspaceId),
+    home: (params) => renderHomePage(params.workspaceId || defaultWorkspaceId),
+    settings: (params) => renderSettingsPage(params.workspaceId || defaultWorkspaceId),
+    inbox: (params) => renderInboxPage(params.workspaceId || defaultWorkspaceId),
+    planner: (params) => renderPlannerPage(params.workspaceId || defaultWorkspaceId),
+    recent: (params) => renderRecentPage(params.workspaceId || defaultWorkspaceId),
+    favorites: (params) => renderFavoritesPage(params.workspaceId || defaultWorkspaceId),
+    mistakes: (params) => renderMistakesPage(params.workspaceId || defaultWorkspaceId),
+};
 
 /**
  * Initialize the application
@@ -20,22 +59,23 @@ async function init() {
     try {
         // Ensure we have at least one workspace
         defaultWorkspaceId = await ensureDefaultWorkspace();
-        
+
         // Render the global layout
         renderLayout();
-        
+        initHeaderInteractions(() => defaultWorkspaceId);
+
         // Render sidebar
         await renderWorkspaceSidebar(defaultWorkspaceId);
-        
+
         // Start at hub view
         await navigateTo('hub', { workspaceId: defaultWorkspaceId });
-        
+
         // Listen for navigation events
         window.addEventListener('navigate', (e) => {
-            const { view, boardId, workspaceId } = e.detail;
-            navigateTo(view, { boardId, workspaceId });
+            const { view, ...params } = e.detail;
+            navigateTo(view, params);
         });
-        
+
     } catch (error) {
         console.error('Failed to initialize app:', error);
         showToast('Ошибка инициализации приложения', 'error');
@@ -54,20 +94,20 @@ function renderLayout() {
                 <span class="header__logo-icon">${Icons.logo}</span>
                 <span class="header__logo-text">TaskFlow</span>
             </div>
-            
+
             <nav class="header__nav">
                 <button class="header__nav-btn" id="nav-workspaces">Пространства</button>
                 <button class="header__nav-btn" id="nav-recent">Недавние</button>
                 <button class="header__nav-btn" id="nav-starred">Избранное</button>
             </nav>
-            
+
             <button class="header__create-btn" id="header-create-btn">+ Создать</button>
-            
+
             <div class="header__search">
                 <span class="header__search-icon">${Icons.search}</span>
                 <input type="text" class="header__search-input" id="search-input" placeholder="Поиск">
             </div>
-            
+
             <div class="header__right">
                 <button class="header__icon-btn" id="btn-notifications" data-tooltip="Уведомления">
                     ${Icons.bell}
@@ -78,7 +118,7 @@ function renderLayout() {
                 <div class="header__avatar" id="user-avatar" data-tooltip="Профиль">TF</div>
             </div>
         </header>
-        
+
         <!-- Main -->
         <div class="main">
             <!-- Sidebar -->
@@ -96,27 +136,31 @@ function renderLayout() {
                         <span class="sidebar__item-icon">${Icons.home}</span>
                         <span class="sidebar__item-text">Главная страница</span>
                     </div>
+                    <div class="sidebar__item" id="sidebar-settings">
+                        <span class="sidebar__item-icon">${Icons.settings}</span>
+                        <span class="sidebar__item-text">Настройки</span>
+                    </div>
                 </div>
-                
+
                 <div class="sidebar__section">
                     <div class="sidebar__section-title">Рабочие пространства</div>
                     <div id="sidebar-workspaces"></div>
                 </div>
             </aside>
-            
+
             <!-- Content -->
             <div class="content" id="content"></div>
         </div>
     `;
-    
+
     // Event: Logo click → go to hub
     $('#header-logo').addEventListener('click', () => {
         navigateTo('hub', { workspaceId: defaultWorkspaceId });
     });
-    
+
     // Event: Create button
     $('#header-create-btn').addEventListener('click', () => {
-        if (currentView === 'hub') {
+        if (currentView.name === 'hub') {
             // Trigger create board modal from hub
             const createBtn = $('#create-board-btn');
             if (createBtn) createBtn.click();
@@ -125,65 +169,80 @@ function renderLayout() {
             navigateTo('hub', { workspaceId: defaultWorkspaceId });
         }
     });
-    
+
     // Event: Search
     const searchInput = $('#search-input');
     searchInput.addEventListener('input', debounce((e) => {
-        if (currentView === 'hub') {
+        if (currentView.name === 'hub') {
             filterBoards(e.target.value);
         }
     }, 200));
-    
+
     // Event: Sidebar navigation
     $('#sidebar-boards').addEventListener('click', () => {
         navigateTo('hub', { workspaceId: defaultWorkspaceId });
     });
-    
+
+    $('#sidebar-templates').addEventListener('click', () => {
+        navigateTo('templates', { workspaceId: defaultWorkspaceId });
+    });
+
     $('#sidebar-home').addEventListener('click', () => {
-        navigateTo('hub', { workspaceId: defaultWorkspaceId });
+        navigateTo('home', { workspaceId: defaultWorkspaceId });
+    });
+
+    $('#sidebar-settings').addEventListener('click', () => {
+        navigateTo('settings', { workspaceId: defaultWorkspaceId });
     });
 }
 
 /**
- * Navigate between views
+ * Highlight the active top-level sidebar item for the given view
+ */
+function updateSidebarActiveState(view) {
+    document.querySelectorAll('.sidebar__item').forEach(item => item.classList.remove('sidebar__item--active'));
+    const id = SIDEBAR_ITEM_IDS[view];
+    if (id) {
+        const el = document.getElementById(id);
+        if (el) el.classList.add('sidebar__item--active');
+    }
+}
+
+/**
+ * Navigate between views. Single choke point: fully re-renders only the
+ * central content area (and the dock/sidebar chrome around it) — never the
+ * whole app.
  */
 async function navigateTo(view, params = {}) {
-    currentView = view;
-    
-    // Update sidebar active state
-    const sidebarItems = document.querySelectorAll('.sidebar__item');
-    sidebarItems.forEach(item => item.classList.remove('sidebar__item--active'));
-    
-    if (view === 'hub') {
-        const sidebarBoards = $('#sidebar-boards');
-        if (sidebarBoards) sidebarBoards.classList.add('sidebar__item--active');
-        
-        const workspaceId = params.workspaceId || defaultWorkspaceId;
-        defaultWorkspaceId = workspaceId;
-        
-        // Show sidebar
-        const sidebar = $('#app-sidebar');
-        if (sidebar) sidebar.classList.remove('sidebar--hidden');
-        
-        removeDock();
-        await renderHub(workspaceId);
-        await renderWorkspaceSidebar(workspaceId);
-        
-        // Clear search
-        const searchInput = $('#search-input');
-        if (searchInput) searchInput.value = '';
-        
-    } else if (view === 'board') {
-        const boardId = params.boardId;
-        if (!boardId) return;
-        
-        // Hide sidebar for more board space
-        const sidebar = $('#app-sidebar');
-        if (sidebar) sidebar.classList.add('sidebar--hidden');
-        
-        await renderBoard(boardId);
-        renderDock();
+    if (!ROUTES[view]) return;
+
+    if (params.workspaceId) defaultWorkspaceId = params.workspaceId;
+    currentView = { name: view, params };
+
+    updateSidebarActiveState(view);
+
+    const sidebar = $('#app-sidebar');
+    if (sidebar) sidebar.classList.toggle('sidebar--hidden', !SIDEBAR_VIEWS.has(view));
+
+    if (SIDEBAR_VIEWS.has(view)) {
+        await renderWorkspaceSidebar(defaultWorkspaceId);
+    }
+
+    if (DOCK_VIEWS.has(view)) {
+        renderDock(view);
         showDock();
+    } else {
+        removeDock();
+    }
+
+    const searchInput = $('#search-input');
+    if (searchInput) searchInput.value = '';
+
+    try {
+        await ROUTES[view](params);
+    } catch (error) {
+        console.error(`Failed to render view "${view}":`, error);
+        showToast('Ошибка загрузки страницы', 'error');
     }
 }
 

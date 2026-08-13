@@ -338,7 +338,15 @@ function createCardElement(cardData) {
         }
         card.appendChild(labelsEl);
     }
-    
+
+    // Mistake-tracking indicator
+    if (cardData.is_mistake) {
+        card.appendChild(createElement('div', {
+            className: `card__mistake-tag ${cardData.mistake_resolved_at ? 'card__mistake-tag--resolved' : ''}`,
+            innerHTML: `${cardData.mistake_resolved_at ? Icons.checkCircle : Icons.alertTriangle} <span>${cardData.mistake_resolved_at ? 'Ошибка исправлена' : 'Ошибка'}</span>`
+        }));
+    }
+
     // Title
     card.appendChild(createElement('div', {
         className: 'card__title'
@@ -378,17 +386,92 @@ function createCardElement(cardData) {
         showCardEditModal(cardData);
     });
     card.appendChild(editBtn);
-    
+
+    // Card context menu (mistake tracking)
+    const menuBtn = createElement('button', {
+        className: 'card__menu-btn',
+        innerHTML: Icons.moreHorizontal
+    });
+    menuBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showCardMenu(e, cardData);
+    });
+    card.appendChild(menuBtn);
+
     // Click to open card detail
     card.addEventListener('click', () => showCardEditModal(cardData));
-    
+
     return card;
+}
+
+/**
+ * Show a card's context menu (currently: mistake-tracking toggle)
+ */
+function showCardMenu(event, cardData) {
+    const existing = $('.context-menu');
+    if (existing) existing.remove();
+
+    const menu = createElement('div', { className: 'context-menu' });
+
+    if (!cardData.is_mistake) {
+        const markItem = createElement('div', {
+            className: 'context-menu__item',
+            innerHTML: `${Icons.alertTriangle} <span>Отметить как ошибку</span>`
+        });
+        markItem.addEventListener('click', async () => {
+            try {
+                await api.markCardMistake(cardData.id);
+                menu.remove();
+                renderBoard(currentBoardId);
+                showToast('Карточка отмечена как ошибка');
+            } catch (e) {
+                showToast('Ошибка операции', 'error');
+            }
+        });
+        menu.appendChild(markItem);
+    } else if (!cardData.mistake_resolved_at) {
+        const resolveItem = createElement('div', {
+            className: 'context-menu__item',
+            innerHTML: `${Icons.checkCircle} <span>Ошибка исправлена</span>`
+        });
+        resolveItem.addEventListener('click', async () => {
+            try {
+                await api.resolveCardMistake(cardData.id);
+                menu.remove();
+                renderBoard(currentBoardId);
+                showToast('Ошибка отмечена как исправленная');
+            } catch (e) {
+                showToast('Ошибка операции', 'error');
+            }
+        });
+        menu.appendChild(resolveItem);
+    } else {
+        menu.appendChild(createElement('div', {
+            className: 'context-menu__item context-menu__item--info',
+            innerHTML: `${Icons.checkCircle} <span>Ошибка уже исправлена</span>`
+        }));
+    }
+
+    const rect = event.currentTarget.getBoundingClientRect();
+    menu.style.top = `${rect.bottom + 4}px`;
+    menu.style.left = `${rect.left}px`;
+
+    document.body.appendChild(menu);
+
+    const closeMenu = (e) => {
+        if (!menu.contains(e.target)) {
+            menu.remove();
+            document.removeEventListener('click', closeMenu);
+        }
+    };
+    setTimeout(() => document.addEventListener('click', closeMenu), 0);
 }
 
 /**
  * Show card edit modal
  */
-function showCardEditModal(cardData) {
+export function showCardEditModal(cardData, options = {}) {
+    const onChange = options.onChange || (() => renderBoard(currentBoardId));
     const existing = $('.modal-overlay');
     if (existing) existing.remove();
     
@@ -453,7 +536,7 @@ function showCardEditModal(cardData) {
     archiveBtn.addEventListener('click', async () => {
         await api.archiveCard(cardData.id);
         overlay.remove();
-        renderBoard(currentBoardId);
+        onChange();
         showToast('Карточка архивирована');
     });
     footer.appendChild(archiveBtn);
@@ -467,7 +550,7 @@ function showCardEditModal(cardData) {
         const dueDate = dueInput.value || null;
         await api.updateCard(cardData.id, title, descInput.value, dueDate);
         overlay.remove();
-        renderBoard(currentBoardId);
+        onChange();
         showToast('Карточка обновлена');
     });
     footer.appendChild(saveBtn);
@@ -675,8 +758,8 @@ function initSortable() {
                 const newPosition = evt.newIndex;
                 
                 try {
-                    await api.moveCard(cardId, newColumnId, newPosition);
-                    
+                    await api.updateCardPosition(cardId, newColumnId, newPosition);
+
                     // Update card counts
                     updateCardCounts();
                 } catch (e) {
