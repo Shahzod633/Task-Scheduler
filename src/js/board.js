@@ -10,6 +10,9 @@ let currentBoardId = null;
 let columnsData = [];
 let columnSortable = null;
 let cardSortables = [];
+// Set while a card drag is in flight, so the click that ends a drag gesture
+// doesn't also open the card modal.
+let isDraggingCard = false;
 
 /**
  * Initialize board view for a given board
@@ -399,7 +402,10 @@ function createCardElement(cardData) {
     card.appendChild(menuBtn);
 
     // Click to open card detail
-    card.addEventListener('click', () => showCardEditModal(cardData));
+    card.addEventListener('click', () => {
+        if (isDraggingCard) return;
+        showCardEditModal(cardData);
+    });
 
     return card;
 }
@@ -726,11 +732,19 @@ function initSortable() {
     // Column drag-and-drop
     columnSortable = new Sortable(boardEl, {
         animation: 200,
+        easing: 'cubic-bezier(0.2, 0, 0, 1)',
+        swapThreshold: 0.65,
+        fallbackTolerance: 3,
         handle: '.column__header',
         draggable: '.column',
         ghostClass: 'sortable-ghost',
         chosenClass: 'sortable-chosen',
         filter: '.add-column',
+        // See the note on the card Sortable below — the WebView2 host makes
+        // native HTML5 drag unreliable, so drive drags from pointer events.
+        forceFallback: true,
+        fallbackOnBody: true,
+        fallbackClass: 'sortable-fallback',
         onEnd: async (evt) => {
             const columnEls = $$('.column', boardEl);
             const columnIds = columnEls.map(el => parseInt(el.dataset.columnId));
@@ -748,15 +762,56 @@ function initSortable() {
         const sortable = new Sortable(list, {
             group: 'cards',
             animation: 200,
+            // Sortable animates the neighbouring cards itself, writing an
+            // inline `transition: transform 200ms <easing>` on each one, so
+            // this easing is what actually smooths them apart (not any CSS
+            // transition on .card — see the note in board.css).
+            easing: 'cubic-bezier(0.2, 0, 0, 1)',
+            // A card must cover 65% of a neighbour before they swap, which
+            // stops the list flickering on tiny mouse movements.
+            swapThreshold: 0.65,
+            // Ignore sub-pixel jitter so a click isn't read as a drag.
+            fallbackTolerance: 3,
             draggable: '.card',
             ghostClass: 'sortable-ghost',
             chosenClass: 'sortable-chosen',
             dragClass: 'sortable-drag',
+            // Tauri's webview intercepts native HTML5 drag-and-drop on Windows
+            // (hence dragDropEnabled: false in tauri.conf.json). forceFallback
+            // makes Sortable drive the drag from pointer events instead, so it
+            // no longer depends on the host webview's HTML5 DnD at all.
+            forceFallback: true,
+            // The drag clone must live on <body>: .column__cards scrolls and the
+            // content area is overflow:hidden, which would otherwise clip it.
+            fallbackOnBody: true,
+            fallbackClass: 'sortable-fallback',
+            onStart: (evt) => {
+                isDraggingCard = true;
+                // Suppresses the cards' hover transform for the duration of the
+                // drag, so it can't fight Sortable's inline transforms.
+                document.body.classList.add('is-dragging-card');
+                evt.from.classList.add('sortable-drag-over');
+            },
+            // Highlight the column the card is currently hovering over — with
+            // empty columns this is the only cue that a drop will land there.
+            onMove: (evt) => {
+                clearDropHighlight();
+                if (evt.to) evt.to.classList.add('sortable-drag-over');
+                return true;
+            },
             onEnd: async (evt) => {
+                clearDropHighlight();
+                document.body.classList.remove('is-dragging-card');
+                // Let the trailing click land before re-enabling card clicks.
+                setTimeout(() => { isDraggingCard = false; }, 0);
+
                 const cardId = parseInt(evt.item.dataset.cardId);
                 const newColumnId = parseInt(evt.to.dataset.columnId);
                 const newPosition = evt.newIndex;
-                
+
+                // Dropped back where it started — nothing to persist.
+                if (evt.to === evt.from && evt.newIndex === evt.oldIndex) return;
+
                 try {
                     await api.updateCardPosition(cardId, newColumnId, newPosition);
 
@@ -764,12 +819,20 @@ function initSortable() {
                     updateCardCounts();
                 } catch (e) {
                     console.error('Failed to move card:', e);
+                    showToast('Не удалось переместить карточку', 'error');
                     renderBoard(currentBoardId);
                 }
             }
         });
         cardSortables.push(sortable);
     }
+}
+
+/**
+ * Remove the drop-target highlight from every column
+ */
+function clearDropHighlight() {
+    $$('.column__cards').forEach(el => el.classList.remove('sortable-drag-over'));
 }
 
 /**

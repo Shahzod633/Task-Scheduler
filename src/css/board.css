@@ -131,7 +131,9 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-sm);
-    min-height: 2px;
+    /* Keeps an empty column a usable drop target for drag-and-drop —
+       at 2px it was effectively impossible to drop a card into. */
+    min-height: 56px;
 }
 
 .column__cards::-webkit-scrollbar {
@@ -148,10 +150,22 @@
     background: var(--bg-card);
     border-radius: var(--radius-md);
     padding: var(--space-sm) var(--space-md);
-    cursor: pointer;
-    transition: all var(--transition-fast);
+    cursor: grab;
+    /* Deliberately NOT `all`, and deliberately no `transform`: Sortable
+       animates reordering by jump-setting an inline transform with the
+       transition cleared, then transitioning it back. A stylesheet
+       transition on transform makes that jump animate too, which is what
+       produces the jerky double-movement. Sortable's own `animation` +
+       `easing` options are what smooth the reorder. */
+    transition: background var(--transition-fast),
+                border-color var(--transition-fast),
+                box-shadow var(--transition-fast);
     border: 1px solid transparent;
     position: relative;
+}
+
+.card:active {
+    cursor: grabbing;
 }
 
 .card:hover {
@@ -161,19 +175,74 @@
     transform: translateY(-1px);
 }
 
-/* Card being dragged */
-.card.sortable-ghost {
-    opacity: 0.4;
-    transform: rotate(3deg);
+/* ─── Drag-and-drop states ───────────────────────────────────────────────
+   How Sortable assigns these (verified against js/lib/Sortable.min.js, in
+   forceFallback mode — the two elements are NOT the same node):
+
+   • the card left behind in the list  → .sortable-ghost + .sortable-chosen
+     (both at once, so they must describe ONE look: the drop placeholder)
+   • the clone following the cursor    → .sortable-fallback + .sortable-drag
+
+   On the clone Sortable writes `transform`, `opacity`, `top/left/width/
+   height`, `position`, `z-index` and `pointer-events` as INLINE styles and
+   rewrites `transform` on every mousemove — that transform is what moves it.
+   So a CSS `transform` here is silently ignored (and forcing it with
+   !important would pin the clone in place and break dragging outright).
+   Only non-inlined properties are ours to style: shadow, background,
+   border, radius. Hence the depth cue below is shadow/border, not a tilt. */
+
+/* Placeholder showing where the card will land */
+.card.sortable-ghost,
+.card.sortable-ghost.sortable-chosen {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1.5px dashed rgba(255, 255, 255, 0.25);
+    box-shadow: none;
+    opacity: 0.5;
 }
 
-.card.sortable-chosen {
-    box-shadow: var(--shadow-lg);
-    border-color: var(--accent-color);
+/* Keep the placeholder a clean outline: hide its contents and hover chrome */
+.card.sortable-ghost > * {
+    opacity: 0;
 }
 
+.card.sortable-ghost .card__edit-btn,
+.card.sortable-ghost .card__menu-btn {
+    display: none;
+}
+
+/* The clone that follows the cursor — re-parented to <body>, so it needs its
+   own opaque background; the deep shadow is what reads as "lifted". */
+.card.sortable-fallback,
 .card.sortable-drag {
-    box-shadow: var(--shadow-xl);
+    background: var(--bg-column);
+    border: 1px solid var(--accent-color);
+    border-radius: var(--radius-md);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
+}
+
+.card.sortable-fallback .card__edit-btn,
+.card.sortable-fallback .card__menu-btn {
+    display: none;
+}
+
+/* Highlight the column a card is currently hovering over */
+.column__cards.sortable-drag-over {
+    background: var(--accent-light);
+    border-radius: var(--radius-md);
+    transition: background var(--transition-fast);
+}
+
+/* While dragging, the hover lift must not fight Sortable's inline transforms */
+body.is-dragging-card .card:hover {
+    transform: none;
+    box-shadow: var(--shadow-card);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .card,
+    .column__cards.sortable-drag-over {
+        transition: none;
+    }
 }
 
 /* ─── Card Labels ─── */
