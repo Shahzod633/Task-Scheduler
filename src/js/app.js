@@ -90,9 +90,9 @@ function renderLayout() {
     app.innerHTML = `
         <!-- Header -->
         <header class="header" id="app-header">
-            <div class="header__logo" id="header-logo">
+            <div class="header__logo" id="header-logo" data-tooltip="На главную">
                 <span class="header__logo-icon">${Icons.logo}</span>
-                <span class="header__logo-text">TaskFlow</span>
+                <span class="header__logo-text">Task<span class="header__logo-accent">Flow</span></span>
             </div>
 
             <nav class="header__nav">

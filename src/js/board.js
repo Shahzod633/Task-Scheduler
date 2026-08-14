@@ -4,7 +4,7 @@
 
 import * as api from './api.js';
 import Icons from './icons.js';
-import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDate, isOverdue } from './utils.js';
+import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDate, isOverdue, staggerIn } from './utils.js';
 
 let currentBoardId = null;
 let columnsData = [];
@@ -41,20 +41,20 @@ export async function renderBoard(boardId) {
         // Kanban board
         const boardEl = createElement('div', { className: 'board', id: 'board-columns' });
         
-        // Render columns
-        for (const col of columnsData) {
-            boardEl.appendChild(createColumnElement(col));
-        }
-        
+        // Render columns — каскадом, чтобы доска «собиралась» слева направо
+        columnsData.forEach((col, i) => {
+            boardEl.appendChild(staggerIn(createColumnElement(col), i));
+        });
+
         // Add column button
-        boardEl.appendChild(createAddColumnElement());
+        boardEl.appendChild(staggerIn(createAddColumnElement(), columnsData.length));
         
         content.appendChild(boardEl);
         
         // Initialize Sortable.js
         initSortable();
         
-        setTimeout(() => content.classList.remove('view-enter'), 250);
+        setTimeout(() => content.classList.remove('view-enter'), 420);
     } catch (error) {
         console.error('Error loading board:', error);
         showToast('Ошибка загрузки доски', 'error');
@@ -737,6 +737,10 @@ function initSortable() {
         fallbackTolerance: 3,
         handle: '.column__header',
         draggable: '.column',
+        // Автопрокрутка доски, когда колонку тянут к её краю
+        scroll: true,
+        scrollSensitivity: 90,
+        scrollSpeed: 14,
         ghostClass: 'sortable-ghost',
         chosenClass: 'sortable-chosen',
         filter: '.add-column',
@@ -773,6 +777,12 @@ function initSortable() {
             // Ignore sub-pixel jitter so a click isn't read as a drag.
             fallbackTolerance: 3,
             draggable: '.card',
+            // Карточку можно донести до края доски или списка — вид
+            // подкручивается сам, без отпускания кнопки мыши.
+            scroll: true,
+            scrollSensitivity: 90,
+            scrollSpeed: 14,
+            bubbleScroll: true,
             ghostClass: 'sortable-ghost',
             chosenClass: 'sortable-chosen',
             dragClass: 'sortable-drag',
@@ -787,8 +797,8 @@ function initSortable() {
             fallbackClass: 'sortable-fallback',
             onStart: (evt) => {
                 isDraggingCard = true;
-                // Suppresses the cards' hover transform for the duration of the
-                // drag, so it can't fight Sortable's inline transforms.
+                // Гасит hover-подсветку карточек на время перетаскивания,
+                // чтобы она не спорила с инлайновыми стилями Sortable.
                 document.body.classList.add('is-dragging-card');
                 evt.from.classList.add('sortable-drag-over');
             },

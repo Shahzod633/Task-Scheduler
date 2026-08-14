@@ -1,112 +1,181 @@
 /* ============================================
-   TaskFlow Design System — CSS Variables
+   TaskFlow Design System — Design Tokens
+   --------------------------------------------
+   Тёмная тема «graphite + indigo»: глубокая
+   многослойная база, стеклянные поверхности,
+   единая система движения (motion tokens).
    ============================================ */
 
 :root {
-    /* ─── Accent Color (easily customizable) ─── */
-    --accent-color: #0079bf;
-    --accent-hover: #026aa7;
-    --accent-light: rgba(0, 121, 191, 0.15);
-    --accent-glow: rgba(0, 121, 191, 0.4);
+    /* ─── Accent Ramp ─── */
+    --accent-100: #ded9ff;
+    --accent-300: #a99dff;
+    --accent-400: #8b7bff;
+    --accent-500: #6c5cff;
+    --accent-600: #5a48f0;
+    --accent-700: #4a39d6;
 
-    /* ─── Background Colors ─── */
-    --bg-primary: #181a1f;
-    --bg-secondary: #1d1f24;
-    --bg-sidebar: #151719;
-    --bg-card: rgba(255, 255, 255, 0.06);
-    --bg-card-hover: rgba(255, 255, 255, 0.1);
-    --bg-column: #22252a;
-    --bg-input: rgba(255, 255, 255, 0.08);
-    --bg-input-focus: rgba(255, 255, 255, 0.12);
-    --bg-overlay: rgba(0, 0, 0, 0.6);
-    --bg-dock: rgba(30, 33, 38, 0.85);
+    --accent-color: var(--accent-500);
+    --accent-hover: var(--accent-400);
+    --accent-active: var(--accent-600);
+    --accent-light: rgba(108, 92, 255, 0.16);
+    --accent-soft: rgba(108, 92, 255, 0.10);
+    --accent-glow: rgba(108, 92, 255, 0.45);
+    --accent-border: rgba(108, 92, 255, 0.42);
+    --accent-gradient: linear-gradient(135deg, #7c6bff 0%, #b45cff 100%);
+    --accent-gradient-soft: linear-gradient(135deg, rgba(124, 107, 255, 0.18), rgba(180, 92, 255, 0.14));
 
-    /* ─── Text Colors ─── */
-    --text-primary: #ffffff;
-    --text-secondary: #9fadbc;
-    --text-muted: #6b7a8d;
-    --text-placeholder: #5a6577;
+    /* ─── Background Layers ─── */
+    --bg-base: #0a0c11;
+    --bg-primary: #0d1016;
+    --bg-secondary: #12161e;
+    --bg-sidebar: #0b0e14;
+    --bg-elevated: #171c26;
+    --bg-column: #141922;
+    --bg-overlay: rgba(6, 8, 12, 0.68);
 
-    /* ─── Border Colors ─── */
-    --border-default: rgba(255, 255, 255, 0.08);
-    --border-hover: rgba(255, 255, 255, 0.15);
-    --border-active: var(--accent-color);
+    /* Стеклянные поверхности (поверх фоновых слоёв) */
+    --bg-glass: rgba(20, 25, 34, 0.72);
+    --bg-glass-strong: rgba(23, 28, 38, 0.88);
+    --bg-dock: rgba(20, 25, 34, 0.74);
 
-    /* ─── Status Colors ─── */
-    --color-success: #61bd4f;
-    --color-warning: #f2d600;
-    --color-danger: #eb5a46;
-    --color-info: #00c2e0;
+    /* Плоские поверхности карточек/полей */
+    --bg-card: rgba(255, 255, 255, 0.045);
+    --bg-card-hover: rgba(255, 255, 255, 0.085);
+    --bg-card-active: rgba(255, 255, 255, 0.12);
+    --bg-input: rgba(255, 255, 255, 0.05);
+    --bg-input-focus: rgba(255, 255, 255, 0.09);
+
+    /* ─── Text ─── */
+    --text-primary: #eef1f7;
+    --text-secondary: #9aa5b8;
+    --text-muted: #6a7488;
+    --text-placeholder: #566073;
+    --text-on-accent: #ffffff;
+
+    /* ─── Borders ─── */
+    --border-default: rgba(255, 255, 255, 0.07);
+    --border-subtle: rgba(255, 255, 255, 0.045);
+    --border-hover: rgba(255, 255, 255, 0.14);
+    --border-strong: rgba(255, 255, 255, 0.2);
+    --border-active: var(--accent-border);
+    /* Верхняя световая грань — даёт поверхностям объём */
+    --highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+
+    /* ─── Status ─── */
+    --color-success: #3ecf8e;
+    --color-warning: #ffc94d;
+    --color-danger: #f4685f;
+    --color-info: #45c8e8;
+
+    --success-soft: rgba(62, 207, 142, 0.14);
+    --warning-soft: rgba(255, 201, 77, 0.14);
+    --danger-soft: rgba(244, 104, 95, 0.14);
+    --danger-soft-hover: rgba(244, 104, 95, 0.24);
+    --info-soft: rgba(69, 200, 232, 0.14);
 
     /* ─── Label Colors ─── */
-    --label-green: #61bd4f;
-    --label-yellow: #f2d600;
-    --label-orange: #ff9f1a;
-    --label-red: #eb5a46;
-    --label-purple: #c377e0;
-    --label-blue: #0079bf;
-    --label-sky: #00c2e0;
-    --label-lime: #51e898;
-    --label-pink: #ff78cb;
-    --label-black: #344563;
+    --label-green: #4cc38a;
+    --label-yellow: #f5cf5b;
+    --label-orange: #ff9f45;
+    --label-red: #f4685f;
+    --label-purple: #b07df0;
+    --label-blue: #5b8def;
+    --label-sky: #45c8e8;
+    --label-lime: #63e6a1;
+    --label-pink: #ff7ec8;
+    --label-black: #3b4557;
 
-    /* ─── Gradients for Board Previews ─── */
-    --gradient-1: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    --gradient-2: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-    --gradient-3: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-    --gradient-4: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
-    --gradient-5: linear-gradient(135deg, #fa709a 0%, #fee140 100%);
-    --gradient-6: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%);
-    --gradient-7: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
-    --gradient-8: linear-gradient(135deg, #89f7fe 0%, #66a6ff 100%);
+    /* ─── Обложки досок ─── */
+    --gradient-1: linear-gradient(135deg, #6c5cff 0%, #b45cff 100%);
+    --gradient-2: linear-gradient(135deg, #f0567a 0%, #ff9f45 100%);
+    --gradient-3: linear-gradient(135deg, #2f8bff 0%, #45e0e0 100%);
+    --gradient-4: linear-gradient(135deg, #12b981 0%, #7ee7a3 100%);
+    --gradient-5: linear-gradient(135deg, #ff5f8f 0%, #ffc94d 100%);
+    --gradient-6: linear-gradient(135deg, #8b5cf6 0%, #ec7fd0 100%);
+    --gradient-7: linear-gradient(135deg, #f97362 0%, #ffb37a 100%);
+    --gradient-8: linear-gradient(135deg, #3b6dff 0%, #7bb8ff 100%);
 
-    /* ─── Border Radius ─── */
-    --radius-xs: 3px;
-    --radius-sm: 4px;
-    --radius-md: 8px;
-    --radius-lg: 12px;
-    --radius-xl: 16px;
+    /* ─── Radius ─── */
+    --radius-xs: 4px;
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 20px;
+    --radius-2xl: 28px;
     --radius-round: 50%;
+    --radius-pill: 999px;
 
     /* ─── Spacing ─── */
+    --space-2xs: 2px;
     --space-xs: 4px;
     --space-sm: 8px;
     --space-md: 12px;
     --space-lg: 16px;
     --space-xl: 24px;
     --space-2xl: 32px;
+    --space-3xl: 48px;
 
     /* ─── Typography ─── */
-    --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    --font-family: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Inter, 'Helvetica Neue', sans-serif;
+    --font-display: 'Segoe UI Variable Display', 'Segoe UI Variable Text', 'Segoe UI', -apple-system, Inter, sans-serif;
+    --font-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', monospace;
+
     --font-size-xs: 11px;
     --font-size-sm: 12px;
     --font-size-md: 14px;
     --font-size-lg: 16px;
-    --font-size-xl: 18px;
-    --font-size-2xl: 24px;
-    --font-size-3xl: 32px;
+    --font-size-xl: 19px;
+    --font-size-2xl: 25px;
+    --font-size-3xl: 34px;
+
     --font-weight-normal: 400;
     --font-weight-medium: 500;
     --font-weight-semibold: 600;
     --font-weight-bold: 700;
 
-    /* ─── Shadows ─── */
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
-    --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.5);
-    --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.2);
-    --shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.35);
-    --shadow-dock: 0 -4px 24px rgba(0, 0, 0, 0.4);
+    --tracking-tight: -0.02em;
+    --tracking-normal: 0;
+    --tracking-wide: 0.04em;
+    --tracking-caps: 0.08em;
 
-    /* ─── Transitions ─── */
-    --transition-fast: 0.15s ease;
-    --transition-normal: 0.25s ease;
-    --transition-slow: 0.4s ease;
+    /* ─── Elevation ─── */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.3), 0 8px 20px -8px rgba(0, 0, 0, 0.5);
+    --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.32), 0 18px 40px -14px rgba(0, 0, 0, 0.6);
+    --shadow-xl: 0 8px 20px rgba(0, 0, 0, 0.35), 0 32px 72px -20px rgba(0, 0, 0, 0.75);
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.28);
+    --shadow-card-hover: 0 2px 6px rgba(0, 0, 0, 0.3), 0 10px 24px -12px rgba(0, 0, 0, 0.6);
+    --shadow-dock: 0 2px 8px rgba(0, 0, 0, 0.3), 0 20px 48px -16px rgba(0, 0, 0, 0.7);
+    --shadow-accent: 0 4px 16px -4px var(--accent-glow);
+    --shadow-focus: 0 0 0 3px var(--accent-light);
+
+    /* ─── Motion ─── */
+    /* Кривые: плавный выход, симметричная и «пружина» для появления */
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+    --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+    --ease-swift: cubic-bezier(0.4, 0, 0.2, 1);
+
+    --duration-1: 120ms;
+    --duration-2: 180ms;
+    --duration-3: 260ms;
+    --duration-4: 380ms;
+    --duration-5: 560ms;
+
+    --transition-fast: var(--duration-1) var(--ease-out);
+    --transition-normal: var(--duration-3) var(--ease-out);
+    --transition-slow: var(--duration-4) var(--ease-out);
+    --transition-spring: var(--duration-4) var(--ease-spring);
+
+    /* Шаг задержки для каскадного появления элементов */
+    --stagger-step: 34ms;
 
     /* ─── Layout ─── */
-    --header-height: 48px;
-    --sidebar-width: 260px;
-    --column-width: 272px;
-    --dock-height: 52px;
+    --header-height: 52px;
+    --sidebar-width: 264px;
+    --column-width: 288px;
+    --dock-height: 56px;
+
+    --blur-glass: 22px;
 }

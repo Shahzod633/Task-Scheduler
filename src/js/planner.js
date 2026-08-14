@@ -40,7 +40,7 @@ export async function renderPlannerPage(workspaceId) {
     page.appendChild(grid);
 
     content.appendChild(page);
-    setTimeout(() => content.classList.remove('view-enter'), 250);
+    setTimeout(() => content.classList.remove('view-enter'), 420);
 
     prevBtn.addEventListener('click', () => { shiftMonth(-1); renderPlannerPage(workspaceId); });
     nextBtn.addEventListener('click', () => { shiftMonth(1); renderPlannerPage(workspaceId); });

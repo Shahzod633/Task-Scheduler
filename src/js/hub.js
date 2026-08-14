@@ -5,7 +5,7 @@
 import * as api from './api.js';
 import Icons from './icons.js';
 import { TEMPLATE_DEFS, createBoardFromTemplate } from './templates.js';
-import { createElement, $, $$, showToast, debounce, getRandomGradient, getGradients, escapeHtml } from './utils.js';
+import { createElement, $, $$, showToast, debounce, getRandomGradient, getGradients, escapeHtml, staggerIn } from './utils.js';
 
 let currentWorkspaceId = null;
 let showTemplates = true;
@@ -55,7 +55,7 @@ export async function renderHub(workspaceId) {
     }
     
     content.appendChild(hub);
-    setTimeout(() => content.classList.remove('view-enter'), 250);
+    setTimeout(() => content.classList.remove('view-enter'), 420);
 }
 
 /**
@@ -151,8 +151,9 @@ function createTemplatesSection() {
     
     const grid = createElement('div', { className: 'hub__templates-grid' });
 
-    for (const name of Object.keys(TEMPLATE_DEFS)) {
+    Object.keys(TEMPLATE_DEFS).forEach((name, i) => {
         const card = createElement('div', { className: 'hub__template-card' });
+        staggerIn(card, i);
         card.appendChild(createElement('span', { className: 'hub__template-name' }, name));
         card.appendChild(createElement('span', {
             className: 'hub__template-icon',
@@ -162,7 +163,7 @@ function createTemplatesSection() {
             await createBoardFromTemplate(currentWorkspaceId, name);
         });
         grid.appendChild(card);
-    }
+    });
 
     section.appendChild(grid);
     return section;
@@ -185,26 +186,29 @@ function createBoardsSection(boards) {
     const grid = createElement('div', { className: 'hub__boards-grid', id: 'boards-grid' });
     
     // Board cards
-    for (const board of boards) {
-        grid.appendChild(createBoardCard(board));
-    }
-    
+    boards.forEach((board, i) => {
+        grid.appendChild(createBoardCard(board, i));
+    });
+
     // Create board card
-    grid.appendChild(createNewBoardCard());
+    grid.appendChild(createNewBoardCard(boards.length));
     
     section.appendChild(grid);
     return section;
 }
 
 /**
- * Create a board card
+ * Create a board card.
+ * @param {object} board
+ * @param {number} index - позиция в сетке; задаёт задержку каскадного появления
  */
-export function createBoardCard(board) {
+export function createBoardCard(board, index = 0) {
     const card = createElement('div', {
         className: 'hub__board-card',
         style: { background: board.gradient },
         dataset: { boardId: board.id }
     });
+    staggerIn(card, index);
     
     card.appendChild(createElement('span', { className: 'hub__board-name' }, board.name));
     
@@ -235,11 +239,12 @@ export function createBoardCard(board) {
 /**
  * Create the "new board" card
  */
-function createNewBoardCard() {
+function createNewBoardCard(index = 0) {
     const card = createElement('div', {
         className: 'hub__create-board',
         id: 'create-board-btn'
     });
+    staggerIn(card, index);
     
     card.appendChild(createElement('span', {
         className: 'hub__create-board-icon',

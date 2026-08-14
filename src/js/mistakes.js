@@ -45,7 +45,7 @@ export async function renderMistakesPage(workspaceId) {
     page.appendChild(listSection);
 
     content.appendChild(page);
-    setTimeout(() => content.classList.remove('view-enter'), 250);
+    setTimeout(() => content.classList.remove('view-enter'), 420);
 
     try {
         const cards = await api.getMistakeCards(workspaceId);

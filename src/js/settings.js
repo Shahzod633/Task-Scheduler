@@ -67,7 +67,7 @@ export async function renderSettingsPage(workspaceId) {
     page.appendChild(profileCard);
 
     content.appendChild(page);
-    setTimeout(() => content.classList.remove('view-enter'), 250);
+    setTimeout(() => content.classList.remove('view-enter'), 420);
 
     renderProfileFields(profileCard);
 }

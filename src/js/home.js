@@ -33,7 +33,7 @@ export async function renderHomePage(workspaceId) {
 
     page.appendChild(widgets);
     content.appendChild(page);
-    setTimeout(() => content.classList.remove('view-enter'), 250);
+    setTimeout(() => content.classList.remove('view-enter'), 420);
 
     // Recent boards
     try {
@@ -42,7 +42,7 @@ export async function renderHomePage(workspaceId) {
             recentWidget.appendChild(createElement('p', { className: 'page__empty' }, 'Пока нет открытых досок'));
         } else {
             const grid = createElement('div', { className: 'home-widget__boards' });
-            for (const board of boards) grid.appendChild(createBoardCard(board));
+            boards.forEach((board, i) => grid.appendChild(createBoardCard(board, i)));
             recentWidget.appendChild(grid);
         }
     } catch (e) {

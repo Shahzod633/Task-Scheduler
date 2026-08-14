@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none">
+    <defs>
+        <linearGradient id="tf-logo-fill" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#7C6BFF"/>
+            <stop offset="0.55" stop-color="#8E5CFF"/>
+            <stop offset="1" stop-color="#B45CFF"/>
+        </linearGradient>
+        <linearGradient id="tf-logo-sheen" x1="6" y1="2" x2="20" y2="18" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#fff" stop-opacity="0.28"/>
+            <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+        </linearGradient>
+    </defs>
+    <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#tf-logo-fill)"/>
+    <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#tf-logo-sheen)"/>
+    <path d="M9.4 11.6h8.2" stroke="#fff" stroke-opacity="0.55" stroke-width="2.2" stroke-linecap="round"/>
+    <path d="M9.4 19.2l3.4 3.4L23 12.4" stroke="#fff" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

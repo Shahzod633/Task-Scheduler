@@ -6,29 +6,30 @@
     position: fixed;
     bottom: var(--space-lg);
     left: 50%;
-    transform: translateX(-50%);
     z-index: 200;
     background: var(--bg-dock);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(var(--blur-glass)) saturate(160%);
+    -webkit-backdrop-filter: blur(var(--blur-glass)) saturate(160%);
     border: 1px solid var(--border-default);
-    border-radius: var(--radius-xl);
-    padding: var(--space-xs) var(--space-md);
+    border-radius: var(--radius-2xl);
+    padding: var(--space-xs);
     display: flex;
     align-items: center;
-    gap: var(--space-xs);
-    box-shadow: var(--shadow-dock);
-    animation: dock-appear 0.3s ease-out;
+    gap: var(--space-2xs);
+    box-shadow: var(--shadow-dock), var(--highlight-top);
+    transform: translateX(-50%);
+    animation: dock-appear var(--duration-5) var(--ease-spring) both;
+    transition: transform var(--transition-normal), opacity var(--transition-normal);
 }
 
 @keyframes dock-appear {
     from {
         opacity: 0;
-        transform: translateX(-50%) translateY(20px);
+        transform: translateX(-50%) translateY(28px) scale(0.94);
     }
     to {
         opacity: 1;
-        transform: translateX(-50%) translateY(0);
+        transform: translateX(-50%) translateY(0) scale(1);
     }
 }
 
@@ -36,12 +37,12 @@
     display: flex;
     align-items: center;
     gap: var(--space-sm);
-    padding: var(--space-sm) var(--space-lg);
-    border-radius: var(--radius-md);
+    padding: 9px var(--space-lg);
+    border-radius: var(--radius-xl);
     color: var(--text-secondary);
     font-size: var(--font-size-sm);
-    font-weight: var(--font-weight-medium);
-    transition: all var(--transition-fast);
+    font-weight: var(--font-weight-semibold);
+    transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
     position: relative;
     white-space: nowrap;
 }
@@ -51,40 +52,49 @@
     color: var(--text-primary);
 }
 
-.dock__btn--active {
-    color: var(--text-primary);
-}
-
-/* Active indicator line */
-.dock__btn--active::after {
-    content: '';
-    position: absolute;
-    bottom: 2px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 20px;
-    height: 3px;
-    background: var(--accent-color);
-    border-radius: 2px;
-    box-shadow: 0 0 6px var(--accent-glow);
+.dock__btn:active {
+    transform: scale(0.95);
 }
 
 .dock__btn svg {
-    width: 18px;
-    height: 18px;
+    width: 17px;
+    height: 17px;
+    transition: transform var(--transition-spring);
+}
+
+.dock__btn:hover svg {
+    transform: translateY(-1px) scale(1.08);
+}
+
+/* ─── Активная кнопка ───────────────────────────────────────────────────
+   Кнопки дока компактные, поэтому активное состояние показываем заливкой-
+   пилюлей, а не подчёркиванием: линия под текстом на такой высоте
+   наезжала бы на подпись. */
+.dock__btn--active {
+    color: var(--accent-100);
+    background: var(--accent-light);
+    box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+
+.dock__btn--active svg {
+    color: var(--accent-300);
+}
+
+.dock__btn--active:hover {
+    background: var(--accent-light);
+    color: var(--accent-100);
 }
 
 .dock__separator {
     width: 1px;
-    height: 24px;
+    height: 22px;
     background: var(--border-default);
-    margin: 0 var(--space-xs);
+    margin: 0 var(--space-2xs);
 }
 
 /* ─── Dock hidden state ─── */
 .dock--hidden {
-    transform: translateX(-50%) translateY(100px);
+    transform: translateX(-50%) translateY(120px);
     opacity: 0;
     pointer-events: none;
-    transition: all var(--transition-normal);
 }

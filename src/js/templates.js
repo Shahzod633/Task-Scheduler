@@ -60,5 +60,5 @@ export async function renderTemplatesPage(workspaceId) {
     page.appendChild(grid);
 
     content.appendChild(page);
-    setTimeout(() => content.classList.remove('view-enter'), 250);
+    setTimeout(() => content.classList.remove('view-enter'), 420);
 }

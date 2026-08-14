@@ -27,7 +27,7 @@ export async function renderInboxPage(workspaceId) {
     page.appendChild(list);
 
     content.appendChild(page);
-    setTimeout(() => content.classList.remove('view-enter'), 250);
+    setTimeout(() => content.classList.remove('view-enter'), 420);
 
     let inboxColumnId = null;
     let boardOptions = [];

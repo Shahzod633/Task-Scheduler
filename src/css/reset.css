@@ -1,5 +1,5 @@
 /* ============================================
-   TaskFlow — CSS Reset
+   TaskFlow — CSS Reset & Base
    ============================================ */
 
 *, *::before, *::after {
@@ -15,10 +15,26 @@ html, body {
     font-family: var(--font-family);
     font-size: var(--font-size-md);
     color: var(--text-primary);
-    background-color: var(--bg-primary);
+    background-color: var(--bg-base);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
     line-height: 1.5;
+}
+
+/* Мягкое «атмосферное» свечение фона — даёт глубину плоскому тёмному UI */
+body {
+    background-image:
+        radial-gradient(1100px 620px at 8% -12%, rgba(108, 92, 255, 0.13), transparent 62%),
+        radial-gradient(900px 520px at 102% -6%, rgba(180, 92, 255, 0.09), transparent 58%),
+        radial-gradient(760px 480px at 50% 118%, rgba(69, 200, 232, 0.05), transparent 60%);
+    background-attachment: fixed;
+}
+
+h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    letter-spacing: var(--tracking-tight);
+    font-weight: var(--font-weight-semibold);
 }
 
 a {
@@ -38,9 +54,11 @@ button {
     border: none;
     cursor: pointer;
     outline: none;
+    /* Убирает 300мс-задержку подсветки и делает нажатия отзывчивее */
+    -webkit-tap-highlight-color: transparent;
 }
 
-input, textarea {
+input, textarea, select {
     font-family: inherit;
     font-size: inherit;
     color: inherit;
@@ -54,10 +72,10 @@ img, svg {
     max-width: 100%;
 }
 
-/* Scrollbar styling for dark theme */
+/* ─── Scrollbars ─── */
 ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 10px;
+    height: 10px;
 }
 
 ::-webkit-scrollbar-track {
@@ -65,22 +83,41 @@ img, svg {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.15);
-    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.10);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: var(--radius-pill);
+    transition: background-color var(--transition-fast);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.22);
+    background-clip: content-box;
 }
 
-/* Selection styling */
+::-webkit-scrollbar-corner {
+    background: transparent;
+}
+
+/* ─── Selection ─── */
 ::selection {
-    background: var(--accent-color);
+    background: var(--accent-light);
     color: var(--text-primary);
 }
 
-/* Focus styles */
+/* ─── Focus ─── */
 :focus-visible {
-    outline: 2px solid var(--accent-color);
+    outline: 2px solid var(--accent-400);
     outline-offset: 2px;
+    border-radius: var(--radius-xs);
+}
+
+/* ─── Глобальное уважение к «уменьшить движение» ─── */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
 }

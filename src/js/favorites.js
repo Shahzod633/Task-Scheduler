@@ -46,5 +46,5 @@ export async function renderFavoritesPage(workspaceId) {
     }
 
     content.appendChild(page);
-    setTimeout(() => content.classList.remove('view-enter'), 250);
+    setTimeout(() => content.classList.remove('view-enter'), 420);
 }

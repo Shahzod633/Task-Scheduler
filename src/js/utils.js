@@ -14,7 +14,15 @@ export function createElement(tag, attrs = {}, ...children) {
         } else if (key === 'innerHTML') {
             el.innerHTML = value;
         } else if (key === 'style' && typeof value === 'object') {
-            Object.assign(el.style, value);
+            for (const [prop, val] of Object.entries(value)) {
+                // Кастомные свойства (--foo) невидимы для присваивания через
+                // style.foo — их принимает только setProperty.
+                if (prop.startsWith('--')) {
+                    el.style.setProperty(prop, val);
+                } else {
+                    el.style[prop] = val;
+                }
+            }
         } else if (key.startsWith('on') && typeof value === 'function') {
             el.addEventListener(key.slice(2).toLowerCase(), value);
         } else if (key === 'dataset') {
@@ -90,15 +98,17 @@ export function debounce(fn, delay = 300) {
 /**
  * Generate a random gradient from the predefined set
  */
+// Обложки досок. Значения совпадают с --gradient-1…8 в css/variables.css;
+// хранятся строкой в БД, поэтому у уже созданных досок фон не меняется.
 const gradients = [
-    'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-    'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-    'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-    'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-    'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
-    'linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%)',
-    'linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)',
-    'linear-gradient(135deg, #89f7fe 0%, #66a6ff 100%)',
+    'linear-gradient(135deg, #6c5cff 0%, #b45cff 100%)',
+    'linear-gradient(135deg, #f0567a 0%, #ff9f45 100%)',
+    'linear-gradient(135deg, #2f8bff 0%, #45e0e0 100%)',
+    'linear-gradient(135deg, #12b981 0%, #7ee7a3 100%)',
+    'linear-gradient(135deg, #ff5f8f 0%, #ffc94d 100%)',
+    'linear-gradient(135deg, #8b5cf6 0%, #ec7fd0 100%)',
+    'linear-gradient(135deg, #f97362 0%, #ffb37a 100%)',
+    'linear-gradient(135deg, #3b6dff 0%, #7bb8ff 100%)',
 ];
 
 export function getRandomGradient() {
@@ -126,6 +136,36 @@ export function showToast(message, type = 'success') {
         toast.classList.add('toast--exit');
         setTimeout(() => toast.remove(), 300);
     }, 3000);
+}
+
+/**
+ * Каскадное появление элемента.
+ *
+ * Классы и CSS-переменная снимаются сразу после проигрывания: пока висит
+ * `.stagger-item`, у элемента остаётся анимационный `transform`, а он
+ * перебивает инлайновые стили, которыми Sortable.js двигает карточки и
+ * колонки при перетаскивании. Очистка гарантирует, что drag-and-drop не
+ * столкнётся с анимацией входа.
+ *
+ * @param {HTMLElement} el
+ * @param {number} index - позиция элемента; задаёт задержку
+ * @param {string} [variant] - доп. класс варианта, например 'stagger-item--pop'
+ */
+export function staggerIn(el, index = 0, variant = '') {
+    el.classList.add('stagger-item');
+    if (variant) el.classList.add(variant);
+    el.style.setProperty('--stagger', index);
+
+    el.addEventListener('animationend', function onEnd(e) {
+        // Событие всплывает от потомков — реагируем только на свою анимацию
+        if (e.target !== el) return;
+        el.removeEventListener('animationend', onEnd);
+        el.classList.remove('stagger-item');
+        if (variant) el.classList.remove(variant);
+        el.style.removeProperty('--stagger');
+    });
+
+    return el;
 }
 
 /**

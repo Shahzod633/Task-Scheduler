@@ -1,0 +1,99 @@
+/* ============================================
+   TaskFlow — Motion Layer
+   --------------------------------------------
+   Все keyframes приложения в одном месте плюс
+   утилиты каскадного появления (stagger).
+   Правило: анимируем только opacity / transform /
+   filter — эти свойства идут по GPU и не вызывают
+   layout-пересчёт, поэтому UI остаётся плавным.
+   ============================================ */
+
+/* ─── Базовые keyframes ─── */
+@keyframes fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+@keyframes rise-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes rise-in-sm {
+    from { opacity: 0; transform: translateY(5px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+    from { opacity: 0; transform: scale(0.96) translateY(8px); }
+    to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+@keyframes slide-in-right {
+    from { opacity: 0; transform: translateX(32px) scale(0.98); }
+    to   { opacity: 1; transform: translateX(0) scale(1); }
+}
+
+@keyframes slide-out-right {
+    to { opacity: 0; transform: translateX(32px) scale(0.98); }
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes rotate-gradient {
+    to { transform: rotate(360deg); }
+}
+
+/* Мягкая «дышащая» пульсация — индикаторы и бейджи */
+@keyframes pulse-soft {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.65; transform: scale(0.88); }
+}
+
+/* Бегущий блик для скелетонов/загрузки */
+@keyframes shimmer {
+    from { background-position: -180% 0; }
+    to   { background-position: 180% 0; }
+}
+
+/* ─── Переход между экранами ─── */
+.view-enter {
+    animation: rise-in var(--duration-4) var(--ease-out) both;
+}
+
+/* ─── Каскадное появление ───────────────────────────────────────────────
+   Элемент получает --stagger (индекс) из JS; задержка вычисляется здесь,
+   поэтому в разметке нет инлайновых значений времени. Потолок в 12 шагов
+   не даёт длинным спискам появляться «бесконечно». */
+.stagger-item {
+    animation: rise-in var(--duration-4) var(--ease-out) both;
+    animation-delay: calc(min(var(--stagger, 0), 12) * var(--stagger-step));
+}
+
+.stagger-item--pop {
+    animation-name: scale-in;
+    animation-timing-function: var(--ease-spring);
+}
+
+/* ─── Утилиты ─── */
+.animate-fade-in { animation: fade-in var(--duration-3) var(--ease-out) both; }
+.animate-rise-in { animation: rise-in var(--duration-3) var(--ease-out) both; }
+.animate-pop-in  { animation: scale-in var(--duration-4) var(--ease-spring) both; }
+
+/* Микро-отклик на нажатие: применяется к любому интерактивному элементу */
+.press-effect {
+    transition: transform var(--duration-1) var(--ease-out);
+}
+
+.press-effect:active {
+    transform: scale(0.97);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .stagger-item,
+    .view-enter {
+        animation-delay: 0ms !important;
+    }
+}

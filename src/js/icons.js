@@ -3,9 +3,33 @@
 // ============================================
 
 const Icons = {
-    logo: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="3" y="3" width="7" height="21" rx="1.5"/>
-        <rect x="14" y="3" width="7" height="13" rx="1.5"/>
+    /* Логотип TaskFlow: строка задачи, превращающаяся в галочку с «потоком».
+       Градиент живёт внутри самого SVG, поэтому знак одинаково выглядит на
+       любом фоне и не зависит от currentColor. */
+    logo: `<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+            <linearGradient id="tf-logo-fill" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stop-color="#7C6BFF"/>
+                <stop offset="0.55" stop-color="#8E5CFF"/>
+                <stop offset="1" stop-color="#B45CFF"/>
+            </linearGradient>
+            <linearGradient id="tf-logo-sheen" x1="6" y1="2" x2="20" y2="18" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stop-color="#fff" stop-opacity="0.28"/>
+                <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+            </linearGradient>
+        </defs>
+        <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#tf-logo-fill)"/>
+        <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#tf-logo-sheen)"/>
+        <path d="M9.4 11.6h8.2" stroke="#fff" stroke-opacity="0.55" stroke-width="2.2" stroke-linecap="round"/>
+        <path d="M9.4 19.2l3.4 3.4L23 12.4" stroke="#fff" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>`,
+
+    /* Монохромная версия знака — наследует currentColor (для мест,
+       где градиент был бы лишним: печать, disabled-состояния). */
+    logoMono: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="26" height="26" rx="8.5"/>
+        <path d="M10 11.8h7.6" opacity="0.55"/>
+        <path d="M10 18.8l3.2 3.2L22.4 12.6"/>
     </svg>`,
     
     search: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
