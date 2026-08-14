@@ -1,0 +1,18 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Rust / Tauri build output
+src-tauri/target/
+src-tauri/gen/
+
+# Локальные данные приложения (на случай запуска с БД рядом с проектом)
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE / ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
