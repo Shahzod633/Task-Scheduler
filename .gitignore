@@ -16,3 +16,9 @@ src-tauri/gen/
 .idea/
 .DS_Store
 Thumbs.db
+
+
+antigravity_prompt_taskflow_fixes.md
+antigravity_prompt_trello_clone.md
+architectural_and_technical_documentation.md
+detailed_trello_clone_specification.md
