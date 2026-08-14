@@ -315,9 +315,8 @@ select.form-input option {
 }
 
 /* ─── Context Menu ─── */
+/* Позицию и слой задаёт js/popover.js — здесь только внешний вид. */
 .context-menu {
-    position: fixed;
-    z-index: 600;
     background: var(--bg-glass-strong);
     backdrop-filter: blur(var(--blur-glass)) saturate(140%);
     -webkit-backdrop-filter: blur(var(--blur-glass)) saturate(140%);
@@ -369,16 +368,29 @@ select.form-input option {
     margin: var(--space-xs) var(--space-sm);
 }
 
-/* ─── Tooltip ─── */
-[data-tooltip] {
-    position: relative;
+/* ─── Popover Layer ───────────────────────────────────────────────────
+   Единственное место в приложении, где живут всплывающие элементы:
+   подсказки, панели шапки, контекстные меню. Слой висит прямо на <body>,
+   поэтому его содержимое не режется overflow: hidden у .content/.main и
+   не зависит от стековых контекстов родителей. Позиционирование — в
+   js/popover.js. */
+.app-popover-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    /* Слой растянут на весь экран, поэтому сам курсор он ловить не должен:
+       клики проходят сквозь него к интерфейсу, а закрытие попапа по клику
+       снаружи продолжает работать. */
+    pointer-events: none;
 }
 
-[data-tooltip]::after {
-    content: attr(data-tooltip);
+.app-popover-layer > * {
+    pointer-events: auto;
+}
+
+/* ─── Tooltip ─── */
+.app-popover-layer > .tooltip {
     position: absolute;
-    bottom: calc(100% + 8px);
-    left: 50%;
     padding: 5px 9px;
     background: var(--bg-elevated);
     border: 1px solid var(--border-default);
@@ -387,31 +399,24 @@ select.form-input option {
     font-weight: var(--font-weight-medium);
     border-radius: var(--radius-sm);
     white-space: nowrap;
-    opacity: 0;
-    transform: translateX(-50%) translateY(4px) scale(0.96);
-    pointer-events: none;
-    transition: opacity var(--transition-fast), transform var(--transition-normal);
+    max-width: 280px;
+    overflow: hidden;
+    text-overflow: ellipsis;
     box-shadow: var(--shadow-md);
-    z-index: 999;
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-4px) scale(0.96);
+    transition: opacity var(--transition-fast), transform var(--transition-normal);
 }
 
-[data-tooltip]:hover::after {
+/* Подсказка под триггером выезжает сверху вниз, над триггером — наоборот */
+.tooltip[data-placement="top"] {
+    transform: translateY(4px) scale(0.96);
+}
+
+.tooltip.tooltip--visible {
     opacity: 1;
-    transform: translateX(-50%) translateY(0) scale(1);
-    /* Небольшая задержка: подсказка не мелькает при проносе курсора */
-    transition-delay: 260ms;
-}
-
-/* Элементы шапки прижаты к верхней кромке окна — подсказка над ними
-   оказалась бы за пределами экрана, поэтому разворачиваем её вниз. */
-.header [data-tooltip]::after {
-    bottom: auto;
-    top: calc(100% + 8px);
-    transform: translateX(-50%) translateY(-4px) scale(0.96);
-}
-
-.header [data-tooltip]:hover::after {
-    transform: translateX(-50%) translateY(0) scale(1);
+    transform: translateY(0) scale(1);
 }
 
 /* ─── Loading Spinner ─── */

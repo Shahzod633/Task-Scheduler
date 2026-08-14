@@ -39,6 +39,7 @@
 }
 
 /* ─── Header Popovers (notifications / workspaces) ─── */
+/* Позицию и слой задаёт js/popover.js — здесь только внешний вид. */
 .header-popover {
     background: var(--bg-glass-strong);
     backdrop-filter: blur(var(--blur-glass)) saturate(150%);
@@ -46,7 +47,6 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg), var(--highlight-top);
-    z-index: 600;
     max-height: 70vh;
     overflow-y: auto;
     transform-origin: top center;

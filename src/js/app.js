@@ -9,6 +9,7 @@ import { renderHub, filterBoards } from './hub.js';
 import { renderDock, showDock, removeDock } from './dock.js';
 import { renderWorkspaceSidebar, ensureDefaultWorkspace } from './workspace.js';
 import { initHeaderInteractions } from './header.js';
+import { initTooltips } from './popover.js';
 import { renderTemplatesPage } from './templates.js';
 import { renderHomePage } from './home.js';
 import { renderSettingsPage } from './settings.js';
@@ -63,6 +64,8 @@ async function init() {
         // Render the global layout
         renderLayout();
         initHeaderInteractions(() => defaultWorkspaceId);
+        // Подсказки делегированы на document — достаточно включить один раз
+        initTooltips();
 
         // Render sidebar
         await renderWorkspaceSidebar(defaultWorkspaceId);

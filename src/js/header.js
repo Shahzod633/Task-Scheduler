@@ -5,6 +5,7 @@
 
 import * as api from './api.js';
 import Icons from './icons.js';
+import { openPopover, closePopovers } from './popover.js';
 import { createElement, $, $$, showToast, formatDate } from './utils.js';
 
 const APP_VERSION = '1.0.0';
@@ -51,29 +52,7 @@ export async function initHeaderInteractions(workspaceIdGetter) {
 }
 
 function closeAllPopovers() {
-    $$('.header-popover').forEach(p => p.remove());
-}
-
-function positionPopover(panel, anchor, widthPx = 300) {
-    const rect = anchor.getBoundingClientRect();
-    let left = rect.left;
-    const maxLeft = window.innerWidth - widthPx - 8;
-    if (left > maxLeft) left = maxLeft;
-    if (left < 8) left = 8;
-    panel.style.position = 'fixed';
-    panel.style.top = `${rect.bottom + 8}px`;
-    panel.style.left = `${left}px`;
-    panel.style.width = `${widthPx}px`;
-}
-
-function closeOnOutsideClick(panel) {
-    const close = (e) => {
-        if (!panel.contains(e.target)) {
-            panel.remove();
-            document.removeEventListener('click', close);
-        }
-    };
-    setTimeout(() => document.addEventListener('click', close), 0);
+    closePopovers();
 }
 
 // ─── Notifications ───
@@ -85,11 +64,9 @@ async function toggleNotificationsPanel() {
 
     const anchor = $('#btn-notifications');
     const panel = createElement('div', { className: 'header-popover', id: 'notifications-panel' });
-    positionPopover(panel, anchor, 320);
     panel.appendChild(createElement('div', { className: 'header-popover__title' }, 'Уведомления'));
 
-    document.body.appendChild(panel);
-    closeOnOutsideClick(panel);
+    openPopover(panel, anchor, { width: 320, align: 'end' });
 
     try {
         const notifications = await api.getNotifications();
@@ -294,11 +271,9 @@ async function toggleWorkspacesPanel(anchor) {
     closeAllPopovers();
 
     const panel = createElement('div', { className: 'header-popover', id: 'workspaces-panel' });
-    positionPopover(panel, anchor, 280);
     panel.appendChild(createElement('div', { className: 'header-popover__title' }, 'Пространства'));
 
-    document.body.appendChild(panel);
-    closeOnOutsideClick(panel);
+    openPopover(panel, anchor, { width: 280, align: 'start' });
 
     try {
         const workspaces = await api.getWorkspaces();

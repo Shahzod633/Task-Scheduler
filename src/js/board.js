@@ -4,6 +4,7 @@
 
 import * as api from './api.js';
 import Icons from './icons.js';
+import { openPopover } from './popover.js';
 import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDate, isOverdue, staggerIn } from './utils.js';
 
 let currentBoardId = null;
@@ -303,22 +304,10 @@ function showColumnMenu(event, colData) {
     });
     
     menu.appendChild(archiveItem);
-    
-    // Position menu
-    const rect = event.target.getBoundingClientRect();
-    menu.style.top = `${rect.bottom + 4}px`;
-    menu.style.left = `${rect.left}px`;
-    
-    document.body.appendChild(menu);
-    
-    // Close on outside click
-    const closeMenu = (e) => {
-        if (!menu.contains(e.target)) {
-            menu.remove();
-            document.removeEventListener('click', closeMenu);
-        }
-    };
-    setTimeout(() => document.addEventListener('click', closeMenu), 0);
+
+    // Меню уезжает в общий слой: колонка скроллится и лежит внутри
+    // overflow: hidden, поэтому внутри неё меню было бы обрезано.
+    openPopover(menu, event.currentTarget, { placement: 'bottom', align: 'start', gap: 4 });
 }
 
 /**
@@ -458,19 +447,7 @@ function showCardMenu(event, cardData) {
         }));
     }
 
-    const rect = event.currentTarget.getBoundingClientRect();
-    menu.style.top = `${rect.bottom + 4}px`;
-    menu.style.left = `${rect.left}px`;
-
-    document.body.appendChild(menu);
-
-    const closeMenu = (e) => {
-        if (!menu.contains(e.target)) {
-            menu.remove();
-            document.removeEventListener('click', closeMenu);
-        }
-    };
-    setTimeout(() => document.addEventListener('click', closeMenu), 0);
+    openPopover(menu, event.currentTarget, { placement: 'bottom', align: 'start', gap: 4 });
 }
 
 /**
