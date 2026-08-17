@@ -86,6 +86,150 @@
     border-top: 1px solid var(--border-subtle);
 }
 
+/* Archive listings need more horizontal room than the default 440px modal:
+   each row carries a title, a subtitle and two buttons. */
+.modal--wide {
+    width: 620px;
+}
+
+/* ─── Archive / Trash ─── */
+.archive-tabs {
+    display: flex;
+    gap: var(--space-xs);
+    margin-bottom: var(--space-lg);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.archive-tab {
+    padding: var(--space-sm) var(--space-md);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-muted);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.archive-tab:hover {
+    color: var(--text-primary);
+}
+
+.archive-tab--active {
+    color: var(--text-primary);
+    border-bottom-color: var(--accent-500);
+}
+
+.archive-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    /* The list is the only part that scrolls, so the tabs stay reachable. */
+    max-height: 46vh;
+    overflow-y: auto;
+}
+
+.archive-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.archive-row:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--border-default);
+}
+
+.archive-row__main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.archive-row__title {
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+.archive-row__subtitle {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+}
+
+.archive-row__actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    flex-shrink: 0;
+}
+
+.archive-empty {
+    padding: var(--space-2xl) 0;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+}
+
+/* Compact button variant used inside dense list rows. */
+.btn--sm {
+    padding: 5px var(--space-sm);
+    font-size: var(--font-size-xs);
+    gap: 5px;
+}
+
+.btn--sm svg {
+    width: 14px;
+    height: 14px;
+}
+
+/* ─── Confirmation Dialog ─── */
+/* Sits above the regular modal layer (z-index 500), because confirmations are
+   raised from inside other modals and must not be covered by their parent. */
+.modal-overlay--confirm {
+    z-index: 600;
+}
+
+.modal--confirm {
+    width: 400px;
+}
+
+.confirm__heading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    min-width: 0;
+}
+
+.confirm__icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-danger);
+    flex-shrink: 0;
+}
+
+.confirm__icon svg {
+    width: 20px;
+    height: 20px;
+}
+
+.confirm__message {
+    font-size: var(--font-size-sm);
+    line-height: 1.55;
+    color: var(--text-secondary);
+    /* Card and column names go in here verbatim and can be long. */
+    overflow-wrap: anywhere;
+}
+
 /* ─── Form Elements ─── */
 .form-group {
     margin-bottom: var(--space-lg);
@@ -308,6 +452,12 @@ select.form-input option {
 
 .toast--error::before {
     background: var(--color-danger);
+}
+
+/* Neutral notice — used for "this feature isn't built yet" messages, which are
+   neither a success nor an error. */
+.toast--info::before {
+    background: var(--accent-500);
 }
 
 .toast--exit {

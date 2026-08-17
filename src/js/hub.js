@@ -5,6 +5,9 @@
 import * as api from './api.js';
 import Icons from './icons.js';
 import { TEMPLATE_DEFS, createBoardFromTemplate } from './templates.js';
+import { confirmDialog } from './dialog.js';
+import { createArchiveRow, createArchiveEmptyState } from './archive.js';
+import { openPopover } from './popover.js';
 import { createElement, $, $$, showToast, debounce, getRandomGradient, getGradients, escapeHtml, staggerIn } from './utils.js';
 
 let currentWorkspaceId = null;
@@ -41,14 +44,25 @@ export async function renderHub(workspaceId) {
         // Boards section
         hub.appendChild(createBoardsSection(boards));
         
-        // Closed boards link
+        // Footer links: archive and import
+        const footerLinks = createElement('div', { className: 'hub__footer-links' });
+
         const closedLink = createElement('div', {
             className: 'hub__closed-boards',
             innerHTML: `${Icons.archive} <span>Посмотреть закрытые доски</span>`
         });
         closedLink.addEventListener('click', () => showArchivedBoards(workspaceId));
-        hub.appendChild(closedLink);
-        
+        footerLinks.appendChild(closedLink);
+
+        const importLink = createElement('div', {
+            className: 'hub__closed-boards',
+            innerHTML: `${Icons.upload} <span>Импортировать доску из файла</span>`
+        });
+        importLink.addEventListener('click', () => importBoardFromDisk(workspaceId));
+        footerLinks.appendChild(importLink);
+
+        hub.appendChild(footerLinks);
+
     } catch (error) {
         console.error('Error loading hub:', error);
         showToast('Ошибка загрузки данных', 'error');
@@ -227,13 +241,64 @@ export function createBoardCard(board, index = 0) {
         window.dispatchEvent(new CustomEvent('board-star-toggled', { detail: { boardId: board.id, starred: newStarred } }));
     });
     card.appendChild(starBtn);
-    
+
+    // Board menu — the only way to archive a board. `archive_board` existed in
+    // the backend from the start, but nothing in the UI ever called it, so the
+    // "Посмотреть закрытые доски" list below could never fill up.
+    const menuBtn = createElement('button', {
+        className: 'hub__board-menu',
+        innerHTML: Icons.moreHorizontal,
+        'data-tooltip': 'Меню доски'
+    });
+    menuBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showBoardCardMenu(e, board);
+    });
+    card.appendChild(menuBtn);
+
     // Navigate to board
     card.addEventListener('click', () => {
         window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'board', boardId: board.id } }));
     });
-    
+
     return card;
+}
+
+/**
+ * Context menu of a board tile on the hub: archiving lives here, mirroring
+ * where Trello keeps it.
+ */
+function showBoardCardMenu(event, board) {
+    const existing = $('.context-menu');
+    if (existing) existing.remove();
+
+    const menu = createElement('div', { className: 'context-menu' });
+
+    const archiveItem = createElement('div', {
+        className: 'context-menu__item context-menu__item--danger',
+        innerHTML: `${Icons.archive} <span>Архивировать доску</span>`
+    });
+    archiveItem.addEventListener('click', async () => {
+        menu.remove();
+        const ok = await confirmDialog({
+            title: 'Архивировать доску?',
+            message: `Доска «${board.name}» пропадёт из списка вместе со всеми колонками и карточками. Вернуть её можно через «Посмотреть закрытые доски».`,
+            confirmText: 'Архивировать',
+            danger: true,
+        });
+        if (!ok) return;
+
+        try {
+            await api.archiveBoard(board.id);
+            showToast(`Доска «${board.name}» архивирована`);
+            renderHub(currentWorkspaceId);
+        } catch (e) {
+            showToast('Не удалось архивировать доску', 'error');
+        }
+    });
+    menu.appendChild(archiveItem);
+
+    openPopover(menu, event.currentTarget, { placement: 'bottom', align: 'end', gap: 4 });
 }
 
 /**
@@ -357,57 +422,103 @@ function showCreateBoardModal() {
  * Show archived boards
  */
 async function showArchivedBoards(workspaceId) {
-    try {
-        const archived = await api.getArchivedBoards(workspaceId);
-        
-        const existing = $('.modal-overlay');
-        if (existing) existing.remove();
-        
-        const overlay = createElement('div', { className: 'modal-overlay' });
-        const modal = createElement('div', { className: 'modal' });
-        
-        const header = createElement('div', { className: 'modal__header' });
-        header.appendChild(createElement('h2', { className: 'modal__title' }, 'Закрытые доски'));
-        const closeBtn = createElement('button', { className: 'modal__close', innerHTML: Icons.x });
-        closeBtn.addEventListener('click', () => overlay.remove());
-        header.appendChild(closeBtn);
-        modal.appendChild(header);
-        
-        const body = createElement('div', { className: 'modal__body' });
-        
-        if (archived.length === 0) {
-            body.appendChild(createElement('p', {
-                style: { color: 'var(--text-muted)', textAlign: 'center', padding: '24px 0' }
-            }, 'Нет закрытых досок'));
-        } else {
-            for (const board of archived) {
-                const item = createElement('div', {
-                    style: {
-                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                        padding: '8px 12px', borderRadius: '8px', marginBottom: '4px'
-                    }
-                });
-                item.appendChild(createElement('span', {}, board.name));
-                const restoreBtn = createElement('button', { className: 'btn btn--secondary' }, 'Восстановить');
-                restoreBtn.addEventListener('click', async () => {
-                    await api.restoreBoard(board.id);
-                    overlay.remove();
-                    renderHub(workspaceId);
-                    showToast(`Доска "${board.name}" восстановлена`);
-                });
-                item.appendChild(restoreBtn);
-                body.appendChild(item);
-            }
+    const existing = $('.modal-overlay');
+    if (existing) existing.remove();
+
+    const overlay = createElement('div', { className: 'modal-overlay' });
+    const modal = createElement('div', { className: 'modal modal--wide' });
+
+    const header = createElement('div', { className: 'modal__header' });
+    header.appendChild(createElement('h2', { className: 'modal__title' }, 'Закрытые доски'));
+    const closeBtn = createElement('button', { className: 'modal__close', innerHTML: Icons.x });
+    closeBtn.addEventListener('click', () => overlay.remove());
+    header.appendChild(closeBtn);
+    modal.appendChild(header);
+
+    const body = createElement('div', { className: 'modal__body' });
+    const list = createElement('div', { className: 'archive-list' });
+    body.appendChild(list);
+    modal.appendChild(body);
+
+    overlay.appendChild(modal);
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) overlay.remove();
+    });
+    document.body.appendChild(overlay);
+
+    /** Re-reads the archive so the list stays correct after each action. */
+    async function refresh() {
+        list.innerHTML = '';
+        let archived;
+        try {
+            archived = await api.getArchivedBoards(workspaceId);
+        } catch (e) {
+            list.appendChild(createArchiveEmptyState('Не удалось загрузить архив'));
+            return;
         }
-        
-        modal.appendChild(body);
-        overlay.appendChild(modal);
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) overlay.remove();
-        });
-        document.body.appendChild(overlay);
+
+        if (archived.length === 0) {
+            list.appendChild(createArchiveEmptyState('Нет закрытых досок'));
+            return;
+        }
+
+        for (const board of archived) {
+            list.appendChild(createArchiveRow({
+                title: board.name,
+                onRestore: async () => {
+                    try {
+                        await api.restoreBoard(board.id);
+                        showToast(`Доска «${board.name}» восстановлена`);
+                        renderHub(workspaceId);
+                        refresh();
+                    } catch (e) {
+                        showToast('Не удалось восстановить доску', 'error');
+                    }
+                },
+                onDelete: async () => {
+                    const ok = await confirmDialog({
+                        title: 'Удалить доску навсегда?',
+                        message: `Доска «${board.name}» со всеми колонками, карточками и метками будет удалена без возможности восстановления.`,
+                        confirmText: 'Удалить навсегда',
+                        danger: true,
+                    });
+                    if (!ok) return;
+                    try {
+                        await api.deleteBoard(board.id);
+                        showToast('Доска удалена');
+                        renderHub(workspaceId);
+                        refresh();
+                    } catch (e) {
+                        console.error('Failed to delete board:', e);
+                        showToast('Не удалось удалить доску', 'error');
+                    }
+                },
+            }));
+        }
+    }
+
+    refresh();
+}
+
+/**
+ * Imports a board from a `.json` export produced by the board's Экспорт button.
+ */
+async function importBoardFromDisk(workspaceId) {
+    try {
+        const path = await api.showOpenDialog();
+        if (!path) return; // cancelled
+
+        // The dialog plugin returns a string for single selection, but guard
+        // against an array in case that ever changes.
+        const filePath = Array.isArray(path) ? path[0] : path;
+        const board = await api.importBoardFromFile(workspaceId, filePath);
+
+        showToast(`Доска «${board.name}» импортирована`);
+        renderHub(workspaceId);
     } catch (e) {
-        showToast('Ошибка загрузки архива', 'error');
+        console.error('Board import failed:', e);
+        // Backend errors are already user-readable ("Файл не похож на экспорт…").
+        showToast(typeof e === 'string' ? e : 'Не удалось импортировать доску', 'error');
     }
 }
 

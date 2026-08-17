@@ -10,6 +10,7 @@ import { renderDock, showDock, removeDock } from './dock.js';
 import { renderWorkspaceSidebar, ensureDefaultWorkspace } from './workspace.js';
 import { initHeaderInteractions } from './header.js';
 import { initTooltips } from './popover.js';
+import { initModalEscape } from './dialog.js';
 import { renderTemplatesPage } from './templates.js';
 import { renderHomePage } from './home.js';
 import { renderSettingsPage } from './settings.js';
@@ -66,6 +67,9 @@ async function init() {
         initHeaderInteractions(() => defaultWorkspaceId);
         // Подсказки делегированы на document — достаточно включить один раз
         initTooltips();
+        // Esc закрывает верхнюю открытую модалку. Справка обещала это с самого
+        // начала, но обработчика не существовало — работали только формы.
+        initModalEscape();
 
         // Render sidebar
         await renderWorkspaceSidebar(defaultWorkspaceId);

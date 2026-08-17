@@ -8,7 +8,9 @@ import Icons from './icons.js';
 import { openPopover, closePopovers } from './popover.js';
 import { createElement, $, $$, showToast, formatDate } from './utils.js';
 
-const APP_VERSION = '1.0.0';
+// The version is no longer hardcoded here — it had already drifted from the two
+// other places it lived (package.json, tauri.conf.json). It is now read from
+// the bundle when the help screen opens; see showHelpModal().
 
 let getWorkspaceId = () => null;
 
@@ -152,7 +154,12 @@ function showHelpModal() {
 
     body.appendChild(createElement('h3', { className: 'help-section-title' }, 'О программе'));
     const about = createElement('div', { className: 'about-block' });
-    about.appendChild(createElement('div', {}, `TaskFlow v${APP_VERSION}`));
+    const versionEl = createElement('div', {}, 'TaskFlow');
+    // Filled in asynchronously; the modal is already on screen by then.
+    api.getAppVersion()
+        .then((version) => { versionEl.textContent = `TaskFlow v${version}`; })
+        .catch(() => { versionEl.textContent = 'TaskFlow'; });
+    about.appendChild(versionEl);
     const link = createElement('a', { href: '#', className: 'about-link' }, 'Репозиторий проекта');
     link.addEventListener('click', (e) => e.preventDefault());
     about.appendChild(link);

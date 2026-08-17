@@ -8,14 +8,16 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("failed to get app data dir");
             let conn = db::init(&app_dir).expect("failed to initialize db");
-            
+
             app.manage(db::DbState {
                 conn: std::sync::Mutex::new(conn),
+                app_dir,
             });
-            
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -43,7 +45,24 @@ pub fn run() {
             commands::update_card,
             commands::archive_card,
             commands::update_card_position,
+
             commands::export_board,
+            commands::export_board_to_file,
+            commands::import_board,
+            commands::import_board_from_file,
+
+            commands::get_archived_columns,
+            commands::get_archived_cards,
+            commands::restore_card,
+            commands::restore_column,
+            commands::delete_card,
+            commands::delete_column,
+            commands::delete_board,
+
+            commands::get_backups,
+            commands::get_backup_dir,
+            commands::open_backup_dir,
+            commands::get_app_version,
 
             commands::get_labels,
             commands::create_label,

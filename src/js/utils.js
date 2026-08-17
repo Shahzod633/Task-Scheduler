@@ -169,6 +169,24 @@ export function staggerIn(el, index = 0, variant = '') {
 }
 
 /**
+ * Picks the right Russian plural form for `n`.
+ *
+ * @param {number} n
+ * @param {[string, string, string]} forms - [1 карточка, 2 карточки, 5 карточек]
+ * @example pluralize(3, ['карточка', 'карточки', 'карточек']) // 'карточки'
+ */
+export function pluralize(n, [one, few, many]) {
+    const mod100 = Math.abs(n) % 100;
+    // 11–14 all take the "many" form, regardless of their last digit.
+    if (mod100 >= 11 && mod100 <= 14) return many;
+
+    const mod10 = mod100 % 10;
+    if (mod10 === 1) return one;
+    if (mod10 >= 2 && mod10 <= 4) return few;
+    return many;
+}
+
+/**
  * Auto-resize textarea
  */
 export function autoResize(textarea) {

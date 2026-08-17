@@ -424,6 +424,69 @@
     box-shadow: var(--highlight-top);
 }
 
+/* ─── Settings: Backups ─── */
+.settings-backup__intro {
+    margin-bottom: var(--space-md);
+}
+
+.settings-backup__path {
+    margin-bottom: var(--space-md);
+}
+
+.settings-backup__path-value {
+    display: block;
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    /* Windows paths are long and have no spaces to break on. */
+    overflow-wrap: anywhere;
+}
+
+.settings-backup__count {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-secondary);
+    margin-bottom: var(--space-sm);
+}
+
+.settings-backup__list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 180px;
+    overflow-y: auto;
+    margin-bottom: var(--space-lg);
+}
+
+.settings-backup__row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    padding: 6px var(--space-md);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    transition: background var(--transition-fast);
+}
+
+.settings-backup__row:hover {
+    background: var(--bg-card-hover);
+}
+
+.settings-backup__size {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+}
+
+.settings-backup__note {
+    margin-top: var(--space-md);
+}
+
 /* ─── Inbox Page ─── */
 .inbox-add-form {
     display: flex;

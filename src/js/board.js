@@ -5,7 +5,9 @@
 import * as api from './api.js';
 import Icons from './icons.js';
 import { openPopover } from './popover.js';
-import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDate, isOverdue, staggerIn } from './utils.js';
+import { confirmDialog } from './dialog.js';
+import { showBoardArchive } from './archive.js';
+import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDate, isOverdue, staggerIn, pluralize } from './utils.js';
 
 let currentBoardId = null;
 let columnsData = [];
@@ -65,47 +67,44 @@ export async function renderBoard(boardId) {
 /**
  * Create board header element
  */
+/**
+ * A header button for a feature that does not exist yet.
+ *
+ * These used to be silent no-ops that looked identical to working controls.
+ * They are kept (the layout was designed around them) but are now visibly
+ * dimmed and say so when clicked, instead of pretending to do something.
+ */
+function createSoonButton(label, icon) {
+    const btn = createElement('button', {
+        className: 'board-header__btn board-header__btn--soon',
+        innerHTML: label ? `${icon} <span>${label}</span>` : icon,
+        'data-tooltip': `${label || 'Эта функция'} — появится в следующих версиях`
+    });
+    btn.addEventListener('click', () => {
+        showToast(`«${label || 'Эта функция'}» появится в следующих версиях`, 'info');
+    });
+    return btn;
+}
+
 function createBoardHeader(board) {
     const header = createElement('div', { className: 'board-header' });
-    
+
     const left = createElement('div', { className: 'board-header__left' });
-    const title = createElement('span', { 
+    const title = createElement('span', {
         className: 'board-header__title',
         id: 'board-title'
     }, board.name);
     title.addEventListener('click', () => editBoardTitle(board));
     left.appendChild(title);
-    
-    const viewBtn = createElement('button', { 
-        className: 'board-header__btn',
-        innerHTML: Icons.grid,
-        'data-tooltip': 'Представление'
-    });
-    left.appendChild(viewBtn);
-    
+
+    left.appendChild(createSoonButton('', Icons.grid));
+
     const right = createElement('div', { className: 'board-header__right' });
-    
-    // Power-Ups
-    right.appendChild(createElement('button', {
-        className: 'board-header__btn',
-        innerHTML: `${Icons.puzzle} <span>Power-Ups</span>`,
-        'data-tooltip': 'Power-Ups'
-    }));
-    
-    // Automation
-    right.appendChild(createElement('button', {
-        className: 'board-header__btn',
-        innerHTML: `${Icons.zap} <span>Автоматизация</span>`,
-        'data-tooltip': 'Автоматизация'
-    }));
-    
-    // Filter
-    right.appendChild(createElement('button', {
-        className: 'board-header__btn',
-        innerHTML: Icons.filter,
-        'data-tooltip': 'Фильтры'
-    }));
-    
+
+    right.appendChild(createSoonButton('Power-Ups', Icons.puzzle));
+    right.appendChild(createSoonButton('Автоматизация', Icons.zap));
+    right.appendChild(createSoonButton('Фильтры', Icons.filter));
+
     // Star
     const starBtn = createElement('button', {
         className: 'board-header__btn',
@@ -121,39 +120,56 @@ function createBoardHeader(board) {
     });
     if (board.is_starred) starBtn.style.color = 'var(--color-warning)';
     right.appendChild(starBtn);
-    
-    // Privacy
-    right.appendChild(createElement('button', {
+
+    // Archive — the way back for archived cards and columns.
+    const archiveBtn = createElement('button', {
         className: 'board-header__btn',
-        innerHTML: `${Icons.lock} <span>Приватная</span>`,
-        'data-tooltip': 'Видимость'
-    }));
-    
-    // Share
-    const shareBtn = createElement('button', {
+        innerHTML: Icons.archive,
+        'data-tooltip': 'Архив доски'
+    });
+    archiveBtn.addEventListener('click', () => {
+        showBoardArchive(board.id, board.name, () => renderBoard(currentBoardId));
+    });
+    right.appendChild(archiveBtn);
+
+    right.appendChild(createSoonButton('Приватная', Icons.lock));
+
+    // Export — writes a real file, unlike the "Поделиться" stub it replaces.
+    const exportBtn = createElement('button', {
         className: 'board-header__btn board-header__btn--share',
-        innerHTML: `${Icons.share} <span>Поделиться</span>`
+        innerHTML: `${Icons.download} <span>Экспорт</span>`,
+        'data-tooltip': 'Сохранить доску в JSON-файл'
     });
-    shareBtn.addEventListener('click', async () => {
-        try {
-            const json = await api.exportBoard(currentBoardId);
-            showToast('Доска экспортирована в JSON', 'success');
-        } catch (e) {
-            showToast('Ошибка экспорта', 'error');
-        }
-    });
-    right.appendChild(shareBtn);
-    
-    // More
-    right.appendChild(createElement('button', {
-        className: 'board-header__btn',
-        innerHTML: Icons.moreHorizontal,
-        'data-tooltip': 'Меню'
-    }));
-    
+    exportBtn.addEventListener('click', () => exportCurrentBoard(board));
+    right.appendChild(exportBtn);
+
+    right.appendChild(createSoonButton('', Icons.moreHorizontal));
+
     header.appendChild(left);
     header.appendChild(right);
     return header;
+}
+
+/**
+ * Asks where to save, then writes the board's JSON there.
+ *
+ * The old implementation called a Rust stub that returned
+ * `{"status": "exported"}` and reported success — no file was ever produced.
+ */
+async function exportCurrentBoard(board) {
+    // A filename the OS will accept: strip anything Windows forbids in paths.
+    const safeName = board.name.replace(/[\\/:*?"<>|]/g, '_').trim() || 'board';
+
+    try {
+        const path = await api.showSaveDialog(`${safeName}.json`);
+        if (!path) return; // cancelled
+
+        await api.exportBoardToFile(board.id, path);
+        showToast('Доска сохранена в файл');
+    } catch (e) {
+        console.error('Board export failed:', e);
+        showToast('Не удалось экспортировать доску', 'error');
+    }
 }
 
 /**
@@ -297,10 +313,25 @@ function showColumnMenu(event, colData) {
         innerHTML: `${Icons.archive} <span>Архивировать колонку</span>`
     });
     archiveItem.addEventListener('click', async () => {
-        await api.archiveColumn(colData.id);
         menu.remove();
-        renderBoard(currentBoardId);
-        showToast('Колонка архивирована');
+        const cardCount = colData.cards.length;
+        const ok = await confirmDialog({
+            title: 'Архивировать колонку?',
+            message: cardCount > 0
+                ? `Колонка «${colData.name}» и ${cardCount} ${pluralize(cardCount, ['карточка', 'карточки', 'карточек'])} внутри неё пропадут с доски. Вернуть их можно через «Архив доски».`
+                : `Колонка «${colData.name}» пропадёт с доски. Вернуть её можно через «Архив доски».`,
+            confirmText: 'Архивировать',
+            danger: true,
+        });
+        if (!ok) return;
+
+        try {
+            await api.archiveColumn(colData.id);
+            renderBoard(currentBoardId);
+            showToast('Колонка архивирована');
+        } catch (e) {
+            showToast('Не удалось архивировать колонку', 'error');
+        }
     });
     
     menu.appendChild(archiveItem);
@@ -517,10 +548,22 @@ export function showCardEditModal(cardData, options = {}) {
         innerHTML: `${Icons.archive} Архивировать`
     });
     archiveBtn.addEventListener('click', async () => {
-        await api.archiveCard(cardData.id);
-        overlay.remove();
-        onChange();
-        showToast('Карточка архивирована');
+        const ok = await confirmDialog({
+            title: 'Архивировать карточку?',
+            message: `Карточка «${cardData.title}» пропадёт с доски. Вернуть её можно через «Архив доски».`,
+            confirmText: 'Архивировать',
+            danger: true,
+        });
+        if (!ok) return;
+
+        try {
+            await api.archiveCard(cardData.id);
+            overlay.remove();
+            onChange();
+            showToast('Карточка архивирована');
+        } catch (e) {
+            showToast('Не удалось архивировать карточку', 'error');
+        }
     });
     footer.appendChild(archiveBtn);
     

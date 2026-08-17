@@ -94,10 +94,6 @@ export async function updateCardPosition(id, newColumnId, newPosition) {
     return await invoke('update_card_position', { id, newColumnId, newPosition });
 }
 
-export async function reorderCards(columnId, cardIds) {
-    return await invoke('reorder_cards', { columnId, cardIds });
-}
-
 export async function archiveCard(id) {
     return await invoke('archive_card', { id });
 }
@@ -122,12 +118,97 @@ export async function removeLabelFromCard(cardId, labelId) {
 
 // ─── Export/Import ───
 
+/** Returns the board as a JSON string (no file is written). */
 export async function exportBoard(boardId) {
     return await invoke('export_board', { boardId });
 }
 
+/** Writes the board's JSON to `path`; returns the path written. */
+export async function exportBoardToFile(boardId, path) {
+    return await invoke('export_board_to_file', { boardId, path });
+}
+
 export async function importBoard(workspaceId, jsonData) {
     return await invoke('import_board', { workspaceId, jsonData });
+}
+
+/** Reads a `.json` export from `path` and imports it as a new board. */
+export async function importBoardFromFile(workspaceId, path) {
+    return await invoke('import_board_from_file', { workspaceId, path });
+}
+
+// ─── Archive (restore) and permanent deletion ───
+// The archive doubles as the trash: restore brings an item back, delete* wipes
+// it for good. Only boards had this before; cards and columns were a one-way
+// trip.
+
+export async function getArchivedColumns(boardId) {
+    return await invoke('get_archived_columns', { boardId });
+}
+
+export async function getArchivedCards(boardId) {
+    return await invoke('get_archived_cards', { boardId });
+}
+
+export async function restoreCard(id) {
+    return await invoke('restore_card', { id });
+}
+
+export async function restoreColumn(id) {
+    return await invoke('restore_column', { id });
+}
+
+export async function deleteCard(id) {
+    return await invoke('delete_card', { id });
+}
+
+export async function deleteColumn(id) {
+    return await invoke('delete_column', { id });
+}
+
+export async function deleteBoard(id) {
+    return await invoke('delete_board', { id });
+}
+
+// ─── Backups ───
+
+export async function getBackups() {
+    return await invoke('get_backups');
+}
+
+export async function getBackupDir() {
+    return await invoke('get_backup_dir');
+}
+
+export async function openBackupDir() {
+    return await invoke('open_backup_dir');
+}
+
+export async function getAppVersion() {
+    return await invoke('get_app_version');
+}
+
+// ─── Native file dialogs (tauri-plugin-dialog) ───
+// Called through `invoke` rather than the plugin's npm package: the project has
+// no bundler, so pulling in @tauri-apps/plugin-dialog would mean adding one.
+// The command names below are the plugin's own IPC contract.
+
+/**
+ * Native "save file" dialog. Returns the chosen path, or null if cancelled.
+ */
+export async function showSaveDialog(defaultPath, filterName = 'JSON', extensions = ['json']) {
+    return await invoke('plugin:dialog|save', {
+        options: { defaultPath, filters: [{ name: filterName, extensions }] }
+    });
+}
+
+/**
+ * Native "open file" dialog. Returns the chosen path, or null if cancelled.
+ */
+export async function showOpenDialog(filterName = 'JSON', extensions = ['json']) {
+    return await invoke('plugin:dialog|open', {
+        options: { multiple: false, directory: false, filters: [{ name: filterName, extensions }] }
+    });
 }
 
 // ─── Notifications ───

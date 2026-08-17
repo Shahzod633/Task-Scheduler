@@ -555,3 +555,17 @@
     background: var(--accent-soft);
     border-color: var(--accent-border);
 }
+
+/* Placeholder controls for features that do not exist yet. Dimmed so they read
+   as "not available" rather than as working buttons — clicking one says when it
+   is coming instead of silently doing nothing. Not `disabled`, because the
+   button still has to receive clicks and show its tooltip. */
+.board-header__btn--soon {
+    opacity: 0.45;
+}
+
+.board-header__btn--soon:hover {
+    opacity: 0.7;
+    background: transparent;
+    color: var(--text-secondary);
+}
