@@ -4,10 +4,15 @@
 
 import * as api from './api.js';
 import Icons from './icons.js';
-import { openPopover } from './popover.js';
+import { openPopover, closePopovers } from './popover.js';
 import { confirmDialog } from './dialog.js';
 import { showBoardArchive } from './archive.js';
-import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDate, isOverdue, staggerIn, pluralize } from './utils.js';
+import { loadMembers, findMember, createAvatar, createMemberChip, openMemberPicker } from './members.js';
+import {
+    createFilterState, createFilterToolbar, matchesFilter, isFilterActive,
+    groupKeyFor, priorityLabel, priorityModifier, PRIORITIES,
+} from './filters.js';
+import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate, isOverdue, staggerIn, pluralize } from './utils.js';
 
 let currentBoardId = null;
 let columnsData = [];
@@ -16,34 +21,47 @@ let cardSortables = [];
 // Set while a card drag is in flight, so the click that ends a drag gesture
 // doesn't also open the card modal.
 let isDraggingCard = false;
+// Filter/group state for the board currently on screen. Reset when a different
+// board is opened: another board has other columns, and a stale status filter
+// would hide everything for no visible reason.
+let boardFilter = createFilterState();
 
 /**
  * Initialize board view for a given board
  */
 export async function renderBoard(boardId) {
+    if (boardId !== currentBoardId) boardFilter = createFilterState();
     currentBoardId = boardId;
     const content = $('#content');
-    
+
     try {
         const board = await api.getBoard(boardId);
         const columns = await api.getColumns(boardId);
-        
+
+        // The member directory backs the avatars on cards and the quick filter
+        // in the toolbar; one call per board render, not one per card.
+        await loadMembers();
+
         // Load cards for each column
         columnsData = [];
         for (const col of columns) {
             const cards = await api.getCards(col.id);
             columnsData.push({ ...col, cards });
         }
-        
+
         content.innerHTML = '';
         content.classList.add('view-enter');
-        
+
         // Board header
         content.appendChild(createBoardHeader(board));
-        
+
+        // Filter / group toolbar — the same component the "Список" screen uses,
+        // scoped to this one board.
+        content.appendChild(createBoardToolbar());
+
         // Kanban board
         const boardEl = createElement('div', { className: 'board', id: 'board-columns' });
-        
+
         // Render columns — каскадом, чтобы доска «собиралась» слева направо
         columnsData.forEach((col, i) => {
             boardEl.appendChild(staggerIn(createColumnElement(col), i));
@@ -51,16 +69,151 @@ export async function renderBoard(boardId) {
 
         // Add column button
         boardEl.appendChild(staggerIn(createAddColumnElement(), columnsData.length));
-        
+
         content.appendChild(boardEl);
-        
+
         // Initialize Sortable.js
         initSortable();
-        
+        applyBoardFilter();
+
         setTimeout(() => content.classList.remove('view-enter'), 420);
     } catch (error) {
         console.error('Error loading board:', error);
         showToast('Ошибка загрузки доски', 'error');
+    }
+}
+
+/**
+ * The board's copy of the shared toolbar.
+ *
+ * Scope differs from the "Список" screen on purpose: that screen spans every
+ * board in the workspace, this one only ever sees the board it is on, so the
+ * "Доска" facet is omitted.
+ */
+function createBoardToolbar() {
+    const wrap = createElement('div', { className: 'board-toolbar' });
+
+    wrap.appendChild(createFilterToolbar({
+        state: boardFilter,
+        onChange: applyBoardFilter,
+        boards: null,
+        statuses: columnsData.map(c => c.name),
+        showGroup: true,
+        searchPlaceholder: 'Поиск по карточкам доски',
+    }));
+
+    wrap.appendChild(createElement('div', { className: 'board-toolbar__count', id: 'board-filter-count' }));
+    return wrap;
+}
+
+/** The shape `filters.js` matches against. */
+function toFilterItem(cardData, colData) {
+    const assignee = findMember(cardData.assignee_id);
+    return {
+        title: cardData.title,
+        boardId: currentBoardId,
+        boardName: '',
+        assigneeId: cardData.assignee_id ?? 0,
+        assignee,
+        status: colData.name,
+        priority: cardData.priority,
+    };
+}
+
+/**
+ * Applies the current filter and grouping to what is already on screen.
+ *
+ * Purely visual: cards are hidden and re-ordered in the DOM, never moved in the
+ * database. `position` and `column_id` are untouched, so switching the filter
+ * off restores exactly the board that was there before.
+ */
+function applyBoardFilter() {
+    const grouping = Boolean(boardFilter.groupBy);
+    let shown = 0;
+    let total = 0;
+
+    for (const colData of columnsData) {
+        const columnEl = $(`.column[data-column-id="${colData.id}"]`);
+        if (!columnEl) continue;
+        const list = $('.column__cards', columnEl);
+        if (!list) continue;
+
+        // Group headings from a previous pass are rebuilt from scratch.
+        $$('.column__group-heading', list).forEach(el => el.remove());
+
+        const visible = [];
+        for (const cardData of colData.cards) {
+            total++;
+            const cardEl = $(`.card[data-card-id="${cardData.id}"]`, list);
+            if (!cardEl) continue;
+            const match = matchesFilter(toFilterItem(cardData, colData), boardFilter);
+            cardEl.classList.toggle('card--filtered-out', !match);
+            if (match) { shown++; visible.push({ cardData, cardEl }); }
+        }
+
+        if (grouping) applyColumnGrouping(list, colData, visible);
+        else restoreCardOrder(list, colData);
+
+        const countEl = $('.column__count', columnEl);
+        if (countEl) {
+            countEl.textContent = isFilterActive(boardFilter)
+                ? `${visible.length}/${colData.cards.length}`
+                : String(colData.cards.length);
+        }
+    }
+
+    // Drag-and-drop is suspended whenever the visible order stops matching the
+    // stored one — Sortable derives the drop index from the card's position
+    // among its siblings and counts the hidden ones too, so a drop during
+    // filtering or grouping would silently write the wrong position.
+    const filtering = isFilterActive(boardFilter);
+    setCardDragEnabled(!grouping && !filtering);
+
+    const countEl = $('#board-filter-count');
+    if (countEl) {
+        countEl.innerHTML = '';
+        if (filtering) {
+            countEl.appendChild(createElement('span', { className: 'filter-count' },
+                `${shown} из ${total} ${pluralize(total, ['карточка', 'карточки', 'карточек'])}`));
+        }
+        if (grouping || filtering) {
+            countEl.appendChild(createElement('span', { className: 'board-toolbar__note' },
+                grouping
+                    ? 'Пока включена группировка, карточки нельзя перетаскивать'
+                    : 'Пока включён фильтр, карточки нельзя перетаскивать'));
+        }
+    }
+}
+
+/** Re-orders the visible cards into groups with a small heading each. */
+function applyColumnGrouping(list, colData, visible) {
+    const groups = new Map();
+    for (const entry of visible) {
+        const key = groupKeyFor(toFilterItem(entry.cardData, colData), boardFilter.groupBy);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(entry);
+    }
+
+    for (const [key, entries] of groups) {
+        list.appendChild(createElement('div', { className: 'column__group-heading' },
+            `${key} · ${entries.length}`));
+        for (const entry of entries) list.appendChild(entry.cardEl);
+    }
+}
+
+/** Puts the cards back in their stored order after grouping is switched off. */
+function restoreCardOrder(list, colData) {
+    for (const cardData of colData.cards) {
+        const cardEl = $(`.card[data-card-id="${cardData.id}"]`, list);
+        if (cardEl) list.appendChild(cardEl);
+    }
+}
+
+function setCardDragEnabled(enabled) {
+    for (const sortable of cardSortables) {
+        if (sortable && typeof sortable.option === 'function') {
+            sortable.option('disabled', !enabled);
+        }
     }
 }
 
@@ -103,7 +256,8 @@ function createBoardHeader(board) {
 
     right.appendChild(createSoonButton('Power-Ups', Icons.puzzle));
     right.appendChild(createSoonButton('Автоматизация', Icons.zap));
-    right.appendChild(createSoonButton('Фильтры', Icons.filter));
+    // The "Фильтры" placeholder that used to sit here is gone — filtering is
+    // real now and lives in the toolbar below the header.
 
     // Star
     const starBtn = createElement('button', {
@@ -346,10 +500,11 @@ function showColumnMenu(event, colData) {
  */
 function createCardElement(cardData) {
     const card = createElement('div', {
-        className: 'card',
+        // The priority modifier paints the thin stripe down the left edge.
+        className: `card card--priority-${priorityModifier(cardData.priority)}`,
         dataset: { cardId: cardData.id }
     });
-    
+
     // Labels (if any)
     if (cardData.labels && cardData.labels.length > 0) {
         const labelsEl = createElement('div', { className: 'card__labels' });
@@ -376,29 +531,38 @@ function createCardElement(cardData) {
     }, cardData.title));
     
     // Metadata
-    const hasMeta = cardData.description || cardData.due_date;
+    const assignee = findMember(cardData.assignee_id);
+    const hasMeta = cardData.description || cardData.due_date || assignee;
     if (hasMeta) {
         const meta = createElement('div', { className: 'card__meta' });
-        
+
         if (cardData.due_date) {
             const overdue = isOverdue(cardData.due_date);
             const dueEl = createElement('div', {
                 className: `card__meta-item card__meta-item--due ${overdue ? 'overdue' : ''}`,
-                innerHTML: `${Icons.clock} <span>${formatDate(cardData.due_date)}</span>`
+                innerHTML: `${Icons.clock} <span>${formatDueDate(cardData.due_date)}</span>`
             });
             meta.appendChild(dueEl);
         }
-        
+
         if (cardData.description) {
             meta.appendChild(createElement('div', {
                 className: 'card__meta-item',
                 innerHTML: Icons.description
             }));
         }
-        
+
+        // Assignee sits at the far right of the meta row — the corner Trello
+        // and ClickUp both use, so it reads without explanation.
+        if (assignee) {
+            const avatar = createAvatar(assignee, { size: 'sm' });
+            avatar.classList.add('card__assignee');
+            meta.appendChild(avatar);
+        }
+
         card.appendChild(meta);
     }
-    
+
     // Edit button
     const editBtn = createElement('button', {
         className: 'card__edit-btn',
@@ -537,7 +701,68 @@ export function showCardEditModal(cardData, options = {}) {
     });
     dueGroup.appendChild(dueInput);
     body.appendChild(dueGroup);
-    
+
+    // ─── Исполнитель / Автор / Приоритет ───
+    //
+    // The card face shows an assignee avatar, so there has to be somewhere to
+    // set one without going to the "Список" screen. Accepts both card shapes:
+    // the board sends ids, the list screen sends whole member records.
+    let assigneeId = cardData.assignee ? cardData.assignee.id : (cardData.assignee_id ?? null);
+    let authorId = cardData.author ? cardData.author.id : (cardData.author_id ?? null);
+    let priority = cardData.priority || 'Medium';
+
+    const peopleRow = createElement('div', { className: 'card-modal__people' });
+
+    const personField = (label, getId, setId, noneLabel) => {
+        const group = createElement('div', { className: 'form-group card-modal__field' });
+        group.appendChild(createElement('label', { className: 'form-label' }, label));
+        const btn = createElement('button', { className: 'person-cell person-cell--wide', type: 'button' });
+        const paint = () => {
+            btn.innerHTML = '';
+            btn.appendChild(createMemberChip(findMember(getId())));
+        };
+        paint();
+        btn.addEventListener('click', () => {
+            openMemberPicker(btn, getId(), (memberId) => { setId(memberId); paint(); },
+                { allowNone: true, noneLabel });
+        });
+        group.appendChild(btn);
+        return group;
+    };
+
+    peopleRow.appendChild(personField('Исполнитель', () => assigneeId, (v) => { assigneeId = v; }, 'Не назначен'));
+    peopleRow.appendChild(personField('Автор', () => authorId, (v) => { authorId = v; }, 'Без автора'));
+
+    const priorityGroup = createElement('div', { className: 'form-group card-modal__field' });
+    priorityGroup.appendChild(createElement('label', { className: 'form-label' }, 'Приоритет'));
+    const priorityBtn = createElement('button', { className: 'priority-pill', type: 'button' });
+    const paintPriority = () => {
+        priorityBtn.className = `priority-pill priority-pill--${priorityModifier(priority)}`;
+        priorityBtn.innerHTML = '';
+        priorityBtn.appendChild(createElement('span', { className: 'priority-pill__dot' }));
+        priorityBtn.appendChild(createElement('span', {}, priorityLabel(priority)));
+    };
+    paintPriority();
+    priorityBtn.addEventListener('click', () => {
+        const menu = createElement('div', { className: 'context-menu' });
+        for (const p of PRIORITIES) {
+            const item = createElement('div', { className: 'context-menu__item' });
+            item.appendChild(createElement('span', { className: `priority-dot priority-dot--${priorityModifier(p.value)}` }));
+            item.appendChild(createElement('span', {}, p.label));
+            item.addEventListener('click', () => {
+                closePopovers();
+                priority = p.value;
+                paintPriority();
+            });
+            menu.appendChild(item);
+        }
+        openPopover(menu, priorityBtn, { placement: 'bottom', align: 'start', gap: 4 });
+    });
+    priorityGroup.appendChild(priorityBtn);
+    peopleRow.appendChild(priorityGroup);
+
+    body.appendChild(peopleRow);
+
     modal.appendChild(body);
     
     // Footer
@@ -574,10 +799,23 @@ export function showCardEditModal(cardData, options = {}) {
         const title = titleInput.value.trim();
         if (!title) return;
         const dueDate = dueInput.value || null;
-        await api.updateCard(cardData.id, title, descInput.value, dueDate);
-        overlay.remove();
-        onChange();
-        showToast('Карточка обновлена');
+        try {
+            await api.updateCard(cardData.id, title, descInput.value, dueDate);
+
+            // Only what actually changed is written — each of these is its own
+            // command, and a no-op UPDATE is still a write.
+            const wasAssignee = cardData.assignee ? cardData.assignee.id : (cardData.assignee_id ?? null);
+            const wasAuthor = cardData.author ? cardData.author.id : (cardData.author_id ?? null);
+            if (assigneeId !== wasAssignee) await api.updateCardAssignee(cardData.id, assigneeId);
+            if (authorId !== wasAuthor) await api.updateCardAuthor(cardData.id, authorId);
+            if (priority !== (cardData.priority || 'Medium')) await api.updateCardPriority(cardData.id, priority);
+
+            overlay.remove();
+            onChange();
+            showToast('Карточка обновлена');
+        } catch (e) {
+            showToast('Не удалось сохранить карточку', 'error');
+        }
     });
     footer.appendChild(saveBtn);
     

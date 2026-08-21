@@ -58,21 +58,30 @@ export async function renderWorkspaceSidebar(workspaceId, isExpanded = true) {
         });
         menu.appendChild(boardsItem);
         
-        // Members
+        // Members — the local directory of names used on cards. Until now this
+        // row and its "+" were decoration: neither had a click handler, so the
+        // screen behind them could never be reached.
         const membersItem = createElement('div', { className: 'sidebar__item' });
         membersItem.appendChild(createElement('span', { className: 'sidebar__item-icon', innerHTML: Icons.users }));
         membersItem.appendChild(createElement('span', { className: 'sidebar__item-text' }, 'Участники'));
         const addMemberBtn = createElement('span', {
             className: 'sidebar__item-action',
-            innerHTML: Icons.plus
+            innerHTML: Icons.plus,
+            'data-tooltip': 'Добавить участника'
         });
         membersItem.appendChild(addMemberBtn);
+        membersItem.addEventListener('click', () => {
+            window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'members', workspaceId: ws.id } }));
+        });
         menu.appendChild(membersItem);
-        
+
         // Settings
         const settingsItem = createElement('div', { className: 'sidebar__item' });
         settingsItem.appendChild(createElement('span', { className: 'sidebar__item-icon', innerHTML: Icons.settings }));
         settingsItem.appendChild(createElement('span', { className: 'sidebar__item-text' }, 'Настройки'));
+        settingsItem.addEventListener('click', () => {
+            window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'settings', workspaceId: ws.id } }));
+        });
         menu.appendChild(settingsItem);
         
         wsBlock.appendChild(menu);

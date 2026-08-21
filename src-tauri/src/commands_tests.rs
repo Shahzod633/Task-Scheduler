@@ -165,6 +165,7 @@ fn import_rejects_a_newer_format_and_writes_nothing() {
             gradient: String::new(),
             is_starred: false,
             labels: vec![],
+            members: vec![],
             columns: vec![],
         },
     };
@@ -186,6 +187,7 @@ fn import_rejects_a_board_without_a_name() {
             gradient: String::new(),
             is_starred: false,
             labels: vec![],
+            members: vec![],
             columns: vec![],
         },
     };
@@ -206,6 +208,7 @@ fn import_skips_label_links_the_file_does_not_define() {
             gradient: String::new(),
             is_starred: false,
             labels: vec![],
+            members: vec![],
             columns: vec![ColumnExport {
                 name: "Колонка".into(),
                 position: 0,
@@ -220,6 +223,9 @@ fn import_skips_label_links_the_file_does_not_define() {
                     mistake_marked_at: None,
                     mistake_resolved_at: None,
                     label_ids: vec![999],
+                    assignee_id: None,
+                    author_id: None,
+                    priority: None,
                 }],
             }],
         },
@@ -268,4 +274,372 @@ fn backup_file_names_render_as_readable_dates() {
     // Anything unexpected falls back to the raw name rather than panicking.
     assert_eq!(parse_backup_stamp("что-то-другое.db"), "что-то-другое.db");
     assert_eq!(parse_backup_stamp("backup-123.db"), "backup-123.db");
+}
+
+// ============================================
+// Members, assignment and the workspace-wide list
+// ============================================
+// The migration below moves data the user has already typed (their name and
+// initials) between tables, and the deletion path has to cooperate with
+// enforced foreign keys. Both are verified here against the production schema
+// rather than reasoned about.
+
+/// Id of the member representing the user of this installation.
+fn self_member_id(conn: &Connection) -> i64 {
+    conn.query_row("SELECT id FROM members WHERE is_self = 1", [], |r| r.get(0)).unwrap()
+}
+
+/// Rewinds a database to how it looked before members existed, so the
+/// migration inside `create_schema` runs again on the next call.
+fn forget_members(conn: &Connection) {
+    conn.execute("UPDATE cards SET assignee_id = NULL, author_id = NULL", ()).unwrap();
+    conn.execute("DELETE FROM members", ()).unwrap();
+}
+
+#[test]
+fn the_existing_profile_becomes_the_self_member() {
+    let conn = test_db();
+
+    // A profile the user had already personalised before members existed.
+    conn.execute(
+        "UPDATE user_profile SET display_name = 'Шахзод', avatar_initials = 'ШИ' WHERE id = 1",
+        (),
+    ).unwrap();
+    forget_members(&conn);
+
+    crate::db::create_schema(&conn).unwrap();
+
+    let (name, initials, is_self): (String, String, i64) = conn
+        .query_row(
+            "SELECT name, initials, is_self FROM members WHERE is_self = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+
+    assert_eq!(name, "Шахзод", "имя из профиля должно было переехать без изменений");
+    assert_eq!(initials, "ШИ");
+    assert_eq!(is_self, 1);
+
+    // The old profile row is deliberately left intact, so the migration is not
+    // a one-way door.
+    let old_name: String = conn
+        .query_row("SELECT display_name FROM user_profile WHERE id = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(old_name, "Шахзод", "user_profile не должен затираться миграцией");
+}
+
+#[test]
+fn migration_is_idempotent() {
+    let conn = test_db();
+    for _ in 0..3 {
+        crate::db::create_schema(&conn).unwrap();
+    }
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM members", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 1, "повторный запуск create_schema не должен плодить участников");
+}
+
+#[test]
+fn a_second_self_member_is_rejected() {
+    let conn = test_db();
+    let result = conn.execute(
+        "INSERT INTO members (name, initials, color, is_self) VALUES ('Двойник', 'ДД', '#000', 1)",
+        (),
+    );
+    assert!(result.is_err(), "уникальный индекс должен запрещать второго is_self");
+}
+
+#[test]
+fn existing_cards_are_backfilled_with_the_user_as_author() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    seed_board(&conn, ws);
+
+    forget_members(&conn);
+    crate::db::create_schema(&conn).unwrap();
+
+    let orphans: i64 = conn
+        .query_row("SELECT COUNT(*) FROM cards WHERE author_id IS NULL", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(orphans, 0, "у существующих карточек должен появиться автор");
+
+    let self_id = self_member_id(&conn);
+    let wrong: i64 = conn
+        .query_row("SELECT COUNT(*) FROM cards WHERE author_id != ?1", params![self_id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(wrong, 0);
+}
+
+#[test]
+fn clearing_an_author_is_not_undone_by_a_restart() {
+    // The backfill runs once, when the self member is created — not on every
+    // start. Otherwise deliberately clearing an author would silently come back.
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    seed_board(&conn, ws);
+
+    conn.execute("UPDATE cards SET author_id = NULL", ()).unwrap();
+    crate::db::create_schema(&conn).unwrap(); // «перезапуск приложения»
+
+    let cleared: i64 = conn
+        .query_row("SELECT COUNT(*) FROM cards WHERE author_id IS NULL", [], |r| r.get(0))
+        .unwrap();
+    assert!(cleared > 0, "снятый автор не должен возвращаться при перезапуске");
+}
+
+#[test]
+fn deleting_a_member_releases_their_cards_instead_of_failing() {
+    let mut conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    seed_board(&conn, ws);
+
+    conn.execute("INSERT INTO members (name, initials, color) VALUES ('Пётр', 'ПП', '#f00')", ()).unwrap();
+    let petr = conn.last_insert_rowid();
+    conn.execute("UPDATE cards SET assignee_id = ?1, author_id = ?1", params![petr]).unwrap();
+
+    // Without clearing the references first this fails outright: foreign keys
+    // are enforced and ALTER TABLE could not declare ON DELETE SET NULL.
+    delete_member_from(&mut conn, petr).expect("удаление участника с назначенными карточками");
+
+    let left: i64 = conn
+        .query_row("SELECT COUNT(*) FROM members WHERE id = ?1", params![petr], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
+
+    let still_assigned: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cards WHERE assignee_id IS NOT NULL OR author_id IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(still_assigned, 0, "ссылки на удалённого участника должны быть сняты");
+
+    let violations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(violations, 0);
+
+    // The cards themselves must survive — this removes a label, not the work.
+    let cards: i64 = conn.query_row("SELECT COUNT(*) FROM cards", [], |r| r.get(0)).unwrap();
+    assert!(cards > 0, "удаление участника не должно трогать карточки");
+}
+
+#[test]
+fn the_user_cannot_delete_themselves() {
+    let mut conn = test_db();
+    let self_id = self_member_id(&conn);
+    assert!(delete_member_from(&mut conn, self_id).is_err());
+    assert!(delete_member_from(&mut conn, 9999).is_err(), "несуществующий участник — ошибка, а не тишина");
+}
+
+#[test]
+fn initials_are_derived_from_the_name() {
+    assert_eq!(default_initials("Иван Петров"), "ИП");
+    assert_eq!(default_initials("Мадина"), "МА");
+    assert_eq!(default_initials("  Анна   Мария  Ли "), "АМ");
+    assert_eq!(default_initials(""), "");
+}
+
+#[test]
+fn priority_is_clamped_to_what_the_schema_accepts() {
+    assert_eq!(normalize_priority(Some("High")), "High");
+    assert_eq!(normalize_priority(Some("Low")), "Low");
+    // A stale frontend or a hand-edited export must not be able to write a
+    // value the CHECK constraint would reject.
+    assert_eq!(normalize_priority(Some("СРОЧНО")), "Medium");
+    assert_eq!(normalize_priority(Some("high")), "Medium");
+    assert_eq!(normalize_priority(None), "Medium");
+}
+
+#[test]
+fn priority_and_people_survive_an_export_round_trip() {
+    let mut conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let board_id = seed_board(&conn, ws);
+
+    conn.execute("INSERT INTO members (name, initials, color) VALUES ('Пётр', 'ПП', '#f00')", ()).unwrap();
+    let petr = conn.last_insert_rowid();
+    let me = self_member_id(&conn);
+
+    let card_id: i64 = conn
+        .query_row("SELECT id FROM cards WHERE title = 'Задача 1'", [], |r| r.get(0))
+        .unwrap();
+    conn.execute(
+        "UPDATE cards SET assignee_id = ?1, author_id = ?2, priority = 'High' WHERE id = ?3",
+        params![petr, me, card_id],
+    ).unwrap();
+
+    let json = serde_json::to_string(&build_board_export(&conn, board_id).unwrap()).unwrap();
+
+    // Import back into the *same* database: both people are already in the
+    // directory, so nothing may be duplicated.
+    let members_before: i64 = conn.query_row("SELECT COUNT(*) FROM members", [], |r| r.get(0)).unwrap();
+    let export: BoardExport = serde_json::from_str(&json).unwrap();
+    let new_board = import_board_into(&mut conn, ws, export).unwrap();
+
+    let members_after: i64 = conn.query_row("SELECT COUNT(*) FROM members", [], |r| r.get(0)).unwrap();
+    assert_eq!(members_before, members_after, "импорт не должен плодить дубликаты участников");
+
+    let (priority, assignee, author): (String, i64, i64) = conn
+        .query_row(
+            "SELECT c.priority, c.assignee_id, c.author_id
+             FROM cards c INNER JOIN columns col ON col.id = c.column_id
+             WHERE col.board_id = ?1 AND c.title = 'Задача 1'",
+            params![new_board],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+
+    assert_eq!(priority, "High");
+    assert_eq!(assignee, petr, "исполнитель должен сопоставиться по имени");
+    assert_eq!(author, me);
+}
+
+#[test]
+fn importing_an_unknown_person_adds_them_to_the_directory() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let board_id = seed_board(&conn, ws);
+
+    conn.execute("INSERT INTO members (name, initials, color) VALUES ('Гость', 'ГГ', '#0ff')", ()).unwrap();
+    let guest = conn.last_insert_rowid();
+    conn.execute("UPDATE cards SET assignee_id = ?1 WHERE title = 'Задача 1'", params![guest]).unwrap();
+
+    let json = serde_json::to_string(&build_board_export(&conn, board_id).unwrap()).unwrap();
+
+    // A different install: same file, but nobody named "Гость" here.
+    let mut fresh = test_db();
+    let fresh_ws: i64 = fresh.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let export: BoardExport = serde_json::from_str(&json).unwrap();
+    let new_board = import_board_into(&mut fresh, fresh_ws, export).unwrap();
+
+    let assignee_name: String = fresh
+        .query_row(
+            "SELECT m.name FROM cards c
+             INNER JOIN columns col ON col.id = c.column_id
+             INNER JOIN members m ON m.id = c.assignee_id
+             WHERE col.board_id = ?1 AND c.title = 'Задача 1'",
+            params![new_board],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(assignee_name, "Гость", "неизвестный исполнитель должен добавиться в справочник");
+
+    let is_self: i64 = fresh
+        .query_row("SELECT is_self FROM members WHERE name = 'Гость'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(is_self, 0, "импортированный участник не должен становиться владельцем установки");
+}
+
+#[test]
+fn an_export_from_before_members_still_imports() {
+    // A file written by the previous build: no `members` section, no priority,
+    // no assignee. It must import rather than being rejected.
+    let old_json = r#"{
+        "taskflow_export_version": 1,
+        "exported_at": "2026-08-17 12:00:00",
+        "board": {
+            "name": "Старый экспорт",
+            "gradient": "",
+            "is_starred": false,
+            "labels": [],
+            "columns": [
+                { "name": "Дела", "position": 0, "archived": 0,
+                  "cards": [ { "title": "Старая задача", "description": "", "position": 0 } ] }
+            ]
+        }
+    }"#;
+
+    let mut conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let export: BoardExport = serde_json::from_str(old_json).unwrap();
+    let board_id = import_board_into(&mut conn, ws, export).unwrap();
+
+    let (priority, assignee): (String, Option<i64>) = conn
+        .query_row(
+            "SELECT c.priority, c.assignee_id FROM cards c
+             INNER JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1",
+            params![board_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(priority, "Medium", "карточка без приоритета должна получить значение по умолчанию");
+    assert_eq!(assignee, None);
+}
+
+#[test]
+fn the_workspace_list_spans_every_board_at_once() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    seed_board(&conn, ws);
+
+    // A second board, so the screen has something to actually span.
+    conn.execute("INSERT INTO boards (workspace_id, name) VALUES (?1, 'Доска Б')", params![ws]).unwrap();
+    let board_b = conn.last_insert_rowid();
+    conn.execute("INSERT INTO columns (board_id, name, position) VALUES (?1, 'Идеи', 0)", params![board_b]).unwrap();
+    let col_b = conn.last_insert_rowid();
+    conn.execute("INSERT INTO cards (column_id, title, description, position) VALUES (?1, 'Из другой доски', '', 0)", params![col_b]).unwrap();
+
+    // A card in another workspace must not leak in.
+    conn.execute("INSERT INTO workspaces (name) VALUES ('Чужое')", ()).unwrap();
+    let other_ws = conn.last_insert_rowid();
+    conn.execute("INSERT INTO boards (workspace_id, name) VALUES (?1, 'Чужая доска')", params![other_ws]).unwrap();
+    let other_board = conn.last_insert_rowid();
+    conn.execute("INSERT INTO columns (board_id, name, position) VALUES (?1, 'Чужая', 0)", params![other_board]).unwrap();
+    let other_col = conn.last_insert_rowid();
+    conn.execute("INSERT INTO cards (column_id, title, description, position) VALUES (?1, 'Чужая задача', '', 0)", params![other_col]).unwrap();
+
+    let list = build_workspace_card_list(&conn, ws).unwrap();
+    let titles: Vec<&str> = list.cards.iter().map(|c| c.title.as_str()).collect();
+
+    assert!(titles.contains(&"Задача 1"));
+    assert!(titles.contains(&"Из другой доски"), "список должен охватывать все доски пространства");
+    assert!(!titles.contains(&"Чужая задача"), "чужое пространство не должно попадать в список");
+    // Archived cards, and cards inside archived columns, stay out.
+    assert!(!titles.contains(&"Архивная"));
+    assert!(!titles.contains(&"Ошибка"), "карточка в архивной колонке не должна показываться");
+
+    let boards: Vec<&str> = list.cards.iter().map(|c| c.board_name.as_str()).collect();
+    assert!(boards.contains(&"Доска А") && boards.contains(&"Доска Б"));
+
+    // Every row must know its own board's columns, or the status dropdown
+    // would offer the wrong ones.
+    let board_a = list.boards.iter().find(|b| b.name == "Доска А").unwrap();
+    let col_names: Vec<&str> = board_a.columns.iter().map(|c| c.name.as_str()).collect();
+    assert!(col_names.contains(&"Бэклог"));
+    assert!(!col_names.contains(&"Старое"), "архивные колонки не предлагаются как статус");
+    assert!(!col_names.contains(&"Идеи"), "колонки чужой доски не должны попадать в список");
+}
+
+#[test]
+fn the_list_carries_whole_member_records_not_just_ids() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    seed_board(&conn, ws);
+
+    conn.execute("INSERT INTO members (name, initials, color) VALUES ('Пётр', 'ПП', '#ff0000')", ()).unwrap();
+    let petr = conn.last_insert_rowid();
+    conn.execute("UPDATE cards SET assignee_id = ?1 WHERE title = 'Задача 1'", params![petr]).unwrap();
+
+    // Every other card seed_board makes is archived or sits in an archived
+    // column, so the list would otherwise contain nothing unassigned to check.
+    let live_col: i64 = conn
+        .query_row("SELECT id FROM columns WHERE name = 'Бэклог'", [], |r| r.get(0))
+        .unwrap();
+    conn.execute(
+        "INSERT INTO cards (column_id, title, description, position) VALUES (?1, 'Ничья', '', 5)",
+        params![live_col],
+    ).unwrap();
+
+    let list = build_workspace_card_list(&conn, ws).unwrap();
+    let card = list.cards.iter().find(|c| c.title == "Задача 1").unwrap();
+
+    let assignee = card.assignee.as_ref().expect("исполнитель должен приехать вместе со строкой");
+    assert_eq!(assignee.name, "Пётр");
+    assert_eq!(assignee.color, "#ff0000", "цвет нужен для аватарки — иначе понадобился бы второй запрос");
+    assert_eq!(assignee.initials, "ПП");
+
+    let unassigned = list.cards.iter().find(|c| c.assignee.is_none());
+    assert!(unassigned.is_some(), "карточка без исполнителя — это None, а не пустая запись");
 }

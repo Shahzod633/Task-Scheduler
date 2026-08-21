@@ -64,6 +64,16 @@ pub fn run() {
             commands::open_backup_dir,
             commands::get_app_version,
 
+            commands::list_members,
+            commands::create_member,
+            commands::update_member,
+            commands::delete_member,
+
+            commands::update_card_assignee,
+            commands::update_card_author,
+            commands::update_card_priority,
+            commands::list_all_cards_in_workspace,
+
             commands::get_labels,
             commands::create_label,
             commands::add_label_to_card,

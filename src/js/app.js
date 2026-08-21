@@ -19,6 +19,8 @@ import { renderPlannerPage } from './planner.js';
 import { renderRecentPage } from './recent.js';
 import { renderFavoritesPage } from './favorites.js';
 import { renderMistakesPage } from './mistakes.js';
+import { renderListPage } from './list.js';
+import { renderMembersPage } from './members.js';
 import { $, debounce, showToast } from './utils.js';
 
 let currentView = { name: 'hub', params: {} };
@@ -26,11 +28,11 @@ let defaultWorkspaceId = null;
 let lastBoardId = null;
 
 // Views that show the left sidebar (workspace/hub-style navigation)
-const SIDEBAR_VIEWS = new Set(['hub', 'templates', 'home', 'settings', 'recent', 'favorites', 'mistakes']);
+const SIDEBAR_VIEWS = new Set(['hub', 'templates', 'home', 'settings', 'recent', 'favorites', 'mistakes', 'list', 'members']);
 // Views that show the floating dock (board working context)
 const DOCK_VIEWS = new Set(['board', 'inbox', 'planner']);
 // view name -> sidebar top-level item id
-const SIDEBAR_ITEM_IDS = { hub: 'sidebar-boards', templates: 'sidebar-templates', home: 'sidebar-home', settings: 'sidebar-settings' };
+const SIDEBAR_ITEM_IDS = { hub: 'sidebar-boards', list: 'sidebar-list', templates: 'sidebar-templates', home: 'sidebar-home', settings: 'sidebar-settings' };
 
 const ROUTES = {
     hub: (params) => renderHub(params.workspaceId || defaultWorkspaceId),
@@ -52,6 +54,8 @@ const ROUTES = {
     recent: (params) => renderRecentPage(params.workspaceId || defaultWorkspaceId),
     favorites: (params) => renderFavoritesPage(params.workspaceId || defaultWorkspaceId),
     mistakes: (params) => renderMistakesPage(params.workspaceId || defaultWorkspaceId),
+    list: (params) => renderListPage(params.workspaceId || defaultWorkspaceId),
+    members: (params) => renderMembersPage(params.workspaceId || defaultWorkspaceId),
 };
 
 /**
@@ -135,6 +139,10 @@ function renderLayout() {
                         <span class="sidebar__item-icon">${Icons.boards}</span>
                         <span class="sidebar__item-text">Доски</span>
                     </div>
+                    <div class="sidebar__item" id="sidebar-list">
+                        <span class="sidebar__item-icon">${Icons.list}</span>
+                        <span class="sidebar__item-text">Список</span>
+                    </div>
                     <div class="sidebar__item" id="sidebar-templates">
                         <span class="sidebar__item-icon">${Icons.template}</span>
                         <span class="sidebar__item-text">Шаблоны</span>
@@ -188,6 +196,10 @@ function renderLayout() {
     // Event: Sidebar navigation
     $('#sidebar-boards').addEventListener('click', () => {
         navigateTo('hub', { workspaceId: defaultWorkspaceId });
+    });
+
+    $('#sidebar-list').addEventListener('click', () => {
+        navigateTo('list', { workspaceId: defaultWorkspaceId });
     });
 
     $('#sidebar-templates').addEventListener('click', () => {

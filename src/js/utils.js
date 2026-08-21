@@ -77,6 +77,32 @@ export function formatDate(dateStr) {
 }
 
 /**
+ * Format a deadline.
+ *
+ * `formatDate` above measures how long ago something happened, which is right
+ * for a notification and wrong for a due date: a deadline is in the future, so
+ * its difference is negative, falls into the first branch and prints
+ * "только что". Deadlines get an absolute date instead, with today and tomorrow
+ * spelled out because those are the two that matter at a glance.
+ */
+export function formatDueDate(dateStr) {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    if (Number.isNaN(date.getTime())) return '';
+
+    const atMidnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const days = Math.round((atMidnight(date) - atMidnight(new Date())) / 86400000);
+
+    if (days === 0) return 'Сегодня';
+    if (days === 1) return 'Завтра';
+    if (days === -1) return 'Вчера';
+
+    const options = { day: 'numeric', month: 'short' };
+    if (date.getFullYear() !== new Date().getFullYear()) options.year = 'numeric';
+    return date.toLocaleDateString('ru-RU', options);
+}
+
+/**
  * Check if a date is overdue
  */
 export function isOverdue(dateStr) {

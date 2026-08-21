@@ -114,3 +114,85 @@ fn pruning_below_the_limit_deletes_nothing() {
     let count = fs::read_dir(&dir).unwrap().count();
     assert_eq!(count, 3);
 }
+
+// ─── Migration rehearsal against a copy of a real database ───
+//
+// Ignored by default: it needs a database that only exists on a machine the app
+// has actually been used on. Run it before letting a schema change touch live
+// data:
+//
+//   TASKFLOW_REAL_DB=/path/to/a/COPY/of/trello_clone.db \
+//       cargo test --lib rehearse_migration -- --ignored --nocapture
+//
+// Always point it at a copy. It opens the file for writing.
+
+#[test]
+#[ignore]
+fn rehearse_migration_on_a_real_database() {
+    let Ok(path) = std::env::var("TASKFLOW_REAL_DB") else {
+        panic!("укажите TASKFLOW_REAL_DB — путь к КОПИИ реальной базы");
+    };
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+    let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+
+    let cards_before = count("SELECT COUNT(*) FROM cards");
+    let boards_before = count("SELECT COUNT(*) FROM boards");
+    let columns_before = count("SELECT COUNT(*) FROM columns");
+    let labels_before = count("SELECT COUNT(*) FROM labels");
+    let (name_before, initials_before): (String, String) = conn
+        .query_row(
+            "SELECT display_name, avatar_initials FROM user_profile WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+
+    println!(
+        "ДО:    доски {}, колонки {}, карточки {}, метки {}, профиль «{}» ({})",
+        boards_before, columns_before, cards_before, labels_before, name_before, initials_before
+    );
+
+    super::create_schema(&conn).expect("миграция должна пройти на реальной базе");
+    // Twice, because the app runs it on every start.
+    super::create_schema(&conn).expect("повторный запуск миграции");
+
+    let cards_after = count("SELECT COUNT(*) FROM cards");
+    let members = count("SELECT COUNT(*) FROM members");
+    let no_author = count("SELECT COUNT(*) FROM cards WHERE author_id IS NULL");
+    let bad_priority = count("SELECT COUNT(*) FROM cards WHERE priority NOT IN ('Low','Medium','High')");
+    let violations = count("SELECT COUNT(*) FROM pragma_foreign_key_check");
+    let (self_name, self_initials): (String, String) = conn
+        .query_row("SELECT name, initials FROM members WHERE is_self = 1", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+
+    println!(
+        "ПОСЛЕ: доски {}, колонки {}, карточки {}, метки {}, участников {}, «я» — «{}» ({})",
+        count("SELECT COUNT(*) FROM boards"),
+        count("SELECT COUNT(*) FROM columns"),
+        cards_after,
+        count("SELECT COUNT(*) FROM labels"),
+        members,
+        self_name,
+        self_initials
+    );
+    println!(
+        "без автора {}, недопустимый приоритет {}, нарушений внешних ключей {}",
+        no_author, bad_priority, violations
+    );
+
+    assert_eq!(cards_before, cards_after, "миграция не должна терять карточки");
+    assert_eq!(boards_before, count("SELECT COUNT(*) FROM boards"), "миграция не должна терять доски");
+    assert_eq!(columns_before, count("SELECT COUNT(*) FROM columns"), "миграция не должна терять колонки");
+    assert_eq!(labels_before, count("SELECT COUNT(*) FROM labels"), "миграция не должна терять метки");
+    assert_eq!(members, 1, "должен появиться ровно один участник — сам пользователь");
+    assert_eq!(self_name, name_before, "имя из профиля должно перенестись дословно");
+    assert_eq!(self_initials, initials_before);
+    assert_eq!(no_author, 0, "у всех существующих карточек должен появиться автор");
+    assert_eq!(bad_priority, 0);
+    assert_eq!(violations, 0, "внешние ключи должны остаться согласованными");
+}

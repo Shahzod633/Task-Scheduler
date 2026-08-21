@@ -98,6 +98,56 @@ export async function archiveCard(id) {
     return await invoke('archive_card', { id });
 }
 
+// ─── Members ───
+// A local directory of names, used only as a label on cards. No accounts, no
+// passwords, no network — the app stays a single offline SQLite file.
+
+export async function listMembers() {
+    return await invoke('list_members');
+}
+
+export async function createMember(name) {
+    return await invoke('create_member', { name });
+}
+
+/** `initials` may be null to re-derive them from the name. */
+export async function updateMember(id, name, color, initials = null) {
+    return await invoke('update_member', { id, name, color, initials });
+}
+
+export async function deleteMember(id) {
+    return await invoke('delete_member', { id });
+}
+
+// ─── Assignment and priority ───
+
+/** Pass `null` as memberId to clear the assignee. */
+export async function updateCardAssignee(cardId, memberId) {
+    return await invoke('update_card_assignee', { cardId, memberId });
+}
+
+export async function updateCardAuthor(cardId, memberId) {
+    return await invoke('update_card_author', { cardId, memberId });
+}
+
+/** `priority` is one of 'Low' | 'Medium' | 'High'. */
+export async function updateCardPriority(cardId, priority) {
+    return await invoke('update_card_priority', { cardId, priority });
+}
+
+// ─── Workspace-wide card list (the "Список" screen) ───
+
+/**
+ * Every non-archived card across every board of the workspace, plus each
+ * board's columns — in one call, so the screen never fans out into a query
+ * per board.
+ *
+ * @returns {Promise<{cards: object[], boards: object[]}>}
+ */
+export async function listAllCardsInWorkspace(workspaceId) {
+    return await invoke('list_all_cards_in_workspace', { workspaceId });
+}
+
 // ─── Labels ───
 
 export async function getLabels(boardId) {

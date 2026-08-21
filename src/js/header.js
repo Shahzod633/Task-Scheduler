@@ -6,6 +6,7 @@
 import * as api from './api.js';
 import Icons from './icons.js';
 import { openPopover, closePopovers } from './popover.js';
+import { invalidateMembers } from './members.js';
 import { createElement, $, $$, showToast, formatDate } from './utils.js';
 
 // The version is no longer hardcoded here — it had already drifted from the two
@@ -261,6 +262,9 @@ export async function renderProfileFields(container, opts = {}) {
         try {
             await api.updateUserProfile(displayName, initials, 'dark');
             updateHeaderAvatar(initials);
+            // The profile *is* the `is_self` member now, so every avatar drawn
+            // from the cached directory is stale until it is reloaded.
+            invalidateMembers();
             showToast('Профиль сохранён');
             if (opts.onSaved) opts.onSaved();
         } catch (e) {

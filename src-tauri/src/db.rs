@@ -109,6 +109,32 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         (),
     )?;
 
+    // Local directory of people, used only as a label on cards ("исполнитель",
+    // "автор"). Deliberately not accounts: no credentials, no per-workspace
+    // membership, nothing leaves this file. Must exist before `cards`, which
+    // references it.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS members (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            initials TEXT NOT NULL DEFAULT '',
+            color TEXT NOT NULL DEFAULT '#6366f1',
+            is_self INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        )",
+        (),
+    )?;
+
+    // Exactly one row may be the user themselves. A partial unique index is the
+    // only way SQLite can enforce that; without it a bug elsewhere could quietly
+    // produce two "self" members and the profile modal would edit whichever
+    // came back first.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_members_single_self
+         ON members(is_self) WHERE is_self = 1",
+        (),
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS cards (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,6 +148,9 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             is_mistake INTEGER DEFAULT 0,
             mistake_marked_at TEXT,
             mistake_resolved_at TEXT,
+            assignee_id INTEGER REFERENCES members(id),
+            author_id INTEGER REFERENCES members(id),
+            priority TEXT DEFAULT 'Medium' CHECK (priority IN ('Low', 'Medium', 'High')),
             FOREIGN KEY (column_id) REFERENCES columns(id)
         )",
         (),
@@ -195,9 +224,41 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
     if !table_has_column(conn,"cards", "mistake_resolved_at") {
         conn.execute("ALTER TABLE cards ADD COLUMN mistake_resolved_at TEXT", ())?;
     }
+    // `ADD COLUMN ... REFERENCES` is only legal while foreign keys are on if the
+    // column defaults to NULL — which these do. The flip side is that SQLite
+    // offers no way to attach `ON DELETE SET NULL` after the fact, so
+    // `delete_member` clears these columns by hand before deleting the row.
+    if !table_has_column(conn, "cards", "assignee_id") {
+        conn.execute("ALTER TABLE cards ADD COLUMN assignee_id INTEGER REFERENCES members(id)", ())?;
+    }
+    if !table_has_column(conn, "cards", "author_id") {
+        conn.execute("ALTER TABLE cards ADD COLUMN author_id INTEGER REFERENCES members(id)", ())?;
+    }
+    if !table_has_column(conn, "cards", "priority") {
+        // Unlike some databases, SQLite hands existing rows the declared default
+        // when a column is added, so every current card becomes 'Medium' without
+        // a separate UPDATE.
+        conn.execute(
+            "ALTER TABLE cards ADD COLUMN priority TEXT DEFAULT 'Medium'
+             CHECK (priority IN ('Low', 'Medium', 'High'))",
+            (),
+        )?;
+    }
 
     // Ensure the singleton user profile row exists
     conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1)", ())?;
+
+    // ─── user_profile → members ───
+    migrate_profile_into_members(conn)?;
+
+    // The workspace-wide card list joins cards → columns → boards for a whole
+    // workspace at once; none of those foreign keys had an index before.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_cards_column     ON cards(column_id);
+         CREATE INDEX IF NOT EXISTS idx_cards_assignee   ON cards(assignee_id);
+         CREATE INDEX IF NOT EXISTS idx_columns_board    ON columns(board_id);
+         CREATE INDEX IF NOT EXISTS idx_boards_workspace ON boards(workspace_id);",
+    )?;
 
     // Backfill a hidden Inbox board for every existing workspace
     {
@@ -212,6 +273,54 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Seeds the member directory from the existing single-user profile.
+///
+/// The profile modal in the header has been storing a name and initials in
+/// `user_profile` since long before members existed; those are the user's own,
+/// so they become the `is_self` member rather than being asked for a second
+/// time.
+///
+/// `user_profile` is deliberately left in place afterwards. It still owns
+/// `theme`, which is an application setting and not a property of a person, and
+/// keeping the old name/initials columns untouched means this migration can be
+/// re-examined later instead of being a one-way door.
+///
+/// Runs once: it does nothing at all if an `is_self` member already exists.
+fn migrate_profile_into_members(conn: &Connection) -> Result<()> {
+    let already_migrated: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM members WHERE is_self = 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if already_migrated {
+        return Ok(());
+    }
+
+    let (name, initials): (String, String) = conn.query_row(
+        "SELECT display_name, avatar_initials FROM user_profile WHERE id = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    conn.execute(
+        "INSERT INTO members (name, initials, color, is_self) VALUES (?1, ?2, ?3, 1)",
+        params![name, initials, crate::models::MEMBER_COLORS[0]],
+    )?;
+    let self_id = conn.last_insert_rowid();
+
+    // Every card that existed before this migration was written by the only
+    // person the app has ever had. Backfilling is done here — once, at the
+    // moment the self member appears — rather than on every start, so that
+    // clearing a card's author later actually sticks.
+    conn.execute(
+        "UPDATE cards SET author_id = ?1 WHERE author_id IS NULL",
+        params![self_id],
+    )?;
+
+    log::info!("Профиль перенесён в справочник участников (id = {})", self_id);
     Ok(())
 }
 

@@ -1,10 +1,12 @@
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
 use tauri::State;
 use crate::db::DbState;
 use crate::models::{
     Workspace, Board, Column, Card, Notification, UserProfile, BackupInfo,
-    BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, EXPORT_FORMAT_VERSION,
+    BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, MemberExport,
+    Member, CardRow, BoardColumns, WorkspaceCardList, MEMBER_COLORS, PRIORITIES,
+    EXPORT_FORMAT_VERSION,
 };
 
 #[cfg(test)]
@@ -251,7 +253,7 @@ pub fn reorder_columns(board_id: i64, column_ids: Vec<i64>, state: State<'_, DbS
 
 // ─── Cards ───
 
-const CARD_COLUMNS: &str = "id, column_id, title, description, position, due_date, created_at, archived, is_mistake, mistake_marked_at, mistake_resolved_at";
+const CARD_COLUMNS: &str = "id, column_id, title, description, position, due_date, created_at, archived, is_mistake, mistake_marked_at, mistake_resolved_at, assignee_id, author_id, priority";
 
 fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
     Ok(Card {
@@ -266,6 +268,12 @@ fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
         is_mistake: { let m: i8 = row.get(8)?; m != 0 },
         mistake_marked_at: row.get(9)?,
         mistake_resolved_at: row.get(10)?,
+        assignee_id: row.get(11)?,
+        author_id: row.get(12)?,
+        // Older rows written before the column existed can still read back NULL
+        // if the default was somehow bypassed; the board would then have no
+        // priority stripe at all rather than a neutral one.
+        priority: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "Medium".to_string()),
         labels: Vec::new(),
         board_id: None,
         board_name: None,
@@ -278,9 +286,9 @@ fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
 /// (used by the planner and mistake-tracking dashboards).
 fn row_to_card_with_board(row: &rusqlite::Row) -> rusqlite::Result<Card> {
     let mut card = row_to_card(row)?;
-    card.board_id = row.get(11)?;
-    card.board_name = row.get(12)?;
-    card.column_name = row.get(13)?;
+    card.board_id = row.get(14)?;
+    card.board_name = row.get(15)?;
+    card.column_name = row.get(16)?;
     Ok(card)
 }
 
@@ -307,15 +315,23 @@ pub fn create_card(column_id: i64, title: String, description: String, state: St
         |row| row.get(0)
     ).unwrap_or(0);
 
+    // A new card is authored by whoever is using the app. Remains editable —
+    // sometimes one person files a task on behalf of another.
+    let author_id: Option<i64> = conn
+        .query_row("SELECT id FROM members WHERE is_self = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(to_string_err)?;
+
     conn.execute(
-        "INSERT INTO cards (column_id, title, description, position) VALUES (?1, ?2, ?3, ?4)",
-        params![column_id, title, description, pos],
+        "INSERT INTO cards (column_id, title, description, position, author_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![column_id, title, description, pos, author_id],
     ).map_err(to_string_err)?;
 
     let id = conn.last_insert_rowid();
     Ok(Card {
         id, column_id, title, description, position: pos, due_date: None, created_at: "".into(), archived: 0,
         is_mistake: false, mistake_marked_at: None, mistake_resolved_at: None,
+        assignee_id: None, author_id, priority: "Medium".into(),
         labels: vec![], board_id: None, board_name: None, column_name: None,
     })
 }
@@ -432,6 +448,31 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(to_string_err)?;
 
+    // Only the members this board actually points at — exporting the whole
+    // directory would drag unrelated people into a file about one board.
+    let mut member_stmt = conn
+        .prepare(
+            "SELECT DISTINCT m.id, m.name, m.initials, m.color
+             FROM members m
+             JOIN cards c ON c.assignee_id = m.id OR c.author_id = m.id
+             JOIN columns col ON col.id = c.column_id
+             WHERE col.board_id = ?1
+             ORDER BY m.id ASC",
+        )
+        .map_err(to_string_err)?;
+    let members: Vec<MemberExport> = member_stmt
+        .query_map(params![board_id], |row| {
+            Ok(MemberExport {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                initials: row.get(2)?,
+                color: row.get(3)?,
+            })
+        })
+        .map_err(to_string_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(to_string_err)?;
+
     let mut column_stmt = conn
         .prepare("SELECT id, name, position, archived FROM columns WHERE board_id = ?1 ORDER BY position ASC")
         .map_err(to_string_err)?;
@@ -446,7 +487,8 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
     let mut card_stmt = conn
         .prepare(
             "SELECT id, title, description, position, due_date, archived,
-                    is_mistake, mistake_marked_at, mistake_resolved_at
+                    is_mistake, mistake_marked_at, mistake_resolved_at,
+                    assignee_id, author_id, priority
              FROM cards WHERE column_id = ?1 ORDER BY position ASC",
         )
         .map_err(to_string_err)?;
@@ -472,6 +514,9 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
                         mistake_marked_at: row.get(7)?,
                         mistake_resolved_at: row.get(8)?,
                         label_ids: Vec::new(),
+                        assignee_id: row.get(9)?,
+                        author_id: row.get(10)?,
+                        priority: row.get(11)?,
                     },
                 ))
             })
@@ -504,6 +549,7 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
             gradient: board.gradient,
             is_starred: board.is_starred,
             labels,
+            members,
             columns,
         },
     })
@@ -565,6 +611,51 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
         label_id_map.insert(label.id, tx.last_insert_rowid());
     }
 
+    // Export-local member id → member id in this database.
+    //
+    // Matched by name rather than id: the same number belongs to a different
+    // person in another install. A name that is not in the directory yet is
+    // added, so importing a board from someone else brings their people with
+    // it instead of silently blanking every assignee.
+    let mut member_id_map: HashMap<i64, i64> = HashMap::new();
+    for member in &export.board.members {
+        let name = member.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT id FROM members WHERE lower(trim(name)) = lower(?1) LIMIT 1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(to_string_err)?;
+
+        let new_id = match existing {
+            Some(id) => id,
+            None => {
+                let initials = if member.initials.trim().is_empty() {
+                    default_initials(name)
+                } else {
+                    member.initials.trim().to_uppercase()
+                };
+                let color = if member.color.trim().is_empty() {
+                    next_member_color(&tx).map_err(to_string_err)?
+                } else {
+                    member.color.clone()
+                };
+                tx.execute(
+                    "INSERT INTO members (name, initials, color, is_self) VALUES (?1, ?2, ?3, 0)",
+                    params![name, initials, color],
+                ).map_err(to_string_err)?;
+                tx.last_insert_rowid()
+            }
+        };
+        member_id_map.insert(member.id, new_id);
+    }
+
     for (col_index, column) in export.board.columns.iter().enumerate() {
         tx.execute(
             "INSERT INTO columns (board_id, name, position, archived) VALUES (?1, ?2, ?3, ?4)",
@@ -573,13 +664,21 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
         let column_id = tx.last_insert_rowid();
 
         for (card_index, card) in column.cards.iter().enumerate() {
+            // A member id missing from the file's own directory is dropped
+            // rather than failing the import — same rule as labels.
+            let assignee_id = card.assignee_id.and_then(|id| member_id_map.get(&id).copied());
+            let author_id = card.author_id.and_then(|id| member_id_map.get(&id).copied());
+            let priority = normalize_priority(card.priority.as_deref());
+
             tx.execute(
                 "INSERT INTO cards (column_id, title, description, position, due_date, archived,
-                                    is_mistake, mistake_marked_at, mistake_resolved_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                    is_mistake, mistake_marked_at, mistake_resolved_at,
+                                    assignee_id, author_id, priority)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     column_id, card.title, card.description, card_index as i64, card.due_date,
-                    card.archived, card.is_mistake as i64, card.mistake_marked_at, card.mistake_resolved_at
+                    card.archived, card.is_mistake as i64, card.mistake_marked_at, card.mistake_resolved_at,
+                    assignee_id, author_id, priority
                 ],
             ).map_err(to_string_err)?;
             let card_id = tx.last_insert_rowid();
@@ -608,6 +707,318 @@ pub fn import_board_from_file(workspace_id: i64, path: String, state: State<'_, 
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("Не удалось прочитать файл: {}", e))?;
     import_board(workspace_id, json, state)
+}
+
+// ─── Members ───
+//
+// A local directory of names used as card labels ("исполнитель", "автор").
+// Not accounts: nothing here authenticates anyone or leaves the machine.
+
+fn row_to_member(row: &rusqlite::Row) -> rusqlite::Result<Member> {
+    Ok(Member {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        initials: row.get(2)?,
+        color: row.get(3)?,
+        is_self: { let s: i64 = row.get(4)?; s != 0 },
+        created_at: row.get(5)?,
+    })
+}
+
+const MEMBER_COLUMNS: &str = "id, name, initials, color, is_self, created_at";
+
+/// First two letters of the first two words — "Иван Петров" → "ИП", a
+/// single-word name → its first two letters.
+fn default_initials(name: &str) -> String {
+    let words: Vec<&str> = name.split_whitespace().collect();
+    let initials: String = match words.len() {
+        0 => String::new(),
+        1 => words[0].chars().take(2).collect(),
+        _ => words
+            .iter()
+            .take(2)
+            .filter_map(|w| w.chars().next())
+            .collect(),
+    };
+    initials.to_uppercase()
+}
+
+/// Next colour in the fixed palette, chosen by how many members already exist
+/// so consecutive additions never land on the same colour.
+fn next_member_color(conn: &rusqlite::Connection) -> rusqlite::Result<String> {
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM members", [], |row| row.get(0))?;
+    Ok(MEMBER_COLORS[(count as usize) % MEMBER_COLORS.len()].to_string())
+}
+
+/// Maps anything to a value the schema's CHECK constraint accepts, so a
+/// malformed import or a stale frontend cannot produce a card the database
+/// refuses to store.
+fn normalize_priority(value: Option<&str>) -> String {
+    match value {
+        Some(v) if PRIORITIES.contains(&v) => v.to_string(),
+        _ => "Medium".to_string(),
+    }
+}
+
+#[tauri::command]
+pub fn list_members(state: State<'_, DbState>) -> CmdResult<Vec<Member>> {
+    let conn = state.conn.lock().unwrap();
+    // The user first, then everyone else in the order they were added.
+    let sql = format!("SELECT {} FROM members ORDER BY is_self DESC, id ASC", MEMBER_COLUMNS);
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
+    let iter = stmt.query_map([], row_to_member).map_err(to_string_err)?;
+
+    let mut res = Vec::new();
+    for m in iter { res.push(m.map_err(to_string_err)?); }
+    Ok(res)
+}
+
+#[tauri::command]
+pub fn create_member(name: String, state: State<'_, DbState>) -> CmdResult<Member> {
+    let conn = state.conn.lock().unwrap();
+
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Имя участника не может быть пустым".to_string());
+    }
+
+    let initials = default_initials(&name);
+    let color = next_member_color(&conn).map_err(to_string_err)?;
+
+    conn.execute(
+        "INSERT INTO members (name, initials, color, is_self) VALUES (?1, ?2, ?3, 0)",
+        params![name, initials, color],
+    ).map_err(to_string_err)?;
+
+    let id = conn.last_insert_rowid();
+    let sql = format!("SELECT {} FROM members WHERE id = ?1", MEMBER_COLUMNS);
+    conn.query_row(&sql, params![id], row_to_member).map_err(to_string_err)
+}
+
+/// Renames a member and/or changes their avatar colour.
+///
+/// `initials` is optional: passing `None` re-derives them from the new name,
+/// which is what the members screen wants, while the profile form sends the two
+/// letters the user typed.
+#[tauri::command]
+pub fn update_member(
+    id: i64,
+    name: String,
+    color: String,
+    initials: Option<String>,
+    state: State<'_, DbState>,
+) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Имя участника не может быть пустым".to_string());
+    }
+
+    let initials = match initials {
+        Some(raw) if !raw.trim().is_empty() => raw.trim().chars().take(2).collect::<String>().to_uppercase(),
+        _ => default_initials(&name),
+    };
+
+    conn.execute(
+        "UPDATE members SET name = ?1, initials = ?2, color = ?3 WHERE id = ?4",
+        params![name, initials, color, id],
+    ).map_err(to_string_err)?;
+    Ok(())
+}
+
+/// Removes a member from the directory.
+///
+/// Foreign keys are enforced, and `ALTER TABLE` gave no way to declare
+/// `ON DELETE SET NULL` on the two columns pointing here — so the references
+/// are cleared explicitly first, inside the same transaction as the delete.
+/// Without that, deleting anyone who has ever been assigned a card fails with a
+/// constraint error.
+#[tauri::command]
+pub fn delete_member(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let mut conn = state.conn.lock().unwrap();
+    delete_member_from(&mut conn, id)
+}
+
+fn delete_member_from(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
+    let is_self: bool = conn
+        .query_row("SELECT is_self FROM members WHERE id = ?1", params![id], |row| {
+            let s: i64 = row.get(0)?;
+            Ok(s != 0)
+        })
+        .optional()
+        .map_err(to_string_err)?
+        .ok_or_else(|| "Участник не найден".to_string())?;
+
+    if is_self {
+        return Err("Нельзя удалить себя из списка участников".to_string());
+    }
+
+    let tx = conn.transaction().map_err(to_string_err)?;
+    tx.execute("UPDATE cards SET assignee_id = NULL WHERE assignee_id = ?1", params![id])
+        .map_err(to_string_err)?;
+    tx.execute("UPDATE cards SET author_id = NULL WHERE author_id = ?1", params![id])
+        .map_err(to_string_err)?;
+    tx.execute("DELETE FROM members WHERE id = ?1", params![id])
+        .map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)?;
+    Ok(())
+}
+
+// ─── Card assignment / priority ───
+
+#[tauri::command]
+pub fn update_card_assignee(card_id: i64, member_id: Option<i64>, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    conn.execute(
+        "UPDATE cards SET assignee_id = ?1 WHERE id = ?2",
+        params![member_id, card_id],
+    ).map_err(to_string_err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_card_author(card_id: i64, member_id: Option<i64>, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    conn.execute(
+        "UPDATE cards SET author_id = ?1 WHERE id = ?2",
+        params![member_id, card_id],
+    ).map_err(to_string_err)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn update_card_priority(card_id: i64, priority: String, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    conn.execute(
+        "UPDATE cards SET priority = ?1 WHERE id = ?2",
+        params![normalize_priority(Some(priority.as_str())), card_id],
+    ).map_err(to_string_err)?;
+    Ok(())
+}
+
+// ─── Workspace-wide card list (the "Список" screen) ───
+
+/// Every non-archived card in the workspace, across all of its boards, plus the
+/// boards' column lists.
+///
+/// Two queries in total, regardless of how many boards exist: the naive shape
+/// of this screen — fetch boards, then columns per board, then cards per column
+/// — would be N+1 twice over. The member records are joined in rather than
+/// looked up per row for the same reason.
+#[tauri::command]
+pub fn list_all_cards_in_workspace(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<WorkspaceCardList> {
+    let conn = state.conn.lock().unwrap();
+    build_workspace_card_list(&conn, workspace_id)
+}
+
+/// The body of `list_all_cards_in_workspace`, split off the Tauri `State` so it
+/// can be driven by a plain connection in tests.
+fn build_workspace_card_list(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<WorkspaceCardList> {
+    let mut card_stmt = conn.prepare(
+        "SELECT c.id, c.title, c.description, c.position, c.due_date,
+                COALESCE(c.priority, 'Medium'), c.created_at, c.is_mistake,
+                col.id, col.name,
+                b.id, b.name, b.is_system,
+                a.id, a.name, a.initials, a.color, a.is_self, a.created_at,
+                w.id, w.name, w.initials, w.color, w.is_self, w.created_at
+         FROM cards c
+         INNER JOIN columns col ON col.id = c.column_id
+         INNER JOIN boards b ON b.id = col.board_id
+         LEFT JOIN members a ON a.id = c.assignee_id
+         LEFT JOIN members w ON w.id = c.author_id
+         WHERE b.workspace_id = ?1
+           AND c.archived = 0 AND col.archived = 0 AND b.archived = 0
+         ORDER BY b.name ASC, col.position ASC, c.position ASC",
+    ).map_err(to_string_err)?;
+
+    let card_iter = card_stmt.query_map(params![workspace_id], |row| {
+        // A LEFT JOIN with no match gives NULL in every joined column, so the
+        // member id being NULL is what decides whether there is one at all.
+        let assignee = match row.get::<_, Option<i64>>(13)? {
+            Some(id) => Some(Member {
+                id,
+                name: row.get(14)?,
+                initials: row.get(15)?,
+                color: row.get(16)?,
+                is_self: { let s: i64 = row.get(17)?; s != 0 },
+                created_at: row.get(18)?,
+            }),
+            None => None,
+        };
+        let author = match row.get::<_, Option<i64>>(19)? {
+            Some(id) => Some(Member {
+                id,
+                name: row.get(20)?,
+                initials: row.get(21)?,
+                color: row.get(22)?,
+                is_self: { let s: i64 = row.get(23)?; s != 0 },
+                created_at: row.get(24)?,
+            }),
+            None => None,
+        };
+
+        Ok(CardRow {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            description: row.get(2)?,
+            position: row.get(3)?,
+            due_date: row.get(4)?,
+            priority: row.get(5)?,
+            created_at: row.get(6)?,
+            is_mistake: { let m: i8 = row.get(7)?; m != 0 },
+            column_id: row.get(8)?,
+            column_name: row.get(9)?,
+            board_id: row.get(10)?,
+            board_name: row.get(11)?,
+            board_is_system: { let s: i64 = row.get(12)?; s != 0 },
+            assignee,
+            author,
+        })
+    }).map_err(to_string_err)?;
+
+    let mut cards = Vec::new();
+    for c in card_iter { cards.push(c.map_err(to_string_err)?); }
+
+    // Boards with their columns, so each row's status dropdown can offer the
+    // columns of its own board.
+    let mut col_stmt = conn.prepare(
+        "SELECT b.id, b.name, b.is_system,
+                col.id, col.board_id, col.name, col.position, col.created_at, col.archived
+         FROM boards b
+         LEFT JOIN columns col ON col.board_id = b.id AND col.archived = 0
+         WHERE b.workspace_id = ?1 AND b.archived = 0
+         ORDER BY b.name ASC, col.position ASC",
+    ).map_err(to_string_err)?;
+
+    let rows = col_stmt.query_map(params![workspace_id], |row| {
+        let column = match row.get::<_, Option<i64>>(3)? {
+            Some(id) => Some(Column {
+                id,
+                board_id: row.get(4)?,
+                name: row.get(5)?,
+                position: row.get(6)?,
+                created_at: row.get(7)?,
+                archived: row.get(8)?,
+            }),
+            None => None,
+        };
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, { let s: i64 = row.get(2)?; s != 0 }, column))
+    }).map_err(to_string_err)?;
+
+    let mut boards: Vec<BoardColumns> = Vec::new();
+    for row in rows {
+        let (board_id, board_name, is_system, column) = row.map_err(to_string_err)?;
+        // Rows arrive grouped by board, so only the last entry can match.
+        if boards.last().map(|b| b.id) != Some(board_id) {
+            boards.push(BoardColumns { id: board_id, name: board_name, is_system, columns: Vec::new() });
+        }
+        if let Some(col) = column {
+            boards.last_mut().unwrap().columns.push(col);
+        }
+    }
+
+    Ok(WorkspaceCardList { cards, boards })
 }
 
 // ─── Labels ───
@@ -689,27 +1100,41 @@ pub fn mark_all_notifications_read(state: State<'_, DbState>) -> CmdResult<()> {
 
 // ─── User profile ───
 
+// The name and initials now live on the `is_self` row of `members`, so the
+// profile form and the assignee dropdowns can never disagree about who the user
+// is. `theme` stays in `user_profile`: it is a setting of the application, not
+// a property of a person. The command names and signatures are unchanged, so
+// the header modal and the Settings page needed no rewiring.
+
 #[tauri::command]
 pub fn get_user_profile(state: State<'_, DbState>) -> CmdResult<UserProfile> {
     let conn = state.conn.lock().unwrap();
-    let profile = conn.query_row(
-        "SELECT avatar_initials, display_name, theme FROM user_profile WHERE id = 1",
-        [],
-        |row| Ok(UserProfile {
-            avatar_initials: row.get(0)?,
-            display_name: row.get(1)?,
-            theme: row.get(2)?,
-        })
-    ).map_err(to_string_err)?;
-    Ok(profile)
+
+    let theme: String = conn
+        .query_row("SELECT theme FROM user_profile WHERE id = 1", [], |row| row.get(0))
+        .map_err(to_string_err)?;
+
+    let (display_name, avatar_initials): (String, String) = conn
+        .query_row(
+            "SELECT name, initials FROM members WHERE is_self = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(to_string_err)?;
+
+    Ok(UserProfile { avatar_initials, display_name, theme })
 }
 
 #[tauri::command]
 pub fn update_user_profile(display_name: String, avatar_initials: String, theme: String, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
+
+    conn.execute("UPDATE user_profile SET theme = ?1 WHERE id = 1", params![theme])
+        .map_err(to_string_err)?;
+
     conn.execute(
-        "UPDATE user_profile SET display_name = ?1, avatar_initials = ?2, theme = ?3 WHERE id = 1",
-        params![display_name, avatar_initials, theme],
+        "UPDATE members SET name = ?1, initials = ?2 WHERE is_self = 1",
+        params![display_name, avatar_initials],
     ).map_err(to_string_err)?;
     Ok(())
 }
