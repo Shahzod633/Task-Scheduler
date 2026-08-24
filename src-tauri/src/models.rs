@@ -7,6 +7,12 @@ pub struct Workspace {
     pub visibility: String,
     pub created_at: String,
     pub archived: i8,
+    /// File name of this workspace's sidebar background inside the
+    /// `backgrounds` folder, or `None` if it has none. Carried on the workspace
+    /// itself so the sidebar knows whether to ask for the picture at all, and
+    /// so the front-end can key its cache on it: every upload gets a new name,
+    /// which makes a stale cached image impossible.
+    pub background_image_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -49,6 +55,11 @@ pub struct Card {
     pub assignee_id: Option<i64>,
     pub author_id: Option<i64>,
     pub priority: String,
+    /// Checklist progress, so the card face can show "2 из 5" without asking
+    /// for the items themselves. Only filled in by `get_cards`; elsewhere both
+    /// stay 0 and the counter simply is not drawn.
+    pub checklist_total: i64,
+    pub checklist_done: i64,
     pub labels: Vec<Label>,
     /// Populated only by queries that join across boards/columns (e.g. planner, mistake dashboard).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,6 +68,16 @@ pub struct Card {
     pub board_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column_name: Option<String>,
+}
+
+/// One sub-task inside a card.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChecklistItem {
+    pub id: i64,
+    pub card_id: i64,
+    pub text: String,
+    pub is_done: bool,
+    pub position: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -256,6 +277,24 @@ pub struct CardExport {
     /// Absent in older exports; those cards import at the schema default.
     #[serde(default)]
     pub priority: Option<String>,
+}
+
+/// Result of a full database export, so the Settings screen can confirm what
+/// actually landed in the file rather than just claiming success.
+/// Counts are reported twice on purpose. The raw row totals are what makes this
+/// a backup — archived boards and the hidden Inbox boards are the user's data
+/// too, and they are all in the file. But a message saying "29 boards" to
+/// someone who sees 9 on their hub reads like a bug, so the visible figure
+/// leads and the total explains itself.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DatabaseExport {
+    pub path: String,
+    pub size_bytes: u64,
+    pub boards: i64,
+    pub boards_active: i64,
+    pub cards: i64,
+    pub cards_active: i64,
+    pub members: i64,
 }
 
 /// One automatic backup file, as shown on the Settings screen.

@@ -4,7 +4,7 @@
 
 import * as api from './api.js';
 import { showCardEditModal } from './board.js';
-import { createElement, $, showToast } from './utils.js';
+import { createElement, $, showToast, todayKey } from './utils.js';
 
 const MONTH_NAMES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
 const WEEKDAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
@@ -86,7 +86,9 @@ function buildGrid(grid, cards, workspaceId) {
         cardsByDay.get(day).push(card);
     }
 
-    const todayStr = new Date().toISOString().slice(0, 10);
+    // Местная дата, а не toISOString(): тот отдаёт UTC, и с полуночи до конца
+    // смещения зоны «сегодня» подсвечивалось бы на вчерашней клетке.
+    const todayStr = todayKey();
 
     for (let i = 0; i < startOffset; i++) {
         const dayNum = daysInPrevMonth - startOffset + i + 1;

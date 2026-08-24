@@ -7,6 +7,7 @@ import Icons from './icons.js';
 import { openPopover, closePopovers } from './popover.js';
 import { confirmDialog } from './dialog.js';
 import { showBoardArchive } from './archive.js';
+import { renderChecklist } from './checklist.js';
 import { loadMembers, findMember, createAvatar, createMemberChip, openMemberPicker } from './members.js';
 import {
     createFilterState, createFilterToolbar, matchesFilter, isFilterActive,
@@ -532,9 +533,21 @@ function createCardElement(cardData) {
     
     // Metadata
     const assignee = findMember(cardData.assignee_id);
-    const hasMeta = cardData.description || cardData.due_date || assignee;
+    const checklistTotal = cardData.checklist_total || 0;
+    const hasMeta = cardData.description || cardData.due_date || assignee || checklistTotal > 0;
     if (hasMeta) {
         const meta = createElement('div', { className: 'card__meta' });
+
+        // Only shown when the card actually has a checklist — an empty "0 из 0"
+        // on every card would be noise.
+        if (checklistTotal > 0) {
+            const done = cardData.checklist_done || 0;
+            meta.appendChild(createElement('div', {
+                className: `card__meta-item card__checklist ${done === checklistTotal ? 'card__checklist--complete' : ''}`,
+                innerHTML: `${Icons.checkSquare} <span>${done} из ${checklistTotal}</span>`,
+                'data-tooltip': 'Выполнено пунктов чек-листа'
+            }));
+        }
 
         if (cardData.due_date) {
             const overdue = isOverdue(cardData.due_date);
@@ -652,15 +665,24 @@ export function showCardEditModal(cardData, options = {}) {
     const onChange = options.onChange || (() => renderBoard(currentBoardId));
     const existing = $('.modal-overlay');
     if (existing) existing.remove();
-    
+
     const overlay = createElement('div', { className: 'modal-overlay', id: 'card-modal-overlay' });
     const modal = createElement('div', { className: 'modal', style: { width: '500px' } });
-    
+
+    // Checklist edits save as they happen rather than on "Сохранить", so
+    // closing the window still has to refresh the board — otherwise the "2 из 5"
+    // on the card face would keep showing the count from before.
+    let checklistDirty = false;
+    const dismiss = () => {
+        overlay.remove();
+        if (checklistDirty) onChange();
+    };
+
     // Header
     const header = createElement('div', { className: 'modal__header' });
     header.appendChild(createElement('h2', { className: 'modal__title' }, cardData.title));
     const closeBtn = createElement('button', { className: 'modal__close', innerHTML: Icons.x });
-    closeBtn.addEventListener('click', () => overlay.remove());
+    closeBtn.addEventListener('click', dismiss);
     header.appendChild(closeBtn);
     modal.appendChild(header);
     
@@ -763,6 +785,9 @@ export function showCardEditModal(cardData, options = {}) {
 
     body.appendChild(peopleRow);
 
+    // Loads asynchronously; the modal is already on screen by then.
+    renderChecklist(body, cardData.id, () => { checklistDirty = true; });
+
     modal.appendChild(body);
     
     // Footer
@@ -821,12 +846,14 @@ export function showCardEditModal(cardData, options = {}) {
     
     modal.appendChild(footer);
     overlay.appendChild(modal);
-    
+
     // Close on overlay click
     overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) overlay.remove();
+        if (e.target === overlay) dismiss();
     });
-    
+    // Picked up by the global Escape handler in initModalEscape().
+    overlay.__onClose = dismiss;
+
     document.body.appendChild(overlay);
     titleInput.focus();
 }

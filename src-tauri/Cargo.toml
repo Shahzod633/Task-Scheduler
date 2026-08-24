@@ -29,3 +29,10 @@ tauri-plugin-dialog = "2"
 # "backup" enables SQLite's online backup API, used for automatic backups.
 rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 thiserror = "1.0"
+# Downscaling and re-encoding the sidebar background picture. Default features
+# pull in a decoder for every format the crate knows; only the three the file
+# picker offers are enabled, which keeps the build and the binary smaller.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# Already in the dependency tree via Tauri; declared here because we use it
+# directly to hand the picture to the WebView as a `data:` URL.
+base64 = "0.22"

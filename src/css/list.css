@@ -633,3 +633,135 @@
     text-transform: uppercase;
     color: var(--text-muted);
 }
+
+/* ─── Экспорт данных (Настройки) ─── */
+
+.settings-export {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-sm);
+    padding: var(--space-md) 0 var(--space-lg);
+    margin-bottom: var(--space-md);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.settings-export .form-hint { margin: 0; }
+
+/* ─── Чек-лист в карточке ─── */
+
+.checklist { margin-top: var(--space-lg); }
+
+.checklist__header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-sm);
+}
+
+.checklist__progress {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.checklist__bar {
+    height: 4px;
+    margin: var(--space-xs) 0 var(--space-sm);
+    border-radius: var(--radius-pill);
+    background: var(--bg-card-active);
+    overflow: hidden;
+}
+
+.checklist__bar-fill {
+    height: 100%;
+    width: 0;
+    border-radius: var(--radius-pill);
+    background: var(--color-success);
+    transition: width var(--transition-normal);
+}
+
+.checklist__items {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+}
+
+.checklist__empty {
+    padding: var(--space-sm) 0;
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+}
+
+.checklist__item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+}
+
+.checklist__item:hover { background: var(--bg-card); }
+
+.checklist__check {
+    width: 15px;
+    height: 15px;
+    flex: none;
+    accent-color: var(--accent-color);
+    cursor: pointer;
+}
+
+.checklist__text {
+    flex: 1;
+    min-width: 0;
+    font-size: var(--font-size-md);
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+/* Отмеченный пункт гасится и зачёркивается: видно, что сделано, но список
+   не теряет истории. */
+.checklist__item--done .checklist__text {
+    color: var(--text-muted);
+    text-decoration: line-through;
+}
+
+/* Кнопка удаления проявляется по наведению — иначе ряд корзин рядом с
+   каждым пунктом перетягивает на себя всё внимание. */
+.checklist__remove {
+    opacity: 0;
+    transition: opacity var(--transition-fast);
+}
+
+.checklist__item:hover .checklist__remove,
+.checklist__remove:focus-visible { opacity: 1; }
+
+.checklist__add {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+}
+
+.checklist__input { flex: 1; }
+
+/* Счётчик на лицевой стороне карточки */
+.card__checklist { font-variant-numeric: tabular-nums; }
+.card__checklist--complete { color: var(--color-success); }
+
+/* Исполнитель / Автор / Приоритет — в один ряд.
+   Класс появился вместе с этими полями, а правило к нему — нет, поэтому
+   поля стояли столбиком и растягивали модалку. */
+
+.card-modal__people {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+}
+
+.card-modal__field {
+    flex: 1 1 120px;
+    min-width: 0;
+    margin-bottom: 0;
+}

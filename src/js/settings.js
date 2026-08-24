@@ -6,6 +6,8 @@
 import * as api from './api.js';
 import Icons from './icons.js';
 import { renderProfileFields } from './header.js';
+import { applyWorkspaceBackground, invalidateBackground, getBackgroundUrl } from './background.js';
+import { confirmDialog } from './dialog.js';
 import { createElement, $, showToast, pluralize } from './utils.js';
 
 export async function renderSettingsPage(workspaceId) {
@@ -63,6 +65,12 @@ export async function renderSettingsPage(workspaceId) {
         showToast('Ошибка загрузки пространства', 'error');
     }
 
+    // Фон принадлежит пространству, поэтому стоит сразу за его настройками и
+    // выше «Профиля» — тот один на всё приложение.
+    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Фон пространства'));
+    const backgroundCard = createElement('div', { className: 'settings-card' });
+    page.appendChild(backgroundCard);
+
     page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Профиль'));
     const profileCard = createElement('div', { className: 'settings-card' });
     page.appendChild(profileCard);
@@ -74,8 +82,101 @@ export async function renderSettingsPage(workspaceId) {
     content.appendChild(page);
     setTimeout(() => content.classList.remove('view-enter'), 420);
 
+    renderBackgroundSection(backgroundCard, workspaceId);
     renderProfileFields(profileCard);
     renderBackupSection(backupCard);
+}
+
+/**
+ * «Фон пространства» — картинка позади всего окна, своя у каждого пространства.
+ *
+ * Живёт в настройках пространства, а не в общих: все действия здесь идут с тем
+ * `workspaceId`, который открыт, — «текущее пространство» на бэкенде не
+ * угадывается.
+ */
+async function renderBackgroundSection(container, workspaceId) {
+    container.appendChild(createElement('p', { className: 'form-hint settings-background__intro' },
+        'Картинка ложится под всё окно и сильно размывается — это фон, а не иллюстрация. ' +
+        'Она принадлежит этому пространству: у остальных останется свой.'));
+
+    const preview = createElement('div', { className: 'settings-background__preview' });
+    container.appendChild(preview);
+
+    const actions = createElement('div', { className: 'settings-background__actions' });
+    const uploadBtn = createElement('button', {
+        className: 'btn btn--primary',
+        innerHTML: `${Icons.image} <span>Загрузить фото</span>`
+    });
+    const clearBtn = createElement('button', {
+        className: 'btn btn--secondary',
+        innerHTML: `${Icons.trash} <span>Сбросить фон</span>`
+    });
+    actions.appendChild(uploadBtn);
+    actions.appendChild(clearBtn);
+    container.appendChild(actions);
+
+    // Кнопка «Сбросить фон» показывается, только когда есть что сбрасывать:
+    // иначе это ровно тот случай из раздела 5 заметок — элемент, обещающий
+    // действие, которого не будет.
+    async function refresh() {
+        const url = await getBackgroundUrl(workspaceId);
+        preview.innerHTML = '';
+        if (url) {
+            preview.appendChild(createElement('img', {
+                className: 'settings-background__image',
+                src: url,
+                alt: 'Текущий фон сайдбара'
+            }));
+        } else {
+            preview.appendChild(createElement('span', { className: 'settings-background__empty' },
+                'Фон не задан'));
+        }
+        clearBtn.hidden = !url;
+    }
+
+    uploadBtn.addEventListener('click', async () => {
+        uploadBtn.disabled = true;
+        try {
+            const source = await api.showOpenDialog('Изображение', ['png', 'jpg', 'jpeg', 'webp']);
+            // Закрыть диалог, ничего не выбрав, — нормальный исход, не ошибка.
+            if (!source) return;
+
+            await api.setWorkspaceBackground(workspaceId, source);
+            invalidateBackground(workspaceId);
+            await refresh();
+            await applyWorkspaceBackground(workspaceId);
+            showToast('Фон обновлён');
+        } catch (e) {
+            showToast(String(e), 'error');
+        } finally {
+            uploadBtn.disabled = false;
+        }
+    });
+
+    clearBtn.addEventListener('click', async () => {
+        const ok = await confirmDialog({
+            title: 'Сбросить фон?',
+            message: 'Картинка будет удалена из папки приложения. Исходный файл на диске останется.',
+            confirmText: 'Сбросить',
+            danger: true,
+        });
+        if (!ok) return;
+
+        clearBtn.disabled = true;
+        try {
+            await api.clearWorkspaceBackground(workspaceId);
+            invalidateBackground(workspaceId);
+            await refresh();
+            await applyWorkspaceBackground(workspaceId);
+            showToast('Фон сброшен');
+        } catch (e) {
+            showToast(String(e), 'error');
+        } finally {
+            clearBtn.disabled = false;
+        }
+    });
+
+    await refresh();
 }
 
 /**
@@ -89,6 +190,8 @@ export async function renderSettingsPage(workspaceId) {
 async function renderBackupSection(container) {
     container.appendChild(createElement('p', { className: 'form-hint settings-backup__intro' },
         'Копия базы создаётся автоматически при запуске приложения, но не чаще раза в час. Хранятся последние 10.'));
+
+    renderExportRow(container);
 
     let backups = [];
     let dir = '';
@@ -135,6 +238,59 @@ async function renderBackupSection(container) {
 
     container.appendChild(createElement('p', { className: 'form-hint settings-backup__note' },
         'Чтобы восстановиться из копии, закройте приложение и замените ею файл trello_clone.db в папке выше. Восстановление прямо из интерфейса появится позже.'));
+}
+
+/**
+ * "Экспортировать данные" — a copy of the whole database wherever the user
+ * wants it, as opposed to the automatic backups, which only ever live in the
+ * app's own folder and rotate away after ten.
+ */
+function renderExportRow(container) {
+    const block = createElement('div', { className: 'settings-export' });
+
+    const btn = createElement('button', {
+        className: 'btn btn--primary',
+        innerHTML: `${Icons.download} <span>Экспортировать данные</span>`
+    });
+
+    btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+            const defaultName = await api.suggestExportName();
+            const path = await api.showSaveDialog(defaultName, 'База данных TaskFlow', ['db']);
+            // Cancelling the dialog is a normal outcome, not an error.
+            if (!path) return;
+
+            const result = await api.exportDatabase(path);
+            showToast('Экспортировано: ' + [
+                countPhrase(result.boards_active, result.boards, ['доска', 'доски', 'досок']),
+                countPhrase(result.cards_active, result.cards, ['карточка', 'карточки', 'карточек']),
+            ].join(', ') + ` · ${formatBytes(result.size_bytes)}`);
+        } catch (e) {
+            showToast(String(e), 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    });
+
+    block.appendChild(btn);
+    block.appendChild(createElement('p', { className: 'form-hint' },
+        'Полная копия базы в выбранный вами файл — её можно унести на другой диск. ' +
+        'Открывается любым просмотрщиком SQLite.'));
+
+    container.appendChild(block);
+}
+
+/**
+ * "9 досок из 29 (остальные архивные и служебные)" — обе цифры сразу.
+ *
+ * В файл попадает всё, включая архив и скрытые доски Inbox, поэтому общее
+ * число честнее. Но на хабе видно только активные, и сообщение с одним лишь
+ * общим числом выглядело бы как ошибка. Когда числа совпадают, скобка не нужна.
+ */
+function countPhrase(active, total, forms) {
+    if (active === total) return `${total} ${pluralize(total, forms)}`;
+    return `${active} ${pluralize(active, forms)} из ${total} (остальные архивные и служебные)`;
 }
 
 function formatBytes(bytes) {

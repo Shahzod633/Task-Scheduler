@@ -9,6 +9,10 @@ pub const DB_FILE_NAME: &str = "trello_clone.db";
 /// Sub-directory of the app data directory holding automatic backups.
 pub const BACKUP_DIR_NAME: &str = "backups";
 
+/// Sub-directory of the app data directory holding the sidebar background
+/// pictures, one per workspace that has one.
+pub const BACKGROUNDS_DIR_NAME: &str = "backgrounds";
+
 /// How many automatic backups are kept before the oldest ones are pruned.
 const BACKUP_KEEP: usize = 10;
 
@@ -76,7 +80,8 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             name TEXT NOT NULL,
             visibility TEXT DEFAULT 'private',
             created_at TEXT DEFAULT (datetime('now')),
-            archived INTEGER DEFAULT 0
+            archived INTEGER DEFAULT 0,
+            background_image_path TEXT
         )",
         (),
     )?;
@@ -156,6 +161,20 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         (),
     )?;
 
+    // Sub-tasks inside a card. Created after `cards`, which it references.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS checklist_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            is_done INTEGER NOT NULL DEFAULT 0,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (card_id) REFERENCES cards(id)
+        )",
+        (),
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS labels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -215,6 +234,13 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
     if !table_has_column(conn,"boards", "is_system") {
         conn.execute("ALTER TABLE boards ADD COLUMN is_system INTEGER DEFAULT 0", ())?;
     }
+    // Holds a *file name* inside `<app_dir>/backgrounds`, not an absolute path.
+    // The app data directory has already moved once (see `LEGACY_APP_DIR`), and
+    // a backup restored on another machine would carry a path that no longer
+    // exists; a bare name survives both.
+    if !table_has_column(conn, "workspaces", "background_image_path") {
+        conn.execute("ALTER TABLE workspaces ADD COLUMN background_image_path TEXT", ())?;
+    }
     if !table_has_column(conn,"cards", "is_mistake") {
         conn.execute("ALTER TABLE cards ADD COLUMN is_mistake INTEGER DEFAULT 0", ())?;
     }
@@ -257,7 +283,10 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_cards_column     ON cards(column_id);
          CREATE INDEX IF NOT EXISTS idx_cards_assignee   ON cards(assignee_id);
          CREATE INDEX IF NOT EXISTS idx_columns_board    ON columns(board_id);
-         CREATE INDEX IF NOT EXISTS idx_boards_workspace ON boards(workspace_id);",
+         CREATE INDEX IF NOT EXISTS idx_boards_workspace ON boards(workspace_id);
+         -- Every card on a board asks for its checklist counts, so this one is
+         -- read far more often than it is written.
+         CREATE INDEX IF NOT EXISTS idx_checklist_card   ON checklist_items(card_id);",
     )?;
 
     // Backfill a hidden Inbox board for every existing workspace

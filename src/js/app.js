@@ -21,6 +21,7 @@ import { renderFavoritesPage } from './favorites.js';
 import { renderMistakesPage } from './mistakes.js';
 import { renderListPage } from './list.js';
 import { renderMembersPage } from './members.js';
+import { applyWorkspaceBackground } from './background.js';
 import { $, debounce, showToast } from './utils.js';
 
 let currentView = { name: 'hub', params: {} };
@@ -246,6 +247,11 @@ async function navigateTo(view, params = {}) {
     if (SIDEBAR_VIEWS.has(view)) {
         await renderWorkspaceSidebar(defaultWorkspaceId);
     }
+
+    // Фон принадлежит пространству, а не экрану, поэтому пересчитывается на
+    // каждом переходе: `defaultWorkspaceId` только что мог смениться. Не
+    // дожидаемся — оформление не должно задерживать отрисовку страницы.
+    applyWorkspaceBackground(defaultWorkspaceId);
 
     if (DOCK_VIEWS.has(view)) {
         renderDock(view);

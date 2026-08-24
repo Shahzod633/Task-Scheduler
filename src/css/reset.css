@@ -99,6 +99,15 @@ img, svg {
     background: transparent;
 }
 
+/* ─── Атрибут hidden ─── */
+/* Браузерное правило [hidden] { display: none } задано в UA-стилях с нулевой
+   специфичностью, поэтому любой наш класс с display (например .btn —
+   inline-flex) молча его отменяет: элемент с hidden = true остаётся видимым.
+   Возвращаем ожидаемое поведение один раз для всего приложения. */
+[hidden] {
+    display: none !important;
+}
+
 /* ─── Selection ─── */
 ::selection {
     background: var(--accent-light);

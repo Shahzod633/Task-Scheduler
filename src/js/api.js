@@ -24,6 +24,33 @@ export async function archiveWorkspace(id) {
     return await invoke('archive_workspace', { id });
 }
 
+// ─── Sidebar background (per workspace) ───
+
+/**
+ * Imports the picture at `sourcePath` as this workspace's sidebar background.
+ *
+ * The backend copies it into the app's own folder after shrinking it — the
+ * original is never referenced, so moving or unplugging it later changes
+ * nothing. Any picture the workspace had before is deleted.
+ *
+ * @returns {Promise<string>} stored file name
+ */
+export async function setWorkspaceBackground(workspaceId, sourcePath) {
+    return await invoke('set_workspace_background', { workspaceId, sourcePath });
+}
+
+export async function clearWorkspaceBackground(workspaceId) {
+    return await invoke('clear_workspace_background', { workspaceId });
+}
+
+/**
+ * The workspace's background as a `data:` URL, or null if it has none.
+ * Go through `background.js` rather than calling this directly — it caches.
+ */
+export async function getWorkspaceBackground(workspaceId) {
+    return await invoke('get_workspace_background', { workspaceId });
+}
+
 // ─── Boards ───
 
 export async function getBoards(workspaceId) {
@@ -96,6 +123,25 @@ export async function updateCardPosition(id, newColumnId, newPosition) {
 
 export async function archiveCard(id) {
     return await invoke('archive_card', { id });
+}
+
+// ─── Checklists (sub-tasks inside a card) ───
+
+export async function listChecklistItems(cardId) {
+    return await invoke('list_checklist_items', { cardId });
+}
+
+export async function createChecklistItem(cardId, text) {
+    return await invoke('create_checklist_item', { cardId, text });
+}
+
+/** Flips one item; resolves to its new `is_done` state. */
+export async function toggleChecklistItem(id) {
+    return await invoke('toggle_checklist_item', { id });
+}
+
+export async function deleteChecklistItem(id) {
+    return await invoke('delete_checklist_item', { id });
 }
 
 // ─── Members ───
@@ -221,6 +267,23 @@ export async function deleteBoard(id) {
 }
 
 // ─── Backups ───
+
+/**
+ * Writes a consistent snapshot of the entire database to `path`.
+ *
+ * Not a file copy: the backend uses SQLite's `VACUUM INTO`, so the result is a
+ * complete database rather than whatever bytes happened to be on disk.
+ *
+ * @returns {Promise<{path: string, size_bytes: number, boards: number, cards: number, members: number}>}
+ */
+export async function exportDatabase(path) {
+    return await invoke('export_database', { path });
+}
+
+/** Dated default file name for the save dialog, e.g. `taskflow-2026-08-22.db`. */
+export async function suggestExportName() {
+    return await invoke('suggest_export_name');
+}
 
 export async function getBackups() {
     return await invoke('get_backups');

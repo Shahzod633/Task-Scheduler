@@ -1,11 +1,12 @@
+use base64::Engine as _;
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
 use tauri::State;
 use crate::db::DbState;
 use crate::models::{
     Workspace, Board, Column, Card, Notification, UserProfile, BackupInfo,
-    BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, MemberExport,
-    Member, CardRow, BoardColumns, WorkspaceCardList, MEMBER_COLORS, PRIORITIES,
+    BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, MemberExport, DatabaseExport,
+    Member, ChecklistItem, CardRow, BoardColumns, WorkspaceCardList, MEMBER_COLORS, PRIORITIES,
     EXPORT_FORMAT_VERSION,
 };
 
@@ -25,7 +26,7 @@ fn to_string_err<E: std::fmt::Display>(e: E) -> String {
 #[tauri::command]
 pub fn get_workspaces(state: State<'_, DbState>) -> CmdResult<Vec<Workspace>> {
     let conn = state.conn.lock().unwrap();
-    let mut stmt = conn.prepare("SELECT id, name, visibility, created_at, archived FROM workspaces WHERE archived = 0 ORDER BY id ASC").map_err(to_string_err)?;
+    let mut stmt = conn.prepare("SELECT id, name, visibility, created_at, archived, background_image_path FROM workspaces WHERE archived = 0 ORDER BY id ASC").map_err(to_string_err)?;
 
     let workspaces_iter = stmt.query_map([], |row| {
         Ok(Workspace {
@@ -34,6 +35,7 @@ pub fn get_workspaces(state: State<'_, DbState>) -> CmdResult<Vec<Workspace>> {
             visibility: row.get(2)?,
             created_at: row.get(3)?,
             archived: row.get(4)?,
+            background_image_path: row.get(5)?,
         })
     }).map_err(to_string_err)?;
 
@@ -64,6 +66,7 @@ pub fn create_workspace(name: String, state: State<'_, DbState>) -> CmdResult<Wo
         visibility: "private".to_string(),
         created_at: "".to_string(), // Simplified, normally fetch from DB
         archived: 0,
+        background_image_path: None,
     })
 }
 
@@ -274,11 +277,27 @@ fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
         // if the default was somehow bypassed; the board would then have no
         // priority stripe at all rather than a neutral one.
         priority: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "Medium".to_string()),
+        checklist_total: 0,
+        checklist_done: 0,
         labels: Vec::new(),
         board_id: None,
         board_name: None,
         column_name: None,
     })
+}
+
+/// Two aggregates appended after `CARD_COLUMNS` by `get_cards`, giving the
+/// card face its "2 из 5" without a second query per card.
+const CHECKLIST_COUNTS: &str = "
+    (SELECT COUNT(*) FROM checklist_items ci WHERE ci.card_id = cards.id),
+    (SELECT COUNT(*) FROM checklist_items ci WHERE ci.card_id = cards.id AND ci.is_done = 1)";
+
+/// `row_to_card` plus the two checklist aggregates at positions 14 and 15.
+fn row_to_card_with_checklist(row: &rusqlite::Row) -> rusqlite::Result<Card> {
+    let mut card = row_to_card(row)?;
+    card.checklist_total = row.get(14)?;
+    card.checklist_done = row.get(15)?;
+    Ok(card)
 }
 
 /// Same as `row_to_card`, but for queries that additionally join in
@@ -295,10 +314,13 @@ fn row_to_card_with_board(row: &rusqlite::Row) -> rusqlite::Result<Card> {
 #[tauri::command]
 pub fn get_cards(column_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Card>> {
     let conn = state.conn.lock().unwrap();
-    let sql = format!("SELECT {} FROM cards WHERE column_id = ?1 AND archived = 0 ORDER BY position ASC", CARD_COLUMNS);
+    let sql = format!(
+        "SELECT {}, {} FROM cards WHERE column_id = ?1 AND archived = 0 ORDER BY position ASC",
+        CARD_COLUMNS, CHECKLIST_COUNTS
+    );
     let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
 
-    let iter = stmt.query_map(params![column_id], row_to_card).map_err(to_string_err)?;
+    let iter = stmt.query_map(params![column_id], row_to_card_with_checklist).map_err(to_string_err)?;
 
     let mut res = Vec::new();
     for i in iter { res.push(i.map_err(to_string_err)?); }
@@ -332,6 +354,7 @@ pub fn create_card(column_id: i64, title: String, description: String, state: St
         id, column_id, title, description, position: pos, due_date: None, created_at: "".into(), archived: 0,
         is_mistake: false, mistake_marked_at: None, mistake_resolved_at: None,
         assignee_id: None, author_id, priority: "Medium".into(),
+        checklist_total: 0, checklist_done: 0,
         labels: vec![], board_id: None, board_name: None, column_name: None,
     })
 }
@@ -707,6 +730,95 @@ pub fn import_board_from_file(workspace_id: i64, path: String, state: State<'_, 
     let json = std::fs::read_to_string(&path)
         .map_err(|e| format!("Не удалось прочитать файл: {}", e))?;
     import_board(workspace_id, json, state)
+}
+
+// ─── Checklists (sub-tasks inside a card) ───
+
+fn row_to_checklist_item(row: &rusqlite::Row) -> rusqlite::Result<ChecklistItem> {
+    Ok(ChecklistItem {
+        id: row.get(0)?,
+        card_id: row.get(1)?,
+        text: row.get(2)?,
+        is_done: { let d: i64 = row.get(3)?; d != 0 },
+        position: row.get(4)?,
+    })
+}
+
+const CHECKLIST_COLUMNS: &str = "id, card_id, text, is_done, position";
+
+#[tauri::command]
+pub fn list_checklist_items(card_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<ChecklistItem>> {
+    let conn = state.conn.lock().unwrap();
+    // `id` breaks ties: without drag-reordering every item shares position 0
+    // only if something went wrong, but a stable order still beats an arbitrary
+    // one that shuffles between openings.
+    let sql = format!(
+        "SELECT {} FROM checklist_items WHERE card_id = ?1 ORDER BY position ASC, id ASC",
+        CHECKLIST_COLUMNS
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
+    let iter = stmt.query_map(params![card_id], row_to_checklist_item).map_err(to_string_err)?;
+
+    let mut res = Vec::new();
+    for i in iter { res.push(i.map_err(to_string_err)?); }
+    Ok(res)
+}
+
+#[tauri::command]
+pub fn create_checklist_item(card_id: i64, text: String, state: State<'_, DbState>) -> CmdResult<ChecklistItem> {
+    let conn = state.conn.lock().unwrap();
+
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("Пункт чек-листа не может быть пустым".to_string());
+    }
+
+    let position: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM checklist_items WHERE card_id = ?1",
+        params![card_id],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    conn.execute(
+        "INSERT INTO checklist_items (card_id, text, position) VALUES (?1, ?2, ?3)",
+        params![card_id, text, position],
+    ).map_err(to_string_err)?;
+
+    Ok(ChecklistItem {
+        id: conn.last_insert_rowid(),
+        card_id,
+        text,
+        is_done: false,
+        position,
+    })
+}
+
+/// Flips one item and returns its new state, so the caller does not have to
+/// re-read the list to know what happened.
+#[tauri::command]
+pub fn toggle_checklist_item(id: i64, state: State<'_, DbState>) -> CmdResult<bool> {
+    let conn = state.conn.lock().unwrap();
+
+    let changed = conn.execute(
+        "UPDATE checklist_items SET is_done = CASE is_done WHEN 0 THEN 1 ELSE 0 END WHERE id = ?1",
+        params![id],
+    ).map_err(to_string_err)?;
+    if changed == 0 {
+        return Err("Пункт чек-листа не найден".to_string());
+    }
+
+    let is_done: i64 = conn
+        .query_row("SELECT is_done FROM checklist_items WHERE id = ?1", params![id], |row| row.get(0))
+        .map_err(to_string_err)?;
+    Ok(is_done != 0)
+}
+
+#[tauri::command]
+pub fn delete_checklist_item(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    conn.execute("DELETE FROM checklist_items WHERE id = ?1", params![id])
+        .map_err(to_string_err)?;
+    Ok(())
 }
 
 // ─── Members ───
@@ -1342,6 +1454,7 @@ pub fn delete_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let mut conn = state.conn.lock().unwrap();
     let tx = conn.transaction().map_err(to_string_err)?;
     tx.execute("DELETE FROM card_labels WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
+    tx.execute("DELETE FROM checklist_items WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE id = ?1", params![id]).map_err(to_string_err)?;
     tx.commit().map_err(to_string_err)?;
     Ok(())
@@ -1355,6 +1468,10 @@ pub fn delete_column(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let tx = conn.transaction().map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM card_labels WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM checklist_items WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
         params![id],
     ).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE column_id = ?1", params![id]).map_err(to_string_err)?;
@@ -1383,6 +1500,14 @@ pub fn delete_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let tx = conn.transaction().map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM card_labels WHERE card_id IN (
+            SELECT c.id FROM cards c
+            INNER JOIN columns col ON col.id = c.column_id
+            WHERE col.board_id = ?1
+        )",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM checklist_items WHERE card_id IN (
             SELECT c.id FROM cards c
             INNER JOIN columns col ON col.id = c.column_id
             WHERE col.board_id = ?1
@@ -1477,11 +1602,406 @@ pub fn open_backup_dir(state: State<'_, DbState>) -> CmdResult<()> {
     Err("Открытие папки поддерживается только в Windows-сборке".to_string())
 }
 
+// ─── Full database export ───
+
+/// Writes a consistent snapshot of the whole database to `path`.
+///
+/// Uses SQLite's own `VACUUM INTO` rather than copying `trello_clone.db` off
+/// the filesystem. A plain file copy captures whatever bytes happen to be on
+/// disk at that instant, which is not necessarily a valid database: pages the
+/// open connection has not flushed yet, and any rollback/WAL journal, live
+/// outside that one file. `VACUUM INTO` asks SQLite to write a fresh, complete,
+/// self-contained copy — the same guarantee the automatic backups get from the
+/// online backup API.
+///
+/// The snapshot goes to a `.part` file first and is opened and read back before
+/// it replaces anything at `path`. That way a failure part-way through cannot
+/// destroy a file the user already had there.
+#[tauri::command]
+pub fn export_database(path: String, state: State<'_, DbState>) -> CmdResult<DatabaseExport> {
+    let conn = state.conn.lock().unwrap();
+    export_database_to(&conn, std::path::Path::new(&path))
+}
+
+fn export_database_to(conn: &rusqlite::Connection, target: &std::path::Path) -> CmdResult<DatabaseExport> {
+    let mut partial = target.as_os_str().to_os_string();
+    partial.push(".part");
+    let partial = std::path::PathBuf::from(partial);
+
+    // A leftover from an interrupted export would make VACUUM INTO refuse to
+    // run: it insists on creating the file itself.
+    if partial.exists() {
+        std::fs::remove_file(&partial)
+            .map_err(|e| format!("Не удалось убрать остаток прошлого экспорта: {}", e))?;
+    }
+
+    let partial_str = partial.to_string_lossy().into_owned();
+    conn.execute("VACUUM INTO ?1", params![partial_str])
+        .map_err(|e| format!("Не удалось создать копию базы: {}", e))?;
+
+    // Read the snapshot back before trusting it. Handing over a corrupt export
+    // is worse than failing loudly, because it is only discovered on the day it
+    // is needed.
+    let counts = match inspect_export(&partial) {
+        Ok(counts) => counts,
+        Err(e) => {
+            let _ = std::fs::remove_file(&partial);
+            return Err(format!("Копия получилась нечитаемой, файл не сохранён: {}", e));
+        }
+    };
+
+    let size_bytes = std::fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
+
+    // Only now is anything at `target` touched. On Windows `rename` replaces an
+    // existing file, which is what the user agreed to in the save dialog.
+    std::fs::rename(&partial, target).map_err(|e| {
+        let _ = std::fs::remove_file(&partial);
+        format!("Не удалось сохранить файл: {}", e)
+    })?;
+
+    Ok(DatabaseExport {
+        path: target.to_string_lossy().into_owned(),
+        size_bytes,
+        boards: counts.boards,
+        boards_active: counts.boards_active,
+        cards: counts.cards,
+        cards_active: counts.cards_active,
+        members: counts.members,
+    })
+}
+
+/// What a finished snapshot turned out to contain.
+struct ExportCounts {
+    boards: i64,
+    boards_active: i64,
+    cards: i64,
+    cards_active: i64,
+    members: i64,
+}
+
+/// Opens a freshly written snapshot read-only and counts what is inside, both
+/// as an integrity check and so the UI can report something concrete.
+///
+/// "Active" means what the user can actually see: `boards_active` matches the
+/// filter `get_boards` uses for the hub, `cards_active` matches the one behind
+/// the "Список" screen. The unqualified totals include archived rows and the
+/// hidden Inbox boards, which is the honest measure of what the file holds.
+fn inspect_export(path: &std::path::Path) -> Result<ExportCounts, String> {
+    let copy = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).map_err(to_string_err)?;
+
+    let integrity: String = copy
+        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
+        .map_err(to_string_err)?;
+    if integrity != "ok" {
+        return Err(format!("проверка целостности вернула «{}»", integrity));
+    }
+
+    let count = |sql: &str| -> Result<i64, String> {
+        copy.query_row(sql, [], |row| row.get(0)).map_err(to_string_err)
+    };
+
+    Ok(ExportCounts {
+        boards: count("SELECT COUNT(*) FROM boards")?,
+        boards_active: count("SELECT COUNT(*) FROM boards WHERE archived = 0 AND is_system = 0")?,
+        cards: count("SELECT COUNT(*) FROM cards")?,
+        cards_active: count(
+            "SELECT COUNT(*) FROM cards c
+             INNER JOIN columns col ON col.id = c.column_id
+             INNER JOIN boards b ON b.id = col.board_id
+             WHERE c.archived = 0 AND col.archived = 0 AND b.archived = 0",
+        )?,
+        members: count("SELECT COUNT(*) FROM members")?,
+    })
+}
+
+/// Default file name offered in the save dialog: `taskflow-2026-08-22.db`.
+#[tauri::command]
+pub fn suggest_export_name(state: State<'_, DbState>) -> CmdResult<String> {
+    let conn = state.conn.lock().unwrap();
+    let stamp: String = conn
+        .query_row("SELECT strftime('%Y-%m-%d', 'now', 'localtime')", [], |row| row.get(0))
+        .map_err(to_string_err)?;
+    Ok(format!("taskflow-{}.db", stamp))
+}
+
 /// Single source of truth for the version shown in the About section — comes
 /// from the bundle config, which in turn reads `package.json`.
 #[tauri::command]
 pub fn get_app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
+}
+
+// ─── Sidebar background, one per workspace ───
+//
+// The picture the user picks is never referenced where it lies. It is decoded,
+// shrunk and re-encoded into the app's own `backgrounds` folder, because a
+// reference to the original would quietly break the day that file is moved,
+// renamed, or was sitting on a stick that is no longer plugged in.
+//
+// What the database keeps is a bare file name, not a path — see the migration
+// in `db.rs` for why.
+
+/// Longest side, in pixels, of the stored picture.
+///
+/// The sidebar is a few hundred pixels wide and the image is blurred by 40 px
+/// before anyone sees it, so detail beyond this is thrown away by the renderer
+/// anyway. The limit exists to keep a 12-megapixel phone photo out of the app
+/// folder, not to preserve quality.
+const BACKGROUND_MAX_SIDE: u32 = 800;
+
+/// JPEG quality of the stored picture. Generous for something this blurred; the
+/// point is only to stay clear of visible blocking in large flat areas.
+const BACKGROUND_JPEG_QUALITY: u8 = 82;
+
+/// Sources above this are refused before being decoded. Decoding is where the
+/// memory goes — a compressed file this size can expand to gigabytes — and no
+/// wallpaper needs to be bigger.
+const BACKGROUND_MAX_SOURCE_BYTES: u64 = 40 * 1024 * 1024;
+
+#[tauri::command]
+pub fn set_workspace_background(
+    workspace_id: i64,
+    source_path: String,
+    state: State<'_, DbState>,
+) -> CmdResult<String> {
+    let conn = state.conn.lock().unwrap();
+    let dir = state.app_dir.join(crate::db::BACKGROUNDS_DIR_NAME);
+    store_background(&conn, &dir, workspace_id, std::path::Path::new(&source_path))
+}
+
+#[tauri::command]
+pub fn clear_workspace_background(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    let dir = state.app_dir.join(crate::db::BACKGROUNDS_DIR_NAME);
+    clear_background(&conn, &dir, workspace_id)
+}
+
+/// The workspace's background as a `data:` URL, or `None` if it has none.
+///
+/// A data URL rather than a file URL: the WebView cannot read the app data
+/// folder without turning on Tauri's asset protocol and scoping it, and the
+/// picture is small enough after re-encoding that handing over the bytes is the
+/// simpler contract. The front-end caches the result per workspace.
+#[tauri::command]
+pub fn get_workspace_background(
+    workspace_id: i64,
+    state: State<'_, DbState>,
+) -> CmdResult<Option<String>> {
+    let conn = state.conn.lock().unwrap();
+    let dir = state.app_dir.join(crate::db::BACKGROUNDS_DIR_NAME);
+    read_background(&conn, &dir, workspace_id)
+}
+
+/// File name currently recorded for the workspace, if any.
+fn background_name(conn: &rusqlite::Connection, workspace_id: i64) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT background_image_path FROM workspaces WHERE id = ?1",
+        params![workspace_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map_err(to_string_err)
+    // Outer `None` is "no such workspace", inner is "no background"; neither is
+    // an error to the caller.
+    .map(|found| found.flatten())
+}
+
+/// Resolves a stored name to a file inside `dir`, or `None` if the name is not a
+/// plain file name. The value comes from our own column, but it is joined onto
+/// the folder rather than trusted as a path: nothing that ends up here should be
+/// able to reach outside the backgrounds folder.
+fn background_file_path(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let mut parts = std::path::Path::new(name).components();
+    let only = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    match only {
+        std::path::Component::Normal(part) => Some(dir.join(part)),
+        _ => None,
+    }
+}
+
+/// Deletes one picture, treating "already gone" as success.
+fn remove_background_file(dir: &std::path::Path, name: &str) {
+    let Some(path) = background_file_path(dir, name) else { return };
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => log::warn!("Не удалось удалить фон {:?}: {}", path, e),
+    }
+}
+
+/// Imports `source` as the workspace's background and returns the stored name.
+fn store_background(
+    conn: &rusqlite::Connection,
+    dir: &std::path::Path,
+    workspace_id: i64,
+    source: &std::path::Path,
+) -> Result<String, String> {
+    let known: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspaces WHERE id = ?1)",
+            params![workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(to_string_err)?;
+    if !known {
+        return Err("Пространство не найдено".to_string());
+    }
+
+    let size = std::fs::metadata(source)
+        .map_err(|e| format!("Файл недоступен: {}", e))?
+        .len();
+    if size > BACKGROUND_MAX_SOURCE_BYTES {
+        return Err(format!(
+            "Файл слишком большой — {} МБ. Выберите изображение до {} МБ.",
+            size / (1024 * 1024),
+            BACKGROUND_MAX_SOURCE_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let raw = std::fs::read(source).map_err(|e| format!("Не удалось прочитать файл: {}", e))?;
+    let jpeg = encode_background_image(&raw)?;
+
+    std::fs::create_dir_all(dir).map_err(|e| format!("Папка для фонов недоступна: {}", e))?;
+
+    // The name carries the workspace and the moment of upload, so a replacement
+    // never reuses the name the WebView already has cached.
+    let stamp: String = conn
+        .query_row("SELECT strftime('%Y%m%d-%H%M%S', 'now', 'localtime')", [], |row| row.get(0))
+        .map_err(to_string_err)?;
+    let name = format!("{}_{}.jpg", workspace_id, stamp);
+
+    // Written under a temporary name and renamed into place, so an interrupted
+    // write cannot leave a truncated file under the name the database is about
+    // to point at.
+    let partial = dir.join(format!("{}.part", name));
+    let target = dir.join(&name);
+    std::fs::write(&partial, &jpeg).map_err(|e| format!("Не удалось сохранить изображение: {}", e))?;
+    std::fs::rename(&partial, &target).map_err(|e| {
+        let _ = std::fs::remove_file(&partial);
+        format!("Не удалось сохранить изображение: {}", e)
+    })?;
+
+    let previous = background_name(conn, workspace_id)?;
+
+    conn.execute(
+        "UPDATE workspaces SET background_image_path = ?1 WHERE id = ?2",
+        params![name, workspace_id],
+    )
+    .map_err(to_string_err)?;
+
+    // Only now is the old picture expendable. In this order a failure anywhere
+    // above leaves the workspace with the background it already had, and the
+    // worst case here is one orphaned file rather than a missing background.
+    if let Some(old) = previous {
+        if old != name {
+            remove_background_file(dir, &old);
+        }
+    }
+
+    Ok(name)
+}
+
+fn clear_background(
+    conn: &rusqlite::Connection,
+    dir: &std::path::Path,
+    workspace_id: i64,
+) -> Result<(), String> {
+    let Some(name) = background_name(conn, workspace_id)? else { return Ok(()) };
+
+    conn.execute(
+        "UPDATE workspaces SET background_image_path = NULL WHERE id = ?1",
+        params![workspace_id],
+    )
+    .map_err(to_string_err)?;
+
+    remove_background_file(dir, &name);
+    Ok(())
+}
+
+fn read_background(
+    conn: &rusqlite::Connection,
+    dir: &std::path::Path,
+    workspace_id: i64,
+) -> Result<Option<String>, String> {
+    let Some(name) = background_name(conn, workspace_id)? else { return Ok(None) };
+    let Some(path) = background_file_path(dir, &name) else { return Ok(None) };
+
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        // The folder is an ordinary directory the user can empty from outside
+        // the app, and a restored backup can name a file that never came with
+        // it. That is "no background", not a failure — and the row is cleared so
+        // the settings screen stops offering to reset something already gone.
+        Err(_) => {
+            let _ = conn.execute(
+                "UPDATE workspaces SET background_image_path = NULL WHERE id = ?1",
+                params![workspace_id],
+            );
+            return Ok(None);
+        }
+    };
+
+    Ok(Some(format!(
+        "data:image/jpeg;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )))
+}
+
+/// Decodes whatever the user picked, shrinks it to fit `BACKGROUND_MAX_SIDE` and
+/// re-encodes it as JPEG.
+///
+/// The format is decided by the file's own bytes rather than its extension: an
+/// extension is not evidence of anything, and the picker's filter only limits
+/// what is easy to choose, not what can be typed into the dialog.
+fn encode_background_image(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let reader = image::ImageReader::new(std::io::Cursor::new(raw))
+        .with_guessed_format()
+        .map_err(|e| format!("Не удалось прочитать изображение: {}", e))?;
+
+    match reader.format() {
+        Some(image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP) => {}
+        _ => return Err("Это не изображение PNG, JPEG или WebP".to_string()),
+    }
+
+    let picture = reader
+        .decode()
+        .map_err(|e| format!("Файл не удалось разобрать как изображение: {}", e))?;
+
+    // `resize` fits the picture inside the box keeping its proportions — but it
+    // also scales *up* when the source is smaller, which would store more bytes
+    // than were given to us. Hence the explicit check.
+    let picture = if picture.width() > BACKGROUND_MAX_SIDE || picture.height() > BACKGROUND_MAX_SIDE {
+        picture.resize(
+            BACKGROUND_MAX_SIDE,
+            BACKGROUND_MAX_SIDE,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        picture
+    };
+
+    // JPEG carries no alpha channel. Dropping it is acceptable here and nowhere
+    // else in the app: the result is blurred by 40 px behind a 75 % dark overlay,
+    // so what a transparent PNG loses is not visible in the only place it is used.
+    let rgb = picture.to_rgb8();
+
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, BACKGROUND_JPEG_QUALITY)
+        .encode(
+            rgb.as_raw(),
+            rgb.width(),
+            rgb.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| format!("Не удалось пересжать изображение: {}", e))?;
+
+    Ok(out)
 }
 
 // ─── Mistake tracking ───

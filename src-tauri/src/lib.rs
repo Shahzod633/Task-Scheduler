@@ -25,7 +25,10 @@ pub fn run() {
             commands::create_workspace,
             commands::update_workspace,
             commands::archive_workspace,
-            
+            commands::set_workspace_background,
+            commands::clear_workspace_background,
+            commands::get_workspace_background,
+
             commands::get_boards,
             commands::get_board,
             commands::create_board,
@@ -59,10 +62,17 @@ pub fn run() {
             commands::delete_column,
             commands::delete_board,
 
+            commands::export_database,
+            commands::suggest_export_name,
             commands::get_backups,
             commands::get_backup_dir,
             commands::open_backup_dir,
             commands::get_app_version,
+
+            commands::list_checklist_items,
+            commands::create_checklist_item,
+            commands::toggle_checklist_item,
+            commands::delete_checklist_item,
 
             commands::list_members,
             commands::create_member,

@@ -59,12 +59,97 @@ export function $$(selector, parent = document) {
 /**
  * Format date string
  */
+// ─── Даты и время ───
+//
+// В базе живут два РАЗНЫХ вида дат, и путать их нельзя:
+//
+//   1. Отметки времени (`created_at`, `mistake_marked_at`, `opened_at`) пишутся
+//      SQLite'ом через `datetime('now')` — это **UTC** в формате
+//      "YYYY-MM-DD HH:MM:SS", без какого-либо указания зоны.
+//   2. Срок (`due_date`) приходит из `<input type="date">` — это **календарная
+//      дата** "YYYY-MM-DD" без времени и без зоны. «25 августа» означает
+//      25 августа там, где сидит пользователь.
+//
+// `new Date(строка)` разбирает и то и другое неправильно: строку с временем и
+// без зоны он считает МЕСТНОЙ (отметка уезжает на величину часового пояса —
+// у нас на 5 часов), а строку из одной даты, наоборот, считает полуночью UTC
+// (в зонах западнее Гринвича это даёт сдвиг на сутки назад).
+//
+// Поэтому разбор идёт только через функции ниже. Прямой `new Date(строка_из_БД)`
+// в коде приложения быть не должен.
+
+/** True для строки вида "YYYY-MM-DD" без части времени. */
+function isDateOnly(value) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(value).trim());
+}
+
+/**
+ * Отметка времени из базы (UTC) → `Date`.
+ * Строку с явной зоной (`...Z`, `...+05:00`) принимает как есть.
+ */
+export function parseTimestamp(value) {
+    if (!value) return null;
+    const str = String(value).trim();
+
+    if (/([zZ]|[+-]\d{2}:?\d{2})$/.test(str)) {
+        const explicit = new Date(str);
+        return Number.isNaN(explicit.getTime()) ? null : explicit;
+    }
+
+    const m = str.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+    if (m) {
+        return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0)));
+    }
+
+    // Одна дата без времени — это не момент, а день; берём местную полночь.
+    if (isDateOnly(str)) {
+        const [y, mo, d] = str.split('-').map(Number);
+        return new Date(y, mo - 1, d);
+    }
+
+    const fallback = new Date(str);
+    return Number.isNaN(fallback.getTime()) ? null : fallback;
+}
+
+/**
+ * Срок карточки → `Date` в местной полуночи этого дня.
+ * Если в значении есть время, оно разбирается как отметка времени.
+ */
+export function parseDueDate(value) {
+    if (!value) return null;
+    const str = String(value).trim();
+    if (isDateOnly(str)) {
+        const [y, mo, d] = str.split('-').map(Number);
+        return new Date(y, mo - 1, d);
+    }
+    return parseTimestamp(str);
+}
+
+/**
+ * `Date` → "YYYY-MM-DD" по **местному** календарю.
+ *
+ * Именно этим следует получать ключ дня, а не `toISOString().slice(0, 10)`:
+ * тот переводит время в UTC, и с полуночи до конца смещения зоны выдаёт
+ * вчерашнюю дату.
+ */
+export function toDateKey(date) {
+    if (!date) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** Сегодняшняя дата в местном календаре, "YYYY-MM-DD". */
+export function todayKey() {
+    return toDateKey(new Date());
+}
+
 export function formatDate(dateStr) {
     if (!dateStr) return '';
-    const date = new Date(dateStr);
+    const date = parseTimestamp(dateStr);
+    if (!date) return '';
     const now = new Date();
     const diff = now - date;
-    
+
     if (diff < 60000) return 'только что';
     if (diff < 3600000) return `${Math.floor(diff / 60000)} мин. назад`;
     if (diff < 86400000) return `${Math.floor(diff / 3600000)} ч. назад`;
@@ -86,9 +171,8 @@ export function formatDate(dateStr) {
  * spelled out because those are the two that matter at a glance.
  */
 export function formatDueDate(dateStr) {
-    if (!dateStr) return '';
-    const date = new Date(dateStr);
-    if (Number.isNaN(date.getTime())) return '';
+    const date = parseDueDate(dateStr);
+    if (!date) return '';
 
     const atMidnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
     const days = Math.round((atMidnight(date) - atMidnight(new Date())) / 86400000);
@@ -103,11 +187,22 @@ export function formatDueDate(dateStr) {
 }
 
 /**
- * Check if a date is overdue
+ * Просрочен ли срок.
+ *
+ * Срок «25 августа» истекает в **конце** 25 августа, а не в его начале:
+ * задача, которую нужно сделать сегодня, ещё не просрочена. Раньше сравнение
+ * шло с полуночью UTC, из-за чего карточка со сроком «сегодня» краснела
+ * с раннего утра.
  */
 export function isOverdue(dateStr) {
-    if (!dateStr) return false;
-    return new Date(dateStr) < new Date();
+    const date = parseDueDate(dateStr);
+    if (!date) return false;
+
+    if (isDateOnly(dateStr)) {
+        const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+        return endOfDay < new Date();
+    }
+    return date < new Date();
 }
 
 /**
@@ -237,9 +332,10 @@ export function lastNDays(n) {
     const days = [];
     const now = new Date();
     for (let i = n - 1; i >= 0; i--) {
-        const d = new Date(now);
-        d.setDate(d.getDate() - i);
-        days.push(d.toISOString().slice(0, 10));
+        // Дни строятся в местном календаре: `toISOString()` здесь давал бы
+        // UTC-дату, и последним столбцом графика с полуночи до конца смещения
+        // зоны оказывался бы вчерашний день.
+        days.push(toDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)));
     }
     return days;
 }

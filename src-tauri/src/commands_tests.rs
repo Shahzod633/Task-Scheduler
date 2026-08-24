@@ -643,3 +643,524 @@ fn the_list_carries_whole_member_records_not_just_ids() {
     let unassigned = list.cards.iter().find(|c| c.assignee.is_none());
     assert!(unassigned.is_some(), "карточка без исполнителя — это None, а не пустая запись");
 }
+
+// ============================================
+// Full database export (VACUUM INTO)
+// ============================================
+// This is the button people press right before doing something risky, so the
+// two things that matter are that the copy really contains everything and that
+// a failed export cannot damage a file the user already had.
+
+/// Unique temp directory for one test.
+fn export_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("taskflow-export-{}", name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn the_export_contains_the_whole_database() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    seed_board(&conn, ws);
+    conn.execute("INSERT INTO members (name, initials, color) VALUES ('Пётр', 'ПП', '#f00')", ()).unwrap();
+
+    let target = export_dir("full").join("taskflow-copy.db");
+    let result = export_database_to(&conn, &target).expect("экспорт должен пройти");
+
+    assert!(target.exists(), "файл экспорта должен появиться на диске");
+    assert!(result.size_bytes > 0);
+
+    // Counts reported to the user must match the source, not be invented.
+    let expect = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(result.boards, expect("SELECT COUNT(*) FROM boards"));
+    assert_eq!(result.cards, expect("SELECT COUNT(*) FROM cards"));
+    assert_eq!(result.members, expect("SELECT COUNT(*) FROM members"));
+
+    // And the copy has to be a real, readable database with the same rows —
+    // including archived items, which are still the user's data.
+    let copy = Connection::open(&target).unwrap();
+    let titles: Vec<String> = copy
+        .prepare("SELECT title FROM cards ORDER BY title")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(titles.contains(&"Задача 1".to_string()));
+    assert!(titles.contains(&"Архивная".to_string()), "архивные карточки — тоже данные");
+
+    let member_names: Vec<String> = copy
+        .prepare("SELECT name FROM members ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert!(member_names.contains(&"Пётр".to_string()));
+}
+
+#[test]
+fn exporting_over_an_existing_file_replaces_it() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    seed_board(&conn, ws);
+
+    // The native save dialog already asked the user about overwriting.
+    let target = export_dir("overwrite").join("taskflow-copy.db");
+    std::fs::write(&target, "это не база данных").unwrap();
+
+    export_database_to(&conn, &target).expect("перезапись выбранного файла");
+
+    let copy = Connection::open(&target).unwrap();
+    let boards: i64 = copy.query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0)).unwrap();
+    assert!(boards > 0, "на месте выбранного файла должна оказаться настоящая база");
+}
+
+#[test]
+fn a_leftover_part_file_does_not_block_the_next_export() {
+    let conn = test_db();
+    let dir = export_dir("leftover");
+    let target = dir.join("taskflow-copy.db");
+
+    // VACUUM INTO refuses to write into a file that already exists, so a
+    // half-finished export from last time must not wedge the button forever.
+    std::fs::write(dir.join("taskflow-copy.db.part"), "обрывок").unwrap();
+
+    export_database_to(&conn, &target).expect("остаток прошлого экспорта должен убираться");
+    assert!(!dir.join("taskflow-copy.db.part").exists(), "временный файл не должен оставаться");
+}
+
+#[test]
+fn a_failed_export_leaves_the_users_file_alone() {
+    let conn = test_db();
+    let dir = export_dir("failure");
+
+    // A directory that does not exist: VACUUM INTO cannot write there.
+    let target = dir.join("нет-такой-папки").join("copy.db");
+    assert!(export_database_to(&conn, &target).is_err(), "ошибка должна быть заметной, а не тихой");
+
+    // And the more important case: an existing file the user cares about.
+    let precious = dir.join("важное.db");
+    std::fs::write(&precious, "чужие данные").unwrap();
+    let readonly_target = precious.clone();
+    // Make the .part path impossible by leaving a *directory* in its place.
+    std::fs::create_dir_all(dir.join("важное.db.part")).unwrap();
+
+    assert!(export_database_to(&conn, &readonly_target).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&precious).unwrap(),
+        "чужие данные",
+        "неудавшийся экспорт не должен трогать уже лежащий файл"
+    );
+}
+
+#[test]
+fn the_suggested_name_is_dated_and_usable_as_a_file_name() {
+    let conn = test_db();
+    let stamp: String = conn
+        .query_row("SELECT strftime('%Y-%m-%d', 'now', 'localtime')", [], |r| r.get(0))
+        .unwrap();
+    let name = format!("taskflow-{}.db", stamp);
+
+    assert!(name.starts_with("taskflow-"));
+    assert!(name.ends_with(".db"));
+    assert!(
+        !name.contains(':') && !name.contains('/') && !name.contains('\\'),
+        "в имени файла не должно быть символов, запрещённых Windows"
+    );
+}
+
+#[test]
+fn the_export_separates_what_is_visible_from_what_is_stored() {
+    // The file must contain everything, but the number shown to the user has to
+    // match what they see on their hub — otherwise "29 досок" looks like a bug
+    // to someone with 9 boards on screen.
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    seed_board(&conn, ws);
+
+    conn.execute("INSERT INTO boards (workspace_id, name, archived) VALUES (?1, 'Закрытая', 1)", params![ws]).unwrap();
+
+    let target = export_dir("counts").join("copy.db");
+    let result = export_database_to(&conn, &target).unwrap();
+
+    // seed_board's board plus the archived one. (No Inbox here: `test_db`
+    // builds the schema before inserting the workspace, and the backfill only
+    // sees workspaces that already exist.)
+    assert_eq!(result.boards, 2, "в файл попадает всё, включая архив");
+    assert_eq!(result.boards_active, 1, "видно на хабе только одну доску");
+
+    // seed_board makes three cards: one live, one archived, one in an archived
+    // column. Only the first is visible anywhere in the interface.
+    assert_eq!(result.cards, 3);
+    assert_eq!(result.cards_active, 1, "архивная карточка и карточка в архивной колонке не видны");
+
+    // And the file really does hold the archived rows, not just count them.
+    let copy = Connection::open(&target).unwrap();
+    let archived: i64 = copy
+        .query_row("SELECT COUNT(*) FROM boards WHERE archived = 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(archived, 1, "архивная доска должна физически лежать в копии");
+}
+
+// ============================================
+// Checklists (sub-tasks inside a card)
+// ============================================
+// The counter on the card face is computed in SQL, and the delete paths have to
+// clear these rows before the card they hang off — foreign keys are enforced,
+// so getting either wrong fails at runtime rather than at compile time.
+
+/// A card to hang checklist items off, with its column and board.
+fn seed_card(conn: &Connection, workspace_id: i64) -> i64 {
+    conn.execute("INSERT INTO boards (workspace_id, name) VALUES (?1, 'Доска')", params![workspace_id]).unwrap();
+    let board_id = conn.last_insert_rowid();
+    conn.execute("INSERT INTO columns (board_id, name, position) VALUES (?1, 'Колонка', 0)", params![board_id]).unwrap();
+    let column_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO cards (column_id, title, description, position) VALUES (?1, 'Задача', '', 0)",
+        params![column_id],
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+/// Adds an item the way `create_checklist_item` does, without the Tauri State.
+fn add_item(conn: &Connection, card_id: i64, text: &str) -> i64 {
+    let position: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM checklist_items WHERE card_id = ?1",
+        params![card_id],
+        |r| r.get(0),
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO checklist_items (card_id, text, position) VALUES (?1, ?2, ?3)",
+        params![card_id, text, position],
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+/// The counter as `get_cards` computes it.
+fn checklist_counts(conn: &Connection, card_id: i64) -> (i64, i64) {
+    conn.query_row(
+        "SELECT (SELECT COUNT(*) FROM checklist_items WHERE card_id = ?1),
+                (SELECT COUNT(*) FROM checklist_items WHERE card_id = ?1 AND is_done = 1)",
+        params![card_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap()
+}
+
+#[test]
+fn new_items_keep_the_order_they_were_added_in() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let card = seed_card(&conn, ws);
+
+    for text in ["Первый", "Второй", "Третий"] {
+        add_item(&conn, card, text);
+    }
+
+    let order: Vec<(String, i64)> = conn
+        .prepare("SELECT text, position FROM checklist_items WHERE card_id = ?1 ORDER BY position ASC, id ASC")
+        .unwrap()
+        .query_map(params![card], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+
+    assert_eq!(order[0], ("Первый".to_string(), 0));
+    assert_eq!(order[1], ("Второй".to_string(), 1));
+    assert_eq!(order[2], ("Третий".to_string(), 2));
+}
+
+#[test]
+fn the_card_face_counter_matches_what_is_ticked() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let card = seed_card(&conn, ws);
+
+    assert_eq!(checklist_counts(&conn, card), (0, 0), "у карточки без пунктов счётчика быть не должно");
+
+    let first = add_item(&conn, card, "Первый");
+    add_item(&conn, card, "Второй");
+    add_item(&conn, card, "Третий");
+    assert_eq!(checklist_counts(&conn, card), (3, 0));
+
+    conn.execute("UPDATE checklist_items SET is_done = 1 WHERE id = ?1", params![first]).unwrap();
+    assert_eq!(checklist_counts(&conn, card), (3, 1), "должно получиться «1 из 3»");
+}
+
+#[test]
+fn the_counter_does_not_leak_between_cards() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let card_a = seed_card(&conn, ws);
+    let card_b = seed_card(&conn, ws);
+
+    add_item(&conn, card_a, "Только у A");
+    add_item(&conn, card_a, "И это тоже у A");
+
+    assert_eq!(checklist_counts(&conn, card_a), (2, 0));
+    assert_eq!(checklist_counts(&conn, card_b), (0, 0), "пункты соседней карточки не должны считаться");
+}
+
+#[test]
+fn toggling_flips_the_item_both_ways() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let card = seed_card(&conn, ws);
+    let item = add_item(&conn, card, "Пункт");
+
+    let flip = |id: i64| -> i64 {
+        conn.execute(
+            "UPDATE checklist_items SET is_done = CASE is_done WHEN 0 THEN 1 ELSE 0 END WHERE id = ?1",
+            params![id],
+        ).unwrap();
+        conn.query_row("SELECT is_done FROM checklist_items WHERE id = ?1", params![id], |r| r.get(0)).unwrap()
+    };
+
+    assert_eq!(flip(item), 1, "первое нажатие отмечает пункт");
+    assert_eq!(flip(item), 0, "повторное — снимает отметку");
+}
+
+#[test]
+fn deleting_a_card_takes_its_checklist_with_it() {
+    let mut conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let card = seed_card(&conn, ws);
+    add_item(&conn, card, "Пункт 1");
+    add_item(&conn, card, "Пункт 2");
+
+    // Mirrors delete_card. Without the checklist_items line this fails outright:
+    // foreign keys are on, and the items still point at the card.
+    let tx = conn.transaction().unwrap();
+    tx.execute("DELETE FROM card_labels WHERE card_id = ?1", params![card]).unwrap();
+    tx.execute("DELETE FROM checklist_items WHERE card_id = ?1", params![card]).unwrap();
+    tx.execute("DELETE FROM cards WHERE id = ?1", params![card]).unwrap();
+    tx.commit().unwrap();
+
+    let left: i64 = conn.query_row("SELECT COUNT(*) FROM checklist_items", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0, "пункты удалённой карточки не должны оставаться сиротами");
+
+    let violations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(violations, 0);
+}
+
+#[test]
+fn a_card_with_a_checklist_cannot_be_deleted_out_from_under_it() {
+    // Guards the reason the delete paths above needed changing at all: if this
+    // ever stops failing, foreign keys have been switched off somewhere.
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let card = seed_card(&conn, ws);
+    add_item(&conn, card, "Пункт");
+
+    let result = conn.execute("DELETE FROM cards WHERE id = ?1", params![card]);
+    assert!(result.is_err(), "внешний ключ должен запрещать удаление карточки с пунктами");
+}
+
+#[test]
+fn an_empty_item_is_refused() {
+    // Mirrors the guard in create_checklist_item: a blank row would render as an
+    // untickable empty line that nobody can identify to delete.
+    for text in ["", "   ", "\t\n"] {
+        assert!(text.trim().is_empty(), "пустой текст должен отсекаться до вставки");
+    }
+    assert!(!"  Настоящий пункт  ".trim().is_empty());
+    assert_eq!("  Настоящий пункт  ".trim(), "Настоящий пункт");
+}
+
+// ============================================
+// Sidebar background, one per workspace
+// ============================================
+// Two things decide whether this feature is trustworthy: that switching
+// workspaces never shows the wrong picture, and that the folder does not fill
+// up with every wallpaper the user has ever tried.
+
+/// Unique temp directory for one background test.
+fn background_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("taskflow-bg-{}", name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A real PNG of the requested size, as bytes.
+fn picture_bytes(width: u32, height: u32) -> Vec<u8> {
+    let mut buf = image::RgbImage::new(width, height);
+    for (x, y, pixel) in buf.enumerate_pixels_mut() {
+        *pixel = image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]);
+    }
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(buf)
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+/// Writes such a PNG to disk, standing in for the file the user picks.
+fn picture_file(dir: &std::path::Path, name: &str, width: u32, height: u32) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, picture_bytes(width, height)).unwrap();
+    path
+}
+
+/// How many pictures the backgrounds folder holds, ignoring anything else.
+fn stored_pictures(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".jpg"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn second_workspace(conn: &Connection) -> i64 {
+    conn.execute("INSERT INTO workspaces (name) VALUES ('Второе')", ()).unwrap();
+    conn.last_insert_rowid()
+}
+
+#[test]
+fn a_large_picture_is_shrunk_before_it_is_stored() {
+    let jpeg = encode_background_image(&picture_bytes(2400, 1200)).expect("картинка должна пережаться");
+
+    let stored = image::load_from_memory(&jpeg).expect("результат должен быть читаемым изображением");
+    assert_eq!(stored.width(), 800, "длинная сторона ограничена 800 px");
+    assert_eq!(stored.height(), 400, "пропорции сохраняются");
+
+    assert_eq!(
+        image::guess_format(&jpeg).unwrap(),
+        image::ImageFormat::Jpeg,
+        "храним всегда JPEG, независимо от того, что дал пользователь",
+    );
+}
+
+#[test]
+fn a_small_picture_is_not_blown_up() {
+    // `DynamicImage::resize` растягивает картинку до рамки, если она меньше —
+    // это добавило бы байтов и мыла на ровном месте.
+    let jpeg = encode_background_image(&picture_bytes(300, 200)).unwrap();
+    let stored = image::load_from_memory(&jpeg).unwrap();
+    assert_eq!((stored.width(), stored.height()), (300, 200));
+}
+
+#[test]
+fn a_file_that_is_not_a_picture_is_refused() {
+    let err = encode_background_image(b"not a picture at all").unwrap_err();
+    assert!(!err.is_empty(), "отказ должен объясняться пользователю");
+}
+
+#[test]
+fn each_workspace_keeps_its_own_background() {
+    let conn = test_db();
+    let first: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let second = second_workspace(&conn);
+
+    let dir = background_dir("per-workspace");
+    let store = dir.join("store");
+    let source_a = picture_file(&dir, "a.png", 60, 40);
+    let source_b = picture_file(&dir, "b.png", 40, 60);
+
+    let name_a = store_background(&conn, &store, first, &source_a).unwrap();
+    let name_b = store_background(&conn, &store, second, &source_b).unwrap();
+
+    assert_ne!(name_a, name_b, "у каждого пространства свой файл");
+    assert!(name_a.starts_with(&format!("{}_", first)), "имя файла называет своё пространство");
+    assert!(name_b.starts_with(&format!("{}_", second)));
+
+    // И читается тоже своё: перепутанная привязка — главный риск этой фичи.
+    let read_a = read_background(&conn, &store, first).unwrap().unwrap();
+    let read_b = read_background(&conn, &store, second).unwrap().unwrap();
+    assert!(read_a.starts_with("data:image/jpeg;base64,"));
+    assert_ne!(read_a, read_b, "разные картинки — разные данные");
+}
+
+#[test]
+fn replacing_a_background_deletes_the_file_it_replaces() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+
+    let dir = background_dir("replace");
+    let store = dir.join("store");
+    let first = store_background(&conn, &store, ws, &picture_file(&dir, "first.png", 50, 50)).unwrap();
+
+    // Имя содержит секунды: без паузы замена попала бы в тот же файл, и тест
+    // проверял бы не то, что нужно.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+
+    let second = store_background(&conn, &store, ws, &picture_file(&dir, "second.png", 70, 70)).unwrap();
+
+    assert_ne!(first, second);
+    assert_eq!(
+        stored_pictures(&store),
+        vec![second.clone()],
+        "прошлая загрузка не должна оставаться в папке",
+    );
+    assert_eq!(background_name(&conn, ws).unwrap(), Some(second));
+}
+
+#[test]
+fn resetting_one_workspace_leaves_the_others_alone() {
+    let conn = test_db();
+    let first: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let second = second_workspace(&conn);
+
+    let dir = background_dir("reset");
+    let store = dir.join("store");
+    store_background(&conn, &store, first, &picture_file(&dir, "a.png", 50, 50)).unwrap();
+    let kept = store_background(&conn, &store, second, &picture_file(&dir, "b.png", 50, 50)).unwrap();
+
+    clear_background(&conn, &store, first).unwrap();
+
+    assert_eq!(background_name(&conn, first).unwrap(), None);
+    assert_eq!(read_background(&conn, &store, first).unwrap(), None);
+    assert_eq!(background_name(&conn, second).unwrap(), Some(kept.clone()));
+    assert_eq!(stored_pictures(&store), vec![kept], "чужой файл сбросом не трогается");
+}
+
+#[test]
+fn a_workspace_without_a_background_reads_as_none() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let store = background_dir("empty").join("store");
+
+    assert_eq!(read_background(&conn, &store, ws).unwrap(), None);
+    // Сброс без установленного фона — обычная ситуация, не ошибка.
+    clear_background(&conn, &store, ws).unwrap();
+}
+
+#[test]
+fn a_background_whose_file_vanished_stops_being_remembered() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+
+    let dir = background_dir("vanished");
+    let store = dir.join("store");
+    let name = store_background(&conn, &store, ws, &picture_file(&dir, "a.png", 50, 50)).unwrap();
+
+    // Папка обычная, пользователь может вычистить её мимо приложения; после
+    // восстановления из копии база тоже может назвать файл, которого нет.
+    std::fs::remove_file(store.join(&name)).unwrap();
+
+    assert_eq!(read_background(&conn, &store, ws).unwrap(), None, "это «фона нет», а не ошибка");
+    assert_eq!(
+        background_name(&conn, ws).unwrap(),
+        None,
+        "ссылка на пропавший файл должна забыться, иначе кнопка «Сбросить» висит навсегда",
+    );
+}
+
+#[test]
+fn a_stored_name_cannot_point_outside_the_backgrounds_folder() {
+    let dir = std::path::Path::new("C:/taskflow/backgrounds");
+    assert!(background_file_path(dir, "3_20260824.jpg").is_some());
+    assert!(background_file_path(dir, "../../trello_clone.db").is_none());
+    assert!(background_file_path(dir, "sub/dir.jpg").is_none());
+    assert!(background_file_path(dir, "").is_none());
+}

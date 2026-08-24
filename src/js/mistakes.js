@@ -6,7 +6,7 @@
 import * as api from './api.js';
 import { showCardEditModal } from './board.js';
 import { renderBarChart, renderLineChart, chartColors } from './charts.js';
-import { createElement, $, showToast, formatDate, lastNDays } from './utils.js';
+import { createElement, $, showToast, formatDate, lastNDays, parseTimestamp, toDateKey } from './utils.js';
 
 export async function renderMistakesPage(workspaceId) {
     const content = $('#content');
@@ -65,7 +65,7 @@ function renderStats(container, cards) {
 
     const resolvedDurations = cards
         .filter(c => c.mistake_resolved_at && c.mistake_marked_at)
-        .map(c => (new Date(c.mistake_resolved_at) - new Date(c.mistake_marked_at)) / 86400000);
+        .map(c => (parseTimestamp(c.mistake_resolved_at) - parseTimestamp(c.mistake_marked_at)) / 86400000);
     const avgDays = resolvedDurations.length
         ? resolvedDurations.reduce((a, b) => a + b, 0) / resolvedDurations.length
         : null;
@@ -88,7 +88,13 @@ function renderCharts(barCanvas, lineCanvas, cards) {
     const days = lastNDays(30);
     const labels = days.map(d => d.slice(5));
 
-    const newCounts = days.map(day => cards.filter(c => (c.mistake_marked_at || '').slice(0, 10) === day).length);
+    // Отметки в базе — в UTC, а столбцы графика подписаны местными датами.
+    // Резать строку через .slice(0, 10) нельзя: событие, случившееся вечером,
+    // попадало бы в следующий день. Поэтому сначала разбор, потом местный ключ.
+    const dayOf = (timestamp) => toDateKey(parseTimestamp(timestamp));
+    const countOn = (day, field) => cards.filter(c => c[field] && dayOf(c[field]) === day).length;
+
+    const newCounts = days.map(day => countOn(day, 'mistake_marked_at'));
     renderBarChart(barCanvas, labels, newCounts, { color: chartColors.danger, label: 'Новые ошибки' });
 
     let openedSoFar = 0;
@@ -96,8 +102,8 @@ function renderCharts(barCanvas, lineCanvas, cards) {
     const openedSeries = [];
     const closedSeries = [];
     for (const day of days) {
-        openedSoFar += cards.filter(c => (c.mistake_marked_at || '').slice(0, 10) === day).length;
-        closedSoFar += cards.filter(c => (c.mistake_resolved_at || '').slice(0, 10) === day).length;
+        openedSoFar += countOn(day, 'mistake_marked_at');
+        closedSoFar += countOn(day, 'mistake_resolved_at');
         openedSeries.push(openedSoFar);
         closedSeries.push(closedSoFar);
     }
