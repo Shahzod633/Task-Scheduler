@@ -49,6 +49,24 @@
     background: var(--bg-app-veil);
 }
 
+/* ─── Доска: тот же слой, но без размытия ─── */
+/* Размытие фону нужно только там, где поверх него лежит текст. На доске его
+   нет: колонки, карточки, шапка и тулбар непрозрачны, а между ними — пустота,
+   и в ней фотографию можно показать как есть.
+
+   Вместе с blur снимаются `inset: -20px` и `scale(1.15)`: они существовали
+   только чтобы спрятать светлую кайму, которую размытие подмешивает по краям
+   элемента. Без размытия каймы нет, а масштаб 1.15 лишь обрезал бы кадр. */
+#app[data-view="board"] #app-bg {
+    inset: 0;
+    filter: none;
+    transform: none;
+}
+
+#app[data-view="board"] #app-bg::after {
+    background: var(--bg-app-veil-board);
+}
+
 /* ─── Global Header ─── */
 .header {
     height: var(--header-height);
@@ -524,6 +542,10 @@
 }
 
 /* ─── Board Header (inside board view) ─── */
+/* Название доски и тулбар — единственное место на этом экране, где текст
+   оказывается прямо над фотографией, а она здесь показана чёткой. Полоса
+   стекла под ними стоит ровно за этим: колонки и карточки в защите не
+   нуждаются, они и так непрозрачны. */
 .board-header {
     display: flex;
     align-items: center;
@@ -532,6 +554,9 @@
     padding: var(--space-md) var(--space-xl);
     min-height: 52px;
     flex-shrink: 0;
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
 }
 
 .board-header__left {

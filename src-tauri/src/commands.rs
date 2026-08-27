@@ -1746,11 +1746,18 @@ pub fn get_app_version(app: tauri::AppHandle) -> String {
 
 /// Longest side, in pixels, of the stored picture.
 ///
-/// The sidebar is a few hundred pixels wide and the image is blurred by 40 px
-/// before anyone sees it, so detail beyond this is thrown away by the renderer
-/// anyway. The limit exists to keep a 12-megapixel phone photo out of the app
-/// folder, not to preserve quality.
-const BACKGROUND_MAX_SIDE: u32 = 800;
+/// Was 800 while the picture was only ever seen through a 40 px blur. Two
+/// things changed that: the board screen now shows the same file *sharp*, and
+/// the layer covers the whole window rather than the sidebar. On a 1500 px
+/// window the layer is stretched to roughly 1770 px (`inset: -20px` plus
+/// `scale(1.15)`), so 800 px arrived visibly soft on the one screen where
+/// softness is not wanted.
+///
+/// 1600 is the smallest round number that covers a normal laptop window at
+/// 1:1. The limit is still there to keep a 12-megapixel phone photo out of the
+/// app folder — see `measure_stored_background_size_on_real_photos` for what
+/// real wallpapers actually weigh at this setting.
+const BACKGROUND_MAX_SIDE: u32 = 1600;
 
 /// JPEG quality of the stored picture. Generous for something this blurred; the
 /// point is only to stay clear of visible blocking in large flat areas.
@@ -1987,8 +1994,8 @@ fn encode_background_image(raw: &[u8]) -> Result<Vec<u8>, String> {
     };
 
     // JPEG carries no alpha channel. Dropping it is acceptable here and nowhere
-    // else in the app: the result is blurred by 40 px behind a 75 % dark overlay,
-    // so what a transparent PNG loses is not visible in the only place it is used.
+    // else in the app: the picture is a background behind a dark overlay, never
+    // an illustration, so what a transparent PNG loses has nowhere to show.
     let rgb = picture.to_rgb8();
 
     let mut out = Vec::new();

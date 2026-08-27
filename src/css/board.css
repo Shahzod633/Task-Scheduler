@@ -536,7 +536,14 @@ body.is-dragging-card .card:hover {
     gap: var(--space-sm);
     width: 100%;
     padding: var(--space-md) var(--space-lg);
-    background: rgba(255, 255, 255, 0.03);
+    /* На доске фон показывается чётким, и эта кнопка — единственное, что
+       осталось лежать прямо на фотографии: колонки и карточки непрозрачны,
+       шапка с тулбаром закрыты полосой стекла. Прежние 3 % белого на ярком
+       кадре не читались вовсе. Пунктир сохранён — он и означает «здесь
+       пока пусто». */
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
     border: 1px dashed var(--border-hover);
     border-radius: var(--radius-xl);
     color: var(--text-muted);

@@ -295,8 +295,10 @@
 }
 
 .template-gallery__card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-default);
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
     border-radius: var(--radius-lg);
     padding: var(--space-lg);
     cursor: pointer;
@@ -358,8 +360,10 @@
 }
 
 .home-widget {
-    background: var(--bg-card);
-    border: 1px solid var(--border-default);
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
     border-radius: var(--radius-xl);
     padding: var(--space-lg);
     box-shadow: var(--highlight-top);
@@ -416,8 +420,12 @@
 }
 
 .settings-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border-default);
+    background: var(--bg-panel);
+    /* backdrop-filter размывает то, что позади панели; filter размыл бы саму
+       панель вместе с текстом внутри. Здесь нужен именно первый. */
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
     border-radius: var(--radius-xl);
     padding: var(--space-xl);
     max-width: 520px;
@@ -444,6 +452,11 @@
     overflow: hidden;
 }
 
+/* Превью — единственное место в приложении, где фото показано как есть:
+   чёткое, без blur и без затемняющей плашки. Слой #app-bg с filter: blur(40px)
+   лежит в другой ветке DOM (первым ребёнком #app), а не над этим элементом,
+   поэтому его размытие сюда не наследуется. Не добавлять filter ни сюда, ни
+   любому родителю .settings-card: filter действует на всё поддерево. */
 .settings-background__image {
     width: 100%;
     height: 100%;
@@ -692,8 +705,10 @@
 }
 
 .mistake-stat-tile {
-    background: var(--bg-card);
-    border: 1px solid var(--border-default);
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
     border-radius: var(--radius-xl);
     padding: var(--space-lg);
     text-align: center;
@@ -735,8 +750,10 @@
 }
 
 .mistake-chart-panel {
-    background: var(--bg-card);
-    border: 1px solid var(--border-default);
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
     border-radius: var(--radius-xl);
     padding: var(--space-lg);
     box-shadow: var(--highlight-top);
@@ -764,13 +781,16 @@
     gap: var(--space-xs);
 }
 
+/* Строк здесь бывает много, а каждый backdrop-filter — отдельный слой в
+   композиторе. Заливка панели без своего размытия: фон под строкой уже размыт
+   общим слоем, разницы на глаз нет, а цена — ноль. */
 .mistake-row {
     display: flex;
     align-items: center;
     gap: var(--space-md);
     padding: var(--space-md) var(--space-lg);
-    background: var(--bg-card);
-    border: 1px solid var(--border-default);
+    background: var(--bg-panel);
+    border: 1px solid var(--border-panel);
     border-radius: var(--radius-lg);
     cursor: pointer;
     transition: background var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast);

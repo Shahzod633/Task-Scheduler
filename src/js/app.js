@@ -241,6 +241,12 @@ async function navigateTo(view, params = {}) {
 
     updateSidebarActiveState(view);
 
+    // Оформление, зависящее от экрана, живёт в CSS, а не в JS: слой фона
+    // (#app-bg) сам не знает, какая страница открыта, и знать не должен.
+    // Сейчас от этого атрибута зависит только доска — она показывает фон
+    // без размытия.
+    $('#app').dataset.view = view;
+
     const sidebar = $('#app-sidebar');
     if (sidebar) sidebar.classList.toggle('sidebar--hidden', !SIDEBAR_VIEWS.has(view));
 

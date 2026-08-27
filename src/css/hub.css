@@ -153,8 +153,10 @@
    так они не спорят по контрасту с обложками досок ниже. */
 .hub__template-card {
     padding: var(--space-md) var(--space-lg);
-    background: var(--accent-gradient-soft), var(--bg-card);
-    border: 1px solid var(--border-default);
+    background: var(--accent-gradient-soft), var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
     border-radius: var(--radius-lg);
     cursor: pointer;
     transition: transform var(--transition-normal), box-shadow var(--transition-normal),
@@ -407,7 +409,11 @@
     position: absolute;
     inset: 1.5px;
     border-radius: calc(var(--radius-lg) - 1px);
-    background: var(--bg-primary);
+    /* Заливка внутри вращающейся рамки — полупрозрачная, как у остальных
+       панелей: сплошной цвет читался бы на фотографии чёрной заплаткой.
+       Своего backdrop-filter здесь нет намеренно — isolation: isolate у
+       родителя обрезал бы ему источник размытия; фон под ним и так размыт. */
+    background: var(--bg-panel);
     z-index: -1;
     transition: background var(--transition-normal);
 }

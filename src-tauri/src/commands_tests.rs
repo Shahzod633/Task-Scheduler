@@ -1028,11 +1028,11 @@ fn second_workspace(conn: &Connection) -> i64 {
 
 #[test]
 fn a_large_picture_is_shrunk_before_it_is_stored() {
-    let jpeg = encode_background_image(&picture_bytes(2400, 1200)).expect("картинка должна пережаться");
+    let jpeg = encode_background_image(&picture_bytes(4800, 2400)).expect("картинка должна пережаться");
 
     let stored = image::load_from_memory(&jpeg).expect("результат должен быть читаемым изображением");
-    assert_eq!(stored.width(), 800, "длинная сторона ограничена 800 px");
-    assert_eq!(stored.height(), 400, "пропорции сохраняются");
+    assert_eq!(stored.width(), 1600, "длинная сторона ограничена 1600 px");
+    assert_eq!(stored.height(), 800, "пропорции сохраняются");
 
     assert_eq!(
         image::guess_format(&jpeg).unwrap(),
@@ -1044,10 +1044,11 @@ fn a_large_picture_is_shrunk_before_it_is_stored() {
 #[test]
 fn a_small_picture_is_not_blown_up() {
     // `DynamicImage::resize` растягивает картинку до рамки, если она меньше —
-    // это добавило бы байтов и мыла на ровном месте.
-    let jpeg = encode_background_image(&picture_bytes(300, 200)).unwrap();
+    // это добавило бы байтов и мыла на ровном месте. Картинка меньше 1600 по
+    // обеим сторонам должна дойти до диска ровно такой, какой была.
+    let jpeg = encode_background_image(&picture_bytes(1200, 900)).unwrap();
     let stored = image::load_from_memory(&jpeg).unwrap();
-    assert_eq!((stored.width(), stored.height()), (300, 200));
+    assert_eq!((stored.width(), stored.height()), (1200, 900));
 }
 
 #[test]
@@ -1163,4 +1164,59 @@ fn a_stored_name_cannot_point_outside_the_backgrounds_folder() {
     assert!(background_file_path(dir, "../../trello_clone.db").is_none());
     assert!(background_file_path(dir, "sub/dir.jpg").is_none());
     assert!(background_file_path(dir, "").is_none());
+}
+
+/// Сколько на самом деле весит фон при текущем `BACKGROUND_MAX_SIDE`.
+///
+/// Синтетическая картинка из `picture_bytes` — градиент, он жмётся в разы
+/// лучше фотографии, и мерить предел по нему бессмысленно. Тест берёт
+/// настоящие обои Windows (3840×2400) и печатает три числа: файл на диске,
+/// длину base64 (именно она едет через IPC и живёт в CSS как `url()`) и размер
+/// распакованного растра в композиторе.
+///
+/// Запуск: `cargo test --lib measure_stored_background -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn measure_stored_background_size_on_real_photos() {
+    let dirs = [
+        r"C:\Windows\Web\Wallpaper\ThemeA",
+        r"C:\Windows\Web\Wallpaper\ThemeB",
+        r"C:\Windows\Web\4K\Wallpaper\Windows",
+    ];
+
+    let mut checked = 0;
+    for dir in dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jpg") {
+                continue;
+            }
+            let raw = std::fs::read(&path).unwrap();
+            let source = image::load_from_memory(&raw).unwrap();
+
+            let jpeg = encode_background_image(&raw).expect("обои должны пережаться");
+            let stored = image::load_from_memory(&jpeg).unwrap();
+            // base64 всегда 4 символа на каждые 3 байта, с добивкой до кратности.
+            let base64_len = (jpeg.len() + 2) / 3 * 4;
+            let bitmap = stored.width() as usize * stored.height() as usize * 4;
+
+            println!(
+                "{:<26} {}×{} {:>7} КБ  ->  {}×{} {:>6} КБ  base64 {:>6} КБ  растр {:>5} МБ",
+                path.file_name().unwrap().to_string_lossy(),
+                source.width(), source.height(), raw.len() / 1024,
+                stored.width(), stored.height(), jpeg.len() / 1024,
+                base64_len / 1024,
+                bitmap / (1024 * 1024),
+            );
+            checked += 1;
+        }
+    }
+
+    if checked == 0 {
+        println!("обоев Windows на этой машине нет — мерить нечего");
+    }
 }
