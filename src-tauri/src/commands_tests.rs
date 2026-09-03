@@ -245,6 +245,8 @@ fn import_skips_label_links_the_file_does_not_define() {
                     is_mistake: false,
                     mistake_marked_at: None,
                     mistake_resolved_at: None,
+                    retry_count: 0,
+                    archive_reason: None,
                     label_ids: vec![999],
                     assignee_id: None,
                     author_id: None,
@@ -620,7 +622,7 @@ fn the_workspace_list_spans_every_board_at_once() {
     let other_col = conn.last_insert_rowid();
     conn.execute("INSERT INTO cards (column_id, title, description, position) VALUES (?1, 'Чужая задача', '', 0)", params![other_col]).unwrap();
 
-    let list = build_workspace_card_list(&conn, ws).unwrap();
+    let list = build_workspace_card_list(&conn, ws, false).unwrap();
     let titles: Vec<&str> = list.cards.iter().map(|c| c.title.as_str()).collect();
 
     assert!(titles.contains(&"Задача 1"));
@@ -662,7 +664,7 @@ fn the_list_carries_whole_member_records_not_just_ids() {
         params![live_col],
     ).unwrap();
 
-    let list = build_workspace_card_list(&conn, ws).unwrap();
+    let list = build_workspace_card_list(&conn, ws, false).unwrap();
     let card = list.cards.iter().find(|c| c.title == "Задача 1").unwrap();
 
     let assignee = card.assignee.as_ref().expect("исполнитель должен приехать вместе со строкой");
@@ -2778,4 +2780,369 @@ fn a_migrated_board_is_not_rewritten_on_every_start() {
         rows.map(|r| r.unwrap()).collect()
     };
     assert_eq!(snapshot, after);
+}
+
+// ─── Попытки, продление срока и автоархив ───
+//
+// Сроки здесь задаются сдвигом от сегодняшнего **местного** дня, а не
+// константами: тест с зашитой датой прошёл бы один раз и сломался бы назавтра.
+
+/// Доска с костяком; возвращает `(board_id, id колонки «Новые»)`.
+fn board_for_retries(conn: &mut Connection) -> (i64, i64) {
+    let board = create_board_in(conn, 1, "Доска ретраев", "").unwrap();
+    let first = column_id_by_name(conn, board.id, "Новые");
+    (board.id, first)
+}
+
+/// Карточка с просроченным сроком в указанной колонке.
+fn overdue_card(conn: &Connection, column_id: i64, title: &str, days_ago: i64) -> i64 {
+    let due = local_day(conn, -days_ago);
+    conn.execute(
+        "INSERT INTO cards (column_id, title, description, position, due_date)
+         VALUES (?1, ?2, '', 0, ?3)",
+        params![column_id, title, due],
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+fn retry_count_of(conn: &Connection, card_id: i64) -> i64 {
+    conn.query_row("SELECT retry_count FROM cards WHERE id = ?1", params![card_id], |r| r.get(0))
+        .unwrap()
+}
+
+fn archived_state(conn: &Connection, card_id: i64) -> (i8, Option<String>) {
+    conn.query_row(
+        "SELECT archived, archive_reason FROM cards WHERE id = ?1",
+        params![card_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap()
+}
+
+fn is_mistake(conn: &Connection, card_id: i64) -> bool {
+    let flag: i8 = conn
+        .query_row("SELECT is_mistake FROM cards WHERE id = ?1", params![card_id], |r| r.get(0))
+        .unwrap();
+    flag != 0
+}
+
+#[test]
+fn an_overdue_card_with_retries_left_goes_to_the_attention_list() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Просрочена", 1);
+
+    let outcome = process_overdue_cards(&conn).unwrap();
+
+    assert_eq!(outcome.flagged, vec!["Просрочена"]);
+    assert!(outcome.archived.is_empty());
+    assert!(is_mistake(&conn, card));
+    assert_eq!(archived_state(&conn, card).0, 0);
+}
+
+#[test]
+fn a_card_due_today_is_not_overdue_yet() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Сегодня", 0);
+
+    // Срок истекает в КОНЦЕ своего дня (§12): задача на сегодня ещё в работе,
+    // а не провалена с утра.
+    assert!(process_overdue_cards(&conn).unwrap().is_empty());
+    assert!(!is_mistake(&conn, card));
+}
+
+#[test]
+fn a_card_in_the_final_column_is_never_flagged() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let closed = column_id_by_name(&conn, board.id, "Закрыто");
+    let card = overdue_card(&conn, closed, "Сдана давно", 30);
+
+    // Путь окончен — просрочка в финальной колонке ничего не значит.
+    assert!(process_overdue_cards(&conn).unwrap().is_empty());
+    assert!(!is_mistake(&conn, card));
+    assert_eq!(archived_state(&conn, card).0, 0);
+}
+
+#[test]
+fn a_flagged_card_is_not_flagged_again_on_the_next_pass() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Просрочена", 2);
+
+    process_overdue_cards(&conn).unwrap();
+    let marked_at: String = conn
+        .query_row("SELECT mistake_marked_at FROM cards WHERE id = ?1", params![card], |r| r.get(0))
+        .unwrap();
+
+    // Проверка идёт каждые пятнадцать минут: переписывай она отметку каждый
+    // раз, «сколько задача висит» перестало бы что-то значить.
+    let second = process_overdue_cards(&conn).unwrap();
+    assert!(second.is_empty());
+    let still: String = conn
+        .query_row("SELECT mistake_marked_at FROM cards WHERE id = ?1", params![card], |r| r.get(0))
+        .unwrap();
+    assert_eq!(marked_at, still);
+}
+
+#[test]
+fn a_retry_moves_the_deadline_a_week_out_and_clears_both_reminder_marks() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Просрочена", 1);
+    conn.execute(
+        "UPDATE cards SET due_reminder_sent_at = datetime('now'),
+                          email_reminder_sent_at = datetime('now')
+         WHERE id = ?1",
+        params![card],
+    ).unwrap();
+    process_overdue_cards(&conn).unwrap();
+
+    request_card_retry_in(&conn, card).unwrap();
+
+    assert_eq!(due_of(&conn, card), Some(local_day(&conn, RETRY_EXTENSION_DAYS)));
+    assert_eq!(retry_count_of(&conn, card), 1);
+    assert!(!is_mistake(&conn, card));
+
+    // Без сброса отметок ни системное напоминание, ни письмо по продлённому
+    // сроку не ушли бы: проверки сочли бы, что уже отчитались.
+    let (due_mark, email_mark): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT due_reminder_sent_at, email_reminder_sent_at FROM cards WHERE id = ?1",
+            params![card], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+    assert!(due_mark.is_none(), "отметка системного напоминания должна сброситься");
+    assert!(email_mark.is_none(), "отметка письма должна сброситься");
+
+    // И задача снова попадает в напоминания — окно действительно новое.
+    assert_eq!(due_cards_needing_reminder(&conn, 24 * 8).unwrap().len(), 1);
+}
+
+#[test]
+fn a_retry_returns_the_card_to_the_first_working_column() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let testing = column_id_by_name(&conn, board.id, "Тестирование");
+    let first = column_id_by_name(&conn, board.id, "Новые");
+    // В «Новых» уже есть задача — вернувшаяся должна встать НАД ней.
+    add_plain_card(&conn, first, "Уже там", 0);
+    let card = overdue_card(&conn, testing, "Провалена", 3);
+    process_overdue_cards(&conn).unwrap();
+
+    request_card_retry_in(&conn, card).unwrap();
+
+    assert_eq!(card_column_and_position(&conn, card), (first, 0));
+}
+
+#[test]
+fn the_fourth_failure_archives_the_card_instead_of_flagging_it() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Безнадёжная", 1);
+
+    // Три круга «просрочка → продление».
+    for round in 1..=RETRY_LIMIT {
+        let outcome = process_overdue_cards(&conn).unwrap();
+        assert_eq!(outcome.flagged, vec!["Безнадёжная"], "круг {}", round);
+        request_card_retry_in(&conn, card).unwrap();
+        assert_eq!(retry_count_of(&conn, card), round);
+        // Срок продлён на неделю вперёд — отматываем его назад, чтобы
+        // получить следующую просрочку, не дожидаясь недели.
+        conn.execute(
+            "UPDATE cards SET due_date = date('now', 'localtime', '-1 day') WHERE id = ?1",
+            params![card],
+        ).unwrap();
+    }
+
+    // Четвёртая просрочка: попытки кончились.
+    let outcome = process_overdue_cards(&conn).unwrap();
+    assert_eq!(outcome.archived, vec!["Безнадёжная"]);
+    assert!(outcome.flagged.is_empty(), "исчерпанная задача не идёт в «Требуют внимания»");
+
+    assert!(!is_mistake(&conn, card), "вместо пометки — архив");
+    assert_eq!(
+        archived_state(&conn, card),
+        (1, Some(crate::models::ARCHIVE_REASON_MAX_RETRIES.to_string()))
+    );
+}
+
+#[test]
+fn an_archived_card_is_left_alone_by_later_passes() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "В архиве", 5);
+    conn.execute(
+        "UPDATE cards SET retry_count = ?1 WHERE id = ?2",
+        params![RETRY_LIMIT, card],
+    ).unwrap();
+
+    process_overdue_cards(&conn).unwrap();
+    assert!(process_overdue_cards(&conn).unwrap().is_empty(), "второй проход нечего разбирать");
+}
+
+#[test]
+fn a_retry_is_refused_once_the_attempts_are_spent() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Исчерпана", 1);
+    conn.execute(
+        "UPDATE cards SET retry_count = ?1 WHERE id = ?2",
+        params![RETRY_LIMIT, card],
+    ).unwrap();
+
+    // Кнопки в интерфейсе для такой карточки нет, но команду можно позвать и
+    // мимо него — это единственная дверь к переносу срока.
+    assert_eq!(request_card_retry_in(&conn, card).unwrap_err(), ERR_RETRY_LIMIT);
+    assert_eq!(retry_count_of(&conn, card), RETRY_LIMIT, "счётчик не должен вырасти");
+}
+
+#[test]
+fn a_retry_is_refused_for_a_card_in_the_final_column() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let closed = column_id_by_name(&conn, board.id, "Закрыто");
+    let card = overdue_card(&conn, closed, "Сдана", 10);
+    let before = due_of(&conn, card);
+
+    // Иначе ретрай стал бы выходом из финальной колонки — тем самым, что
+    // запрещено §20.3, только через другую дверь.
+    assert_eq!(request_card_retry_in(&conn, card).unwrap_err(), ERR_RETRY_IN_FINAL);
+    assert_eq!(due_of(&conn, card), before, "срок не должен сдвинуться");
+    assert_eq!(card_column_and_position(&conn, card).0, closed);
+}
+
+#[test]
+fn a_retry_is_the_only_way_a_deadline_ever_moves() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Задача", 1);
+    let original = due_of(&conn, card).unwrap();
+
+    // Правка карточки срок не двигает (§20.2)…
+    update_card_in(&conn, card, "Задача", "правка", Some("2030-01-01")).unwrap();
+    assert_eq!(due_of(&conn, card).as_deref(), Some(original.as_str()));
+
+    // …а продление ретрая — двигает. Это и есть та самая единственная дверь.
+    request_card_retry_in(&conn, card).unwrap();
+    assert_eq!(due_of(&conn, card), Some(local_day(&conn, RETRY_EXTENSION_DAYS)));
+}
+
+#[test]
+fn archived_things_are_not_touched_by_the_overdue_check() {
+    let mut conn = test_db();
+    let (board_id, first) = board_for_retries(&mut conn);
+
+    let archived_card = overdue_card(&conn, first, "Архивная карточка", 3);
+    conn.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![archived_card]).unwrap();
+
+    let extra = create_column_in(&mut conn, board_id, "Отдельная").unwrap();
+    let in_archived_column = overdue_card(&conn, extra.id, "В архивной колонке", 3);
+    conn.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![extra.id]).unwrap();
+
+    let other = create_board_in(&mut conn, 1, "Архивная доска", "").unwrap();
+    let other_first = column_id_by_name(&conn, other.id, "Новые");
+    let on_archived_board = overdue_card(&conn, other_first, "На архивной доске", 3);
+    conn.execute("UPDATE boards SET archived = 1 WHERE id = ?1", params![other.id]).unwrap();
+
+    assert!(process_overdue_cards(&conn).unwrap().is_empty());
+    for card in [archived_card, in_archived_column, on_archived_board] {
+        assert!(!is_mistake(&conn, card), "карточка {} не должна быть помечена", card);
+    }
+}
+
+#[test]
+fn the_notification_names_one_card_and_counts_many() {
+    let outcome = OverdueOutcome {
+        flagged: vec!["Одна".into()],
+        archived: Vec::new(),
+    };
+    let (title, body) = overdue_notification(&outcome).unwrap();
+    assert!(title.contains('1'));
+    assert_eq!(body, "Одна");
+
+    // Ушедшие в архив важнее: задача пропала с доски, и об этом надо сказать
+    // в заголовке, а не строкой ниже.
+    let outcome = OverdueOutcome {
+        flagged: vec!["А".into(), "Б".into()],
+        archived: vec!["В".into()],
+    };
+    let (title, body) = overdue_notification(&outcome).unwrap();
+    assert!(title.starts_with("В архив"), "заголовок: {}", title);
+    assert!(body.contains('В') && body.contains('А'));
+
+    assert!(overdue_notification(&OverdueOutcome::default()).is_none());
+}
+
+#[test]
+fn the_attention_list_does_not_show_archived_cards() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Помечена и убрана", 1);
+    process_overdue_cards(&conn).unwrap();
+    conn.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![card]).unwrap();
+
+    // Иначе на архивной карточке предлагалась бы кнопка «Запросить попытку».
+    let sql = format!(
+        "SELECT COUNT(*) FROM cards c
+         INNER JOIN columns col ON col.id = c.column_id
+         INNER JOIN boards b ON b.id = col.board_id
+         WHERE b.workspace_id = 1 AND c.is_mistake = 1 AND c.archived = 0"
+    );
+    let visible: i64 = conn.query_row(&sql, [], |r| r.get(0)).unwrap();
+    assert_eq!(visible, 0);
+}
+
+#[test]
+fn the_workspace_list_hides_archived_cards_unless_asked() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    add_plain_card(&conn, first, "Живая", 0);
+    let gone = overdue_card(&conn, first, "Убранная", 1);
+    conn.execute(
+        "UPDATE cards SET archived = 1, archive_reason = ?1 WHERE id = ?2",
+        params![crate::models::ARCHIVE_REASON_MAX_RETRIES, gone],
+    ).unwrap();
+
+    let visible = build_workspace_card_list(&conn, 1, false).unwrap();
+    let titles: Vec<&str> = visible.cards.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, vec!["Живая"]);
+
+    let everything = build_workspace_card_list(&conn, 1, true).unwrap();
+    assert_eq!(everything.cards.len(), 2);
+    let archived = everything.cards.iter().find(|c| c.title == "Убранная").unwrap();
+    assert_eq!(archived.archived, 1);
+    assert_eq!(
+        archived.archive_reason.as_deref(),
+        Some(crate::models::ARCHIVE_REASON_MAX_RETRIES)
+    );
+}
+
+#[test]
+fn retries_and_the_archive_reason_survive_an_export_round_trip() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let first = column_id_by_name(&conn, board.id, "Новые");
+    let card = add_plain_card(&conn, first, "Побывала в переделках", 0);
+    conn.execute(
+        "UPDATE cards SET retry_count = 2, archived = 1, archive_reason = ?1 WHERE id = ?2",
+        params![crate::models::ARCHIVE_REASON_MAX_RETRIES, card],
+    ).unwrap();
+
+    let json = serde_json::to_string(&build_board_export(&conn, board.id).unwrap()).unwrap();
+    let parsed: BoardExport = serde_json::from_str(&json).unwrap();
+    let new_id = import_board_into(&mut conn, 1, parsed).unwrap();
+
+    let after = build_board_export(&conn, new_id).unwrap();
+    let moved = after.board.columns.iter()
+        .flat_map(|c| c.cards.iter())
+        .find(|c| c.title == "Побывала в переделках")
+        .unwrap();
+
+    // Иначе перенесённая задача получала бы три попытки заново, а
+    // «не выполнено» превращалось бы в «убрали руками».
+    assert_eq!(moved.retry_count, 2);
+    assert_eq!(
+        moved.archive_reason.as_deref(),
+        Some(crate::models::ARCHIVE_REASON_MAX_RETRIES)
+    );
 }

@@ -8,9 +8,16 @@
 // подписи значит платить регрессией без всякой пользы.
 
 import * as api from './api.js';
+import Icons from './icons.js';
 import { showCardEditModal } from './board.js';
+import { confirmDialog } from './dialog.js';
 import { renderBarChart, renderLineChart, chartColors } from './charts.js';
 import { createElement, $, showToast, formatDate, lastNDays, parseTimestamp, toDateKey } from './utils.js';
+
+/// Столько раз можно попросить ещё одну попытку. То же число — в
+/// `commands::RETRY_LIMIT`; бэкенд проверяет его сам, здесь оно только решает,
+/// рисовать ли кнопку.
+const RETRY_LIMIT = 3;
 
 export async function renderMistakesPage(workspaceId) {
     const content = $('#content');
@@ -141,6 +148,53 @@ function renderList(container, cards, workspaceId) {
             className: `mistake-row__status ${card.mistake_resolved_at ? 'mistake-row__status--resolved' : 'mistake-row__status--open'}`
         }, card.mistake_resolved_at ? 'Исправлена' : 'Открыта');
         row.appendChild(status);
+
+        // ─── Попытки ───
+        //
+        // Счётчик рисуется всегда, кнопка — пока попытки есть. Кнопка без
+        // счётчика не говорила бы, сколько их осталось, а последняя попытка и
+        // первая — решения разного веса.
+        const retries = card.retry_count || 0;
+        const attempts = createElement('span', {
+            className: 'mistake-row__retries',
+            'data-tooltip': retries >= RETRY_LIMIT
+                ? 'Попытки исчерпаны: при следующей просрочке задача уйдёт в архив'
+                : 'Потрачено попыток продления срока'
+        }, `${retries} из ${RETRY_LIMIT}`);
+        row.appendChild(attempts);
+
+        if (retries < RETRY_LIMIT) {
+            const retryBtn = createElement('button', {
+                className: 'btn btn--secondary mistake-row__retry',
+                innerHTML: `${Icons.rotateCcw} <span>Запросить ещё одну попытку</span>`
+            });
+            retryBtn.addEventListener('click', async (e) => {
+                // Иначе клик дойдёт до строки и поверх подтверждения
+                // откроется окно карточки.
+                e.stopPropagation();
+
+                const left = RETRY_LIMIT - retries;
+                const ok = await confirmDialog({
+                    title: 'Продлить срок на неделю?',
+                    message: left === 1
+                        ? `Это последняя попытка для «${card.title}». Если срок пройдёт снова, задача уйдёт в архив.`
+                        : `Срок «${card.title}» сдвинется на 7 дней вперёд, задача вернётся в первую рабочую колонку. Останется попыток: ${left - 1}.`,
+                    confirmText: 'Продлить',
+                });
+                if (!ok) return;
+
+                try {
+                    await api.requestCardRetry(card.id);
+                    showToast(`Срок продлён, попытка ${retries + 1} из ${RETRY_LIMIT}`);
+                    renderMistakesPage(workspaceId);
+                } catch (err) {
+                    // Текст приходит с бэкенда: он различает исчерпанные
+                    // попытки и задачу в финальной колонке.
+                    showToast(typeof err === 'string' ? err : 'Не удалось продлить срок', 'error');
+                }
+            });
+            row.appendChild(retryBtn);
+        }
 
         row.addEventListener('click', () => {
             showCardEditModal(card, { onChange: () => renderMistakesPage(workspaceId) });

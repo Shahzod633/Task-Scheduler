@@ -657,7 +657,7 @@ fn ensure_board_spine(
 
 // ─── Cards ───
 
-const CARD_COLUMNS: &str = "id, column_id, title, description, position, due_date, created_at, archived, is_mistake, mistake_marked_at, mistake_resolved_at, assignee_id, author_id, priority";
+const CARD_COLUMNS: &str = "id, column_id, title, description, position, due_date, created_at, archived, is_mistake, mistake_marked_at, mistake_resolved_at, assignee_id, author_id, priority, retry_count";
 
 fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
     Ok(Card {
@@ -678,6 +678,7 @@ fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
         // if the default was somehow bypassed; the board would then have no
         // priority stripe at all rather than a neutral one.
         priority: row.get::<_, Option<String>>(13)?.unwrap_or_else(|| "Medium".to_string()),
+        retry_count: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
         checklist_total: 0,
         checklist_done: 0,
         labels: Vec::new(),
@@ -693,11 +694,12 @@ const CHECKLIST_COUNTS: &str = "
     (SELECT COUNT(*) FROM checklist_items ci WHERE ci.card_id = cards.id),
     (SELECT COUNT(*) FROM checklist_items ci WHERE ci.card_id = cards.id AND ci.is_done = 1)";
 
-/// `row_to_card` plus the two checklist aggregates at positions 14 and 15.
+/// `row_to_card` plus the two checklist aggregates, which follow
+/// `CARD_COLUMNS` — отсюда индексы 15 и 16.
 fn row_to_card_with_checklist(row: &rusqlite::Row) -> rusqlite::Result<Card> {
     let mut card = row_to_card(row)?;
-    card.checklist_total = row.get(14)?;
-    card.checklist_done = row.get(15)?;
+    card.checklist_total = row.get(15)?;
+    card.checklist_done = row.get(16)?;
     Ok(card)
 }
 
@@ -706,9 +708,9 @@ fn row_to_card_with_checklist(row: &rusqlite::Row) -> rusqlite::Result<Card> {
 /// (used by the planner and mistake-tracking dashboards).
 fn row_to_card_with_board(row: &rusqlite::Row) -> rusqlite::Result<Card> {
     let mut card = row_to_card(row)?;
-    card.board_id = row.get(14)?;
-    card.board_name = row.get(15)?;
-    card.column_name = row.get(16)?;
+    card.board_id = row.get(15)?;
+    card.board_name = row.get(16)?;
+    card.column_name = row.get(17)?;
     Ok(card)
 }
 
@@ -753,7 +755,7 @@ pub fn create_card(column_id: i64, title: String, description: String, state: St
     let id = conn.last_insert_rowid();
     Ok(Card {
         id, column_id, title, description, position: pos, due_date: None, created_at: "".into(), archived: 0,
-        is_mistake: false, mistake_marked_at: None, mistake_resolved_at: None,
+        is_mistake: false, mistake_marked_at: None, mistake_resolved_at: None, retry_count: 0,
         assignee_id: None, author_id, priority: "Medium".into(),
         checklist_total: 0, checklist_done: 0,
         labels: vec![], board_id: None, board_name: None, column_name: None,
@@ -834,7 +836,20 @@ fn move_card_in(
     new_position: i64,
 ) -> CmdResult<()> {
     let tx = conn.transaction().map_err(to_string_err)?;
+    move_card_within(&tx, id, new_column_id, new_position)?;
+    tx.commit().map_err(to_string_err)?;
+    Ok(())
+}
 
+/// Тело переноса без собственной транзакции — чтобы вызвать его изнутри уже
+/// открытой (так делает продление ретрая, которое переносит карточку и правит
+/// её поля одним куском).
+fn move_card_within(
+    tx: &rusqlite::Connection,
+    id: i64,
+    new_column_id: i64,
+    new_position: i64,
+) -> CmdResult<()> {
     let (old_column_id, old_position): (i64, i64) = tx.query_row(
         "SELECT column_id, position FROM cards WHERE id = ?1",
         params![id],
@@ -894,7 +909,6 @@ fn move_card_in(
         ).map_err(to_string_err)?;
     }
 
-    tx.commit().map_err(to_string_err)?;
     Ok(())
 }
 
@@ -987,7 +1001,7 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .prepare(
             "SELECT id, title, description, position, due_date, archived,
                     is_mistake, mistake_marked_at, mistake_resolved_at,
-                    assignee_id, author_id, priority
+                    assignee_id, author_id, priority, retry_count, archive_reason
              FROM cards WHERE column_id = ?1 ORDER BY position ASC",
         )
         .map_err(to_string_err)?;
@@ -1028,6 +1042,8 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
                         is_mistake: { let m: i8 = row.get(6)?; m != 0 },
                         mistake_marked_at: row.get(7)?,
                         mistake_resolved_at: row.get(8)?,
+                        retry_count: row.get::<_, Option<i64>>(12)?.unwrap_or(0),
+                        archive_reason: row.get(13)?,
                         label_ids: Vec::new(),
                         assignee_id: row.get(9)?,
                         author_id: row.get(10)?,
@@ -1221,12 +1237,12 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
             tx.execute(
                 "INSERT INTO cards (column_id, title, description, position, due_date, archived,
                                     is_mistake, mistake_marked_at, mistake_resolved_at,
-                                    assignee_id, author_id, priority)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                    assignee_id, author_id, priority, retry_count, archive_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     column_id, card.title, card.description, card_index as i64, card.due_date,
                     card.archived, card.is_mistake as i64, card.mistake_marked_at, card.mistake_resolved_at,
-                    assignee_id, author_id, priority
+                    assignee_id, author_id, priority, card.retry_count, card.archive_reason
                 ],
             ).map_err(to_string_err)?;
             let card_id = tx.last_insert_rowid();
@@ -1590,32 +1606,40 @@ pub fn update_card_priority(card_id: i64, priority: String, state: State<'_, DbS
 /// — would be N+1 twice over. The member records are joined in rather than
 /// looked up per row for the same reason.
 #[tauri::command]
-pub fn list_all_cards_in_workspace(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<WorkspaceCardList> {
+pub fn list_all_cards_in_workspace(workspace_id: i64, include_archived: bool, state: State<'_, DbState>) -> CmdResult<WorkspaceCardList> {
     let conn = state.conn.lock().unwrap();
-    build_workspace_card_list(&conn, workspace_id)
+    build_workspace_card_list(&conn, workspace_id, include_archived)
 }
 
 /// The body of `list_all_cards_in_workspace`, split off the Tauri `State` so it
 /// can be driven by a plain connection in tests.
-fn build_workspace_card_list(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<WorkspaceCardList> {
+/// `include_archived` включает в выборку архивные карточки. Экраны разные:
+/// «Список» умеет их показывать по переключателю, а палитра Ctrl+K — нет,
+/// искать среди убранного значит находить его вместо живого.
+fn build_workspace_card_list(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+    include_archived: bool,
+) -> CmdResult<WorkspaceCardList> {
     let mut card_stmt = conn.prepare(
         "SELECT c.id, c.title, c.description, c.position, c.due_date,
                 COALESCE(c.priority, 'Medium'), c.created_at, c.is_mistake,
                 col.id, col.name,
                 b.id, b.name, b.is_system,
                 a.id, a.name, a.initials, a.color, a.is_self, a.created_at,
-                w.id, w.name, w.initials, w.color, w.is_self, w.created_at
+                w.id, w.name, w.initials, w.color, w.is_self, w.created_at,
+                c.archived, c.archive_reason
          FROM cards c
          INNER JOIN columns col ON col.id = c.column_id
          INNER JOIN boards b ON b.id = col.board_id
          LEFT JOIN members a ON a.id = c.assignee_id
          LEFT JOIN members w ON w.id = c.author_id
          WHERE b.workspace_id = ?1
-           AND c.archived = 0 AND col.archived = 0 AND b.archived = 0
+           AND (c.archived = 0 OR ?2) AND col.archived = 0 AND b.archived = 0
          ORDER BY b.name ASC, col.position ASC, c.position ASC",
     ).map_err(to_string_err)?;
 
-    let card_iter = card_stmt.query_map(params![workspace_id], |row| {
+    let card_iter = card_stmt.query_map(params![workspace_id, include_archived as i64], |row| {
         // A LEFT JOIN with no match gives NULL in every joined column, so the
         // member id being NULL is what decides whether there is one at all.
         let assignee = match row.get::<_, Option<i64>>(13)? {
@@ -1650,6 +1674,8 @@ fn build_workspace_card_list(conn: &rusqlite::Connection, workspace_id: i64) -> 
             priority: row.get(5)?,
             created_at: row.get(6)?,
             is_mistake: { let m: i8 = row.get(7)?; m != 0 },
+            archived: row.get(25)?,
+            archive_reason: row.get(26)?,
             column_id: row.get(8)?,
             column_name: row.get(9)?,
             board_id: row.get(10)?,
@@ -2673,7 +2699,7 @@ pub fn get_mistake_cards(workspace_id: i64, state: State<'_, DbState>) -> CmdRes
          FROM cards c
          INNER JOIN columns col ON col.id = c.column_id
          INNER JOIN boards b ON b.id = col.board_id
-         WHERE b.workspace_id = ?1 AND c.is_mistake = 1
+         WHERE b.workspace_id = ?1 AND c.is_mistake = 1 AND c.archived = 0
          ORDER BY c.mistake_marked_at DESC",
         cols = CARD_COLUMNS.split(", ").map(|c| format!("c.{}", c)).collect::<Vec<_>>().join(", ")
     );
@@ -2834,6 +2860,67 @@ fn format_due_date_ru(due_date: &str) -> String {
     }
 }
 
+/// Одна проверка сроков целиком: и напоминания о приближающихся, и разбор уже
+/// просроченных.
+///
+/// Точка входа одна намеренно: обе половины ходят в одну и ту же базу по
+/// одному и тому же поводу, и вторая фоновая петля рядом означала бы два
+/// расписания вместо одного.
+pub fn run_deadline_checks(app: &tauri::AppHandle) {
+    run_due_reminder_check(app);
+    run_overdue_check(app);
+}
+
+/// Разбор просроченных задач: пока попытки есть — в «Требуют внимания», когда
+/// кончились — в архив.
+///
+/// В отличие от напоминаний, эта половина работает всегда: настройка
+/// `due_reminders_enabled` выключает уведомления, а не сами правила. Иначе
+/// выключенные напоминания тихо отменяли бы и лимит попыток.
+pub fn run_overdue_check(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    use tauri_plugin_notification::NotificationExt;
+
+    let state = app.state::<DbState>();
+    let conn = match state.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let outcome = match process_overdue_cards(&conn) {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("просрочка: не удалось разобрать карточки: {}", e);
+            return;
+        }
+    };
+    if outcome.is_empty() {
+        return;
+    }
+
+    log::info!(
+        "просрочка: помечено {}, в архив {}",
+        outcome.flagged.len(),
+        outcome.archived.len()
+    );
+
+    // Запись в колокольчик — не то же самое, что всплывающее окно: она
+    // остаётся и её можно прочитать позже. Для ушедших в архив это важнее
+    // всего: задача пропала с доски, и узнавать об этом из того, что её
+    // вдруг нигде нет, — плохой способ.
+    if let Some((title, body)) = overdue_notification(&outcome) {
+        if let Err(e) = conn.execute(
+            "INSERT INTO notifications (title, body) VALUES (?1, ?2)",
+            params![&title, &body],
+        ) {
+            log::warn!("просрочка: не удалось записать уведомление: {}", e);
+        }
+        if let Err(e) = app.notification().builder().title(title).body(body).show() {
+            log::warn!("просрочка: система отказалась показывать: {}", e);
+        }
+    }
+}
+
 /// Одна проверка сроков: читает настройки, находит карточки и показывает одно
 /// уведомление на всех.
 ///
@@ -2884,6 +2971,252 @@ pub fn run_due_reminder_check(app: &tauri::AppHandle) {
         }
         Err(e) => log::warn!("напоминания: система отказалась показывать: {}", e),
     }
+}
+
+// ─── Просроченные задачи: попытки и автоархив ───
+//
+// Срок неизменяем (§20.2), и продление ретрая — единственный законный способ
+// его сдвинуть. Поэтому лазейка ограничена счётчиком: три попытки, и на
+// четвёртой просрочке задача уходит в архив, а не висит в «Требуют внимания»
+// вечно.
+//
+// Просрочка разбирается в той же фоновой проверке, что и напоминания: ходить
+// в базу дважды по одному и тому же поводу незачем.
+
+/// Сколько раз можно попросить ещё одну попытку.
+pub const RETRY_LIMIT: i64 = 3;
+
+/// На сколько сдвигается срок при продлении.
+pub const RETRY_EXTENSION_DAYS: i64 = 7;
+
+pub const ERR_RETRY_LIMIT: &str =
+    "Попытки исчерпаны — при следующей просрочке задача уйдёт в архив";
+
+pub const ERR_RETRY_IN_FINAL: &str =
+    "Задача в финальной колонке — новая попытка ей уже не нужна";
+
+pub const ERR_NO_WORKING_COLUMN: &str =
+    "На доске нет рабочей колонки, куда вернуть задачу";
+
+/// Итог одного разбора просроченных — для уведомления и для журнала.
+#[derive(Debug, Default, PartialEq)]
+pub struct OverdueOutcome {
+    /// Названия карточек, помеченных как требующие внимания.
+    pub flagged: Vec<String>,
+    /// Названия карточек, ушедших в архив по исчерпании попыток.
+    pub archived: Vec<String>,
+}
+
+impl OverdueOutcome {
+    pub fn is_empty(&self) -> bool {
+        self.flagged.is_empty() && self.archived.is_empty()
+    }
+}
+
+/// Карточки, у которых срок уже прошёл и которые ещё никак не разобраны.
+///
+/// «Прошёл» — значит закончился **день** срока по местному календарю (§12):
+/// задача со сроком «сегодня» не просрочена до полуночи. Из выборки исключены
+/// карточки в финальных колонках — там путь окончен, и просрочка ничего не
+/// значит, — а также всё, что лежит в архиве на любом уровне.
+fn overdue_cards(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<(i64, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.title, c.retry_count
+         FROM cards c
+         INNER JOIN columns col ON col.id = c.column_id
+         INNER JOIN boards b ON b.id = col.board_id
+         INNER JOIN workspaces w ON w.id = b.workspace_id
+         WHERE c.due_date IS NOT NULL
+           AND c.archived = 0
+           AND c.is_mistake = 0
+           AND col.is_final = 0
+           AND col.archived = 0
+           AND b.archived = 0
+           AND w.archived = 0
+           AND date('now', 'localtime') > c.due_date
+         ORDER BY c.due_date ASC, c.id ASC",
+    )?;
+
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    rows.collect()
+}
+
+/// Разбирает просроченные: пока попытки есть — в «Требуют внимания», когда
+/// кончились — в архив.
+///
+/// `is_mistake = 0` в выборке выше означает, что уже помеченная карточка
+/// второй раз сюда не попадёт: иначе `mistake_marked_at` переписывалось бы
+/// каждые пятнадцать минут и «сколько задача висит» перестало бы что-то
+/// значить.
+pub fn process_overdue_cards(conn: &rusqlite::Connection) -> rusqlite::Result<OverdueOutcome> {
+    let cards = overdue_cards(conn)?;
+    if cards.is_empty() {
+        return Ok(OverdueOutcome::default());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    let mut outcome = OverdueOutcome::default();
+
+    for (card_id, title, retry_count) in cards {
+        if retry_count < RETRY_LIMIT {
+            tx.execute(
+                "UPDATE cards
+                    SET is_mistake = 1,
+                        mistake_marked_at = datetime('now'),
+                        mistake_resolved_at = NULL
+                  WHERE id = ?1",
+                params![card_id],
+            )?;
+            outcome.flagged.push(title);
+        } else {
+            tx.execute(
+                "UPDATE cards SET archived = 1, archive_reason = ?1 WHERE id = ?2",
+                params![crate::models::ARCHIVE_REASON_MAX_RETRIES, card_id],
+            )?;
+            outcome.archived.push(title);
+        }
+    }
+
+    tx.commit()?;
+    Ok(outcome)
+}
+
+/// Текст уведомления о разобранных просрочках.
+///
+/// Одно уведомление на всех, как и у напоминаний: пять всплывших подряд окон
+/// Windows человек закрывает не читая.
+fn overdue_notification(outcome: &OverdueOutcome) -> Option<(String, String)> {
+    let names = |titles: &[String]| -> String {
+        let shown: Vec<&str> = titles.iter().take(3).map(|s| s.as_str()).collect();
+        let tail = if titles.len() > shown.len() {
+            format!(" и ещё {}", titles.len() - shown.len())
+        } else {
+            String::new()
+        };
+        format!("{}{}", shown.join(", "), tail)
+    };
+
+    // Архив — новость важнее: задача пропала с доски, и человек должен узнать
+    // об этом не из того, что её вдруг нигде нет.
+    if !outcome.archived.is_empty() {
+        let title = format!(
+            "В архив по исчерпании попыток: {}",
+            outcome.archived.len()
+        );
+        let mut body = names(&outcome.archived);
+        if !outcome.flagged.is_empty() {
+            body.push_str(&format!(
+                "\nТребуют внимания: {}",
+                names(&outcome.flagged)
+            ));
+        }
+        return Some((title, body));
+    }
+
+    if !outcome.flagged.is_empty() {
+        return Some((
+            format!("Просрочено задач: {}", outcome.flagged.len()),
+            names(&outcome.flagged),
+        ));
+    }
+
+    None
+}
+
+/// Продлевает срок задачи ещё на одну попытку.
+///
+/// Единственный законный способ сдвинуть уже заданный срок. Всё остальное —
+/// `update_card` — принимает дату только вместо пустой (§20.2).
+#[tauri::command]
+pub fn request_card_retry(card_id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    request_card_retry_in(&conn, card_id)
+}
+
+fn request_card_retry_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<()> {
+    let (retry_count, column_id, board_id, column_is_final): (i64, i64, i64, i8) = conn
+        .query_row(
+            "SELECT c.retry_count, c.column_id, col.board_id, col.is_final
+             FROM cards c
+             INNER JOIN columns col ON col.id = c.column_id
+             WHERE c.id = ?1",
+            params![card_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(|e| format!("Задача не найдена: {}", e))?;
+
+    // Кнопки с исчерпанными попытками в интерфейсе и не должно быть, но
+    // фронтенду тут верить нельзя: это единственная дверь к переносу срока.
+    if retry_count >= RETRY_LIMIT {
+        return Err(ERR_RETRY_LIMIT.to_string());
+    }
+
+    // Иначе ретрай стал бы выходом из финальной колонки — ровно тем, что
+    // запрещено §20.3, только через другую дверь.
+    if column_is_final != 0 {
+        return Err(ERR_RETRY_IN_FINAL.to_string());
+    }
+
+    // Первая рабочая колонка доски: после костяка это «Новые», но правило
+    // выражено через `is_final`, а не через имя, — доска могла приехать
+    // импортом из файла и костяка не иметь.
+    let working_column: i64 = conn
+        .query_row(
+            "SELECT id FROM columns
+             WHERE board_id = ?1 AND archived = 0 AND is_final = 0
+             ORDER BY position ASC, id ASC LIMIT 1",
+            params![board_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| ERR_NO_WORKING_COLUMN.to_string())?;
+
+    let tx = conn.unchecked_transaction().map_err(to_string_err)?;
+
+    // Срок считается от сегодняшнего **местного** дня: `date('now')` дал бы
+    // UTC и в нашей зоне уводил бы продление на день назад (§12).
+    //
+    // Обе отметки напоминаний снимаются: окно новое, и без сброса ни
+    // системное уведомление, ни письмо по продлённому сроку не ушли бы —
+    // проверки сочли бы, что по этой карточке уже отчитались.
+    tx.execute(
+        "UPDATE cards
+            SET retry_count = retry_count + 1,
+                due_date = date('now', 'localtime', ?1),
+                is_mistake = 0,
+                mistake_marked_at = NULL,
+                mistake_resolved_at = NULL,
+                due_reminder_sent_at = NULL,
+                email_reminder_sent_at = NULL
+          WHERE id = ?2",
+        params![format!("+{} days", RETRY_EXTENSION_DAYS), card_id],
+    ).map_err(to_string_err)?;
+
+    // В начало первой рабочей колонки: задача возвращается в работу, а не
+    // теряется в хвосте списка. Если она уже там — перенос всё равно нужен,
+    // position 0 поднимает её наверх.
+    if column_id != working_column {
+        move_card_within(&tx, card_id, working_column, 0)?;
+    }
+
+    let title: String = tx
+        .query_row("SELECT title FROM cards WHERE id = ?1", params![card_id], |row| row.get(0))
+        .unwrap_or_default();
+    tx.execute(
+        "INSERT INTO notifications (title, body) VALUES (?1, ?2)",
+        params![
+            "Срок продлён",
+            format!(
+                "«{}» — ещё {} дней, попытка {} из {}",
+                title,
+                RETRY_EXTENSION_DAYS,
+                retry_count + 1,
+                RETRY_LIMIT
+            )
+        ],
+    ).map_err(to_string_err)?;
+
+    tx.commit().map_err(to_string_err)?;
+    Ok(())
 }
 
 // ─── Комментарии к карточке ───

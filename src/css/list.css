@@ -133,6 +133,10 @@
     padding: var(--space-sm) 0;
 }
 
+/* Внутри панели «Списка» фильтры забирают всё свободное место, а переключатель
+   архива прижимается к правому краю. */
+.list-page__toolbar .filter-bar { flex: 1; min-width: 0; }
+
 .filter-bar__search {
     position: relative;
     display: flex;
@@ -299,6 +303,12 @@
     position: sticky;
     top: 0;
     z-index: 2;
+    /* Панель фильтров и переключатель архива стоят в одну строку и переносятся
+       вместе с ней, когда окно узкое. */
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
     padding: 0 var(--space-md);
     background: var(--bg-panel);
     backdrop-filter: blur(var(--blur-panel));
@@ -383,6 +393,80 @@
 }
 
 .task-table__flag svg { width: 14px; height: 14px; }
+
+/* Ярлык объясняет, почему задачи нет на доске. «Не выполнено» — попытки
+   кончились, «В архиве» — убрали руками. */
+.task-table__archived {
+    display: inline-block;
+    margin-left: var(--space-sm);
+    padding: 2px 8px;
+    border-radius: var(--radius-pill);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+    background: var(--bg-card-hover);
+    color: var(--text-muted);
+    vertical-align: middle;
+}
+
+.task-table__archived--failed {
+    background: var(--danger-soft);
+    color: var(--color-danger);
+}
+
+/* Убранная задача заметно бледнее живой: она в списке ради справки, а не
+   ради работы с ней. */
+.task-table__row--archived .task-table__title,
+.task-table__row--archived .task-table__td {
+    opacity: 0.62;
+}
+
+.task-table__row--archived .task-table__archived { opacity: 1; }
+
+/* Переключатель «Показать архивные» — рядом с фильтрами, но не внутри общей
+   панели: ту же панель рисует доска, где архивных карточек не бывает. */
+.filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: 7px 14px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border-default);
+    background: var(--bg-input);
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    white-space: nowrap;
+    transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.filter-toggle:hover {
+    border-color: var(--border-hover);
+    color: var(--text-primary);
+}
+
+.filter-toggle--on {
+    border-color: var(--accent-border);
+    background: var(--bg-input-focus);
+    color: var(--text-primary);
+}
+
+.filter-toggle__box {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 15px;
+    height: 15px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-hover);
+    flex-shrink: 0;
+}
+
+.filter-toggle--on .filter-toggle__box {
+    background: var(--accent-500);
+    border-color: transparent;
+    color: #fff;
+}
+
+.filter-toggle__box svg { width: 11px; height: 11px; }
 
 .task-table__due {
     display: inline-flex;

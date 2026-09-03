@@ -59,6 +59,9 @@ pub struct Card {
     pub is_mistake: bool,
     pub mistake_marked_at: Option<String>,
     pub mistake_resolved_at: Option<String>,
+    /// Сколько раз по карточке уже просили ещё одну попытку. Дойдя до
+    /// `RETRY_LIMIT`, карточка при следующей просрочке уходит в архив.
+    pub retry_count: i64,
     /// Ids only — the board view already holds the member directory and looks
     /// the avatar up there, rather than re-joining `members` into every query.
     pub assignee_id: Option<i64>,
@@ -176,6 +179,10 @@ pub struct Member {
     pub created_at: String,
 }
 
+/// Причина автоматической архивации: попытки исчерпаны, а срок опять прошёл.
+/// Хранится строкой в `cards.archive_reason`; интерфейс рисует свой ярлык.
+pub const ARCHIVE_REASON_MAX_RETRIES: &str = "incomplete_max_retries";
+
 /// Allowed values of `cards.priority`, matching the CHECK constraint in the
 /// schema. Stored in English; the interface renders its own Russian labels.
 pub const PRIORITIES: [&str; 3] = ["Low", "Medium", "High"];
@@ -195,6 +202,10 @@ pub struct CardRow {
     pub priority: String,
     pub created_at: String,
     pub is_mistake: bool,
+    pub archived: i8,
+    /// Почему карточка в архиве: `incomplete_max_retries` — исчерпаны
+    /// попытки, `None` — убрал человек руками.
+    pub archive_reason: Option<String>,
     pub column_id: i64,
     pub column_name: String,
     pub board_id: i64,
@@ -348,6 +359,13 @@ pub struct CardExport {
     pub mistake_marked_at: Option<String>,
     #[serde(default)]
     pub mistake_resolved_at: Option<String>,
+    /// Число потраченных попыток и причина архивации переносятся вместе с
+    /// карточкой: без них перенесённая задача получала бы три попытки заново,
+    /// а «не выполнено» превращалось бы в «убрали руками».
+    #[serde(default)]
+    pub retry_count: i64,
+    #[serde(default)]
+    pub archive_reason: Option<String>,
     #[serde(default)]
     pub label_ids: Vec<i64>,
     /// Export-local member ids (see `BoardExportBody::members`), not database

@@ -29,7 +29,7 @@ pub fn run() {
             // узнал бы о сегодняшнем сроке до следующего дня.
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
-                commands::run_due_reminder_check(&handle);
+                commands::run_deadline_checks(&handle);
                 std::thread::sleep(commands::REMINDER_CHECK_INTERVAL);
             });
 
@@ -126,6 +126,7 @@ pub fn run() {
             commands::mark_card_mistake,
             commands::resolve_card_mistake,
             commands::get_mistake_cards,
+            commands::request_card_retry,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -193,14 +193,16 @@ export async function updateCardPriority(cardId, priority) {
 // ─── Workspace-wide card list (the "Список" screen) ───
 
 /**
- * Every non-archived card across every board of the workspace, plus each
- * board's columns — in one call, so the screen never fans out into a query
- * per board.
+ * Every card across every board of the workspace, plus each board's columns —
+ * in one call, so the screen never fans out into a query per board.
+ *
+ * `includeArchived` добавляет в выборку убранные карточки: «Список» умеет
+ * показывать их по переключателю, палитра Ctrl+K — нет.
  *
  * @returns {Promise<{cards: object[], boards: object[]}>}
  */
-export async function listAllCardsInWorkspace(workspaceId) {
-    return await invoke('list_all_cards_in_workspace', { workspaceId });
+export async function listAllCardsInWorkspace(workspaceId, includeArchived = false) {
+    return await invoke('list_all_cards_in_workspace', { workspaceId, includeArchived });
 }
 
 // ─── Labels ───
@@ -411,4 +413,16 @@ export async function resolveCardMistake(cardId) {
 
 export async function getMistakeCards(workspaceId) {
     return await invoke('get_mistake_cards', { workspaceId });
+}
+
+/**
+ * Продлевает срок задачи ещё на одну попытку: +7 дней, снятая пометка и
+ * возврат в первую рабочую колонку доски.
+ *
+ * Единственный законный способ сдвинуть уже заданный срок — `updateCard`
+ * принимает дату только вместо пустой. Отклоняется, если попытки исчерпаны
+ * или задача уже в финальной колонке.
+ */
+export async function requestCardRetry(cardId) {
+    return await invoke('request_card_retry', { cardId });
 }

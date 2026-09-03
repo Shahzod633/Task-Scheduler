@@ -21,11 +21,20 @@ import { showCardEditModal } from './board.js';
 import { confirmDialog } from './dialog.js';
 import { createElement, $, showToast, formatDueDate, isOverdue, pluralize } from './utils.js';
 
+/// Значение `cards.archive_reason` для задач, у которых кончились попытки.
+/// То же строковое значение живёт в `models::ARCHIVE_REASON_MAX_RETRIES`.
+const ARCHIVE_REASON_MAX_RETRIES = 'incomplete_max_retries';
+
 // Kept across re-renders of the same screen so a refresh after an edit does not
 // throw away the filter the user just set up.
 let state = createFilterState();
 let currentWorkspaceId = null;
 let data = { cards: [], boards: [] };
+// Архивные задачи с экрана скрыты по умолчанию: их убрали, и место в общем
+// списке они занимать не должны. Но видеть их надо где-то — после автоархива
+// по исчерпании попыток «Список» остался единственным местом, где убранная
+// задача вообще показывается.
+let showArchived = false;
 
 export async function renderListPage(workspaceId) {
     if (workspaceId !== currentWorkspaceId) {
@@ -58,7 +67,7 @@ export async function renderListPage(workspaceId) {
 
     try {
         [data] = await Promise.all([
-            api.listAllCardsInWorkspace(workspaceId),
+            api.listAllCardsInWorkspace(workspaceId, true),
             loadMembers(true),
         ]);
     } catch (e) {
@@ -78,6 +87,7 @@ export async function renderListPage(workspaceId) {
         statuses: uniqueStatuses(),
         showGroup: true,
     }));
+    toolbarSlot.appendChild(createArchivedToggle(draw));
 
     draw();
 }
@@ -97,7 +107,7 @@ function uniqueStatuses() {
 /** Reloads from the database and redraws, keeping the current filter. */
 async function refresh() {
     try {
-        data = await api.listAllCardsInWorkspace(currentWorkspaceId);
+        data = await api.listAllCardsInWorkspace(currentWorkspaceId, true);
     } catch (e) {
         showToast('Не удалось обновить список', 'error');
         return;
@@ -118,13 +128,40 @@ function toFilterItem(card) {
     };
 }
 
+/**
+ * Переключатель «Показать архивные».
+ *
+ * Живёт здесь, а не в общей панели фильтров из `filters.js`: ту же панель
+ * рисует доска, а на доске архивных карточек не бывает — там для них есть
+ * «Архив доски».
+ */
+function createArchivedToggle(onChange) {
+    const btn = createElement('button', {
+        className: `filter-toggle ${showArchived ? 'filter-toggle--on' : ''}`,
+        type: 'button',
+        'data-tooltip': 'Убранные задачи, включая ушедшие в архив по исчерпании попыток'
+    });
+    btn.appendChild(createElement('span', { className: 'filter-toggle__box', innerHTML: showArchived ? Icons.check : '' }));
+    btn.appendChild(createElement('span', {}, 'Показать архивные'));
+    btn.addEventListener('click', () => {
+        showArchived = !showArchived;
+        btn.classList.toggle('filter-toggle--on', showArchived);
+        $('.filter-toggle__box', btn).innerHTML = showArchived ? Icons.check : '';
+        onChange();
+    });
+    return btn;
+}
+
 function drawTable(tableSlot, footerSlot) {
     if (!tableSlot) return;
     tableSlot.innerHTML = '';
     footerSlot.innerHTML = '';
 
-    const total = data.cards.length;
-    const visible = data.cards.filter(c => matchesFilter(toFilterItem(c), state));
+    // Архив отсекается до всего остального, чтобы счётчик «N из M» считал от
+    // того, что человек сейчас видит, а не от скрытого вместе с ним.
+    const pool = showArchived ? data.cards : data.cards.filter(c => !c.archived);
+    const total = pool.length;
+    const visible = pool.filter(c => matchesFilter(toFilterItem(c), state));
 
     if (total === 0) {
         tableSlot.appendChild(createElement('div', { className: 'page__empty' },
@@ -206,7 +243,9 @@ function createTable(cards) {
 }
 
 function createRow(card) {
-    const row = createElement('tr', { className: 'task-table__row' });
+    const row = createElement('tr', {
+        className: `task-table__row ${card.archived ? 'task-table__row--archived' : ''}`
+    });
 
     // ─── Задача ───
     const titleCell = createElement('td', { className: 'task-table__td task-table__td--title' });
@@ -221,8 +260,20 @@ function createRow(card) {
         titleCell.appendChild(createElement('span', {
             className: 'task-table__flag',
             innerHTML: Icons.alertTriangle,
-            'data-tooltip': 'Отмечена как ошибка'
+            'data-tooltip': 'Требует внимания'
         }));
+    }
+    // Ярлык объясняет, почему задачи нет на доске. Без него включённый
+    // переключатель показывал бы вперемешку живые и убранные строки, ничем
+    // не отличающиеся друг от друга.
+    if (card.archived) {
+        const spent = card.archive_reason === ARCHIVE_REASON_MAX_RETRIES;
+        titleCell.appendChild(createElement('span', {
+            className: `task-table__archived ${spent ? 'task-table__archived--failed' : ''}`,
+            'data-tooltip': spent
+                ? 'Срок прошёл, а попытки закончились'
+                : 'Задача убрана в архив'
+        }, spent ? 'Не выполнено' : 'В архиве'));
     }
     row.appendChild(titleCell);
 

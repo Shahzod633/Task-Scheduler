@@ -176,6 +176,8 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             is_mistake INTEGER DEFAULT 0,
             mistake_marked_at TEXT,
             mistake_resolved_at TEXT,
+            retry_count INTEGER DEFAULT 0,
+            archive_reason TEXT,
             assignee_id INTEGER REFERENCES members(id),
             author_id INTEGER REFERENCES members(id),
             priority TEXT DEFAULT 'Medium' CHECK (priority IN ('Low', 'Medium', 'High')),
@@ -326,6 +328,26 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
              CHECK (priority IN ('Low', 'Medium', 'High'))",
             (),
         )?;
+    }
+
+    // Сколько раз по карточке просили ещё одну попытку. Срок неизменяем
+    // (§20.2), и продление ретрая — единственный законный способ его сдвинуть;
+    // счётчик и ограничивает эту лазейку тремя разами.
+    if !table_has_column(conn, "cards", "retry_count") {
+        conn.execute("ALTER TABLE cards ADD COLUMN retry_count INTEGER DEFAULT 0", ())?;
+    }
+    // Почему карточка оказалась в архиве. NULL — убрал человек руками, что и
+    // было единственным способом до автоархива по исчерпании попыток.
+    // Отдельное поле, а не флаг: причин со временем станет больше, а
+    // отличать «не выполнено» от «убрал сам» надо уже сейчас.
+    if !table_has_column(conn, "cards", "archive_reason") {
+        conn.execute("ALTER TABLE cards ADD COLUMN archive_reason TEXT", ())?;
+    }
+    // Отметка отправленного email-напоминания. Само письмо — это Фаза C, но
+    // поле заводится здесь: продление ретрая обязано сбрасывать обе отметки
+    // сразу, иначе для продлённого срока письмо не уйдёт вовсе.
+    if !table_has_column(conn, "cards", "email_reminder_sent_at") {
+        conn.execute("ALTER TABLE cards ADD COLUMN email_reminder_sent_at TEXT", ())?;
     }
 
     // Когда по этой карточке уже показали напоминание о сроке. NULL — ещё не

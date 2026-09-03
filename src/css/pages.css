@@ -884,3 +884,21 @@
     background: var(--success-soft);
     color: var(--color-success);
 }
+
+/* Счётчик попыток стоит рядом с кнопкой продления: последняя попытка и
+   первая — решения разного веса, и знать об этом надо до нажатия. */
+.mistake-row__retries {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.mistake-row__retry {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    font-size: var(--font-size-sm);
+}
+
+.mistake-row__retry svg { width: 14px; height: 14px; }
