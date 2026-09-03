@@ -5,9 +5,10 @@ use tauri::State;
 use crate::db::DbState;
 use crate::models::{
     Workspace, Board, Column, Card, Notification, UserProfile, BackupInfo,
-    BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, MemberExport, DatabaseExport,
-    Member, ChecklistItem, CardRow, BoardColumns, WorkspaceCardList, MEMBER_COLORS, PRIORITIES,
-    EXPORT_FORMAT_VERSION,
+    BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, ChecklistItemExport,
+    CommentExport, MemberExport, DatabaseExport,
+    Member, ChecklistItem, CardComment, CardRow, BoardColumns, WorkspaceCardList, MEMBER_COLORS, PRIORITIES,
+    EXPORT_FORMAT_VERSION, ReminderSettings, DueReminder,
 };
 
 #[cfg(test)]
@@ -362,8 +363,29 @@ pub fn create_card(column_id: i64, title: String, description: String, state: St
 #[tauri::command]
 pub fn update_card(id: i64, title: String, description: String, due_date: Option<String>, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
+    update_card_in(&conn, id, &title, &description, due_date.as_deref())
+}
+
+/// Тело `update_card` без `State`, чтобы тест мог гонять тот же SQL на обычном
+/// соединении, а не собственную копию запроса.
+fn update_card_in(
+    conn: &rusqlite::Connection,
+    id: i64,
+    title: &str,
+    description: &str,
+    due_date: Option<&str>,
+) -> CmdResult<()> {
+    // Перенесли срок — напомнить надо заново. Без сброса отметки карточка,
+    // по которой уже напоминали, молчала бы про новый срок навсегда;
+    // `IS NOT` сравнивает и NULL, поэтому снятие и установка срока тоже
+    // считаются изменением.
     conn.execute(
-        "UPDATE cards SET title = ?1, description = ?2, due_date = ?3 WHERE id = ?4",
+        "UPDATE cards
+            SET title = ?1,
+                description = ?2,
+                due_reminder_sent_at = CASE WHEN due_date IS NOT ?3 THEN NULL ELSE due_reminder_sent_at END,
+                due_date = ?3
+          WHERE id = ?4",
         params![title, description, due_date, id],
     ).map_err(to_string_err)?;
     Ok(())
@@ -473,11 +495,17 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
 
     // Only the members this board actually points at — exporting the whole
     // directory would drag unrelated people into a file about one board.
+    //
+    // «Указывает» — это три разные ссылки: исполнитель карточки, её автор и
+    // автор комментария. Без последней подпись под комментарием терялась бы
+    // при импорте: id в файле есть, а участника с таким id в файле нет.
     let mut member_stmt = conn
         .prepare(
             "SELECT DISTINCT m.id, m.name, m.initials, m.color
              FROM members m
-             JOIN cards c ON c.assignee_id = m.id OR c.author_id = m.id
+             JOIN cards c ON c.assignee_id = m.id
+                          OR c.author_id = m.id
+                          OR m.id IN (SELECT cc.author_id FROM card_comments cc WHERE cc.card_id = c.id)
              JOIN columns col ON col.id = c.column_id
              WHERE col.board_id = ?1
              ORDER BY m.id ASC",
@@ -518,6 +546,22 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
     let mut card_label_stmt = conn
         .prepare("SELECT label_id FROM card_labels WHERE card_id = ?1")
         .map_err(to_string_err)?;
+    // Тот же порядок, что и на экране карточки: сначала position, потом id для
+    // пунктов с одинаковой позицией.
+    let mut checklist_stmt = conn
+        .prepare(
+            "SELECT text, is_done, position FROM checklist_items
+             WHERE card_id = ?1 ORDER BY position ASC, id ASC",
+        )
+        .map_err(to_string_err)?;
+    // `author_id` здесь — настоящий id участника; в экспорт-локальный он
+    // превращается ниже, когда известен состав `members`.
+    let mut comment_stmt = conn
+        .prepare(
+            "SELECT body, created_at, author_id FROM card_comments
+             WHERE card_id = ?1 ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(to_string_err)?;
 
     let mut columns = Vec::new();
     for (column_id, name, position, archived) in raw_columns {
@@ -540,6 +584,8 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
                         assignee_id: row.get(9)?,
                         author_id: row.get(10)?,
                         priority: row.get(11)?,
+                        checklist: Vec::new(),
+                        comments: Vec::new(),
                     },
                 ))
             })
@@ -553,6 +599,28 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
                 .query_map(params![card_id], |row| row.get(0))
                 .map_err(to_string_err)?
                 .collect::<rusqlite::Result<Vec<i64>>>()
+                .map_err(to_string_err)?;
+            card.checklist = checklist_stmt
+                .query_map(params![card_id], |row| {
+                    Ok(ChecklistItemExport {
+                        text: row.get(0)?,
+                        is_done: { let d: i64 = row.get(1)?; d != 0 },
+                        position: row.get(2)?,
+                    })
+                })
+                .map_err(to_string_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(to_string_err)?;
+            card.comments = comment_stmt
+                .query_map(params![card_id], |row| {
+                    Ok(CommentExport {
+                        body: row.get(0)?,
+                        created_at: row.get(1)?,
+                        author_id: row.get(2)?,
+                    })
+                })
+                .map_err(to_string_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(to_string_err)?;
             cards.push(card);
         }
@@ -715,6 +783,48 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
                         params![card_id, new_label_id],
                     ).map_err(to_string_err)?;
                 }
+            }
+
+            // Комментарии переносятся с исходным временем: написанное в марте
+            // не должно стать сегодняшним оттого, что доску перенесли. Пустое
+            // время — файл от версии без этого поля; тогда пусть его проставит
+            // база значением по умолчанию.
+            for comment in &card.comments {
+                let body = comment.body.trim();
+                if body.is_empty() {
+                    continue;
+                }
+                let author_id = comment.author_id.and_then(|id| member_id_map.get(&id).copied());
+                if comment.created_at.trim().is_empty() {
+                    tx.execute(
+                        "INSERT INTO card_comments (card_id, author_id, body) VALUES (?1, ?2, ?3)",
+                        params![card_id, author_id, body],
+                    ).map_err(to_string_err)?;
+                } else {
+                    tx.execute(
+                        "INSERT INTO card_comments (card_id, author_id, body, created_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![card_id, author_id, body, comment.created_at],
+                    ).map_err(to_string_err)?;
+                }
+            }
+
+            // Позиции перенумеровываются по порядку в файле, как у карточек и
+            // колонок выше: в исходной базе они могли остаться с дырами после
+            // удалений, и тащить эти дыры в новую доску незачем.
+            for (item_index, item) in card.checklist.iter().enumerate() {
+                let text = item.text.trim();
+                // Пустой пункт создать через интерфейс нельзя, но в файле,
+                // отредактированном руками, он может оказаться — и превратился
+                // бы в невидимую строку, которую не выделить и не удалить.
+                if text.is_empty() {
+                    continue;
+                }
+                tx.execute(
+                    "INSERT INTO checklist_items (card_id, text, is_done, position)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![card_id, text, item.is_done as i64, item_index as i64],
+                ).map_err(to_string_err)?;
             }
         }
     }
@@ -970,6 +1080,10 @@ fn delete_member_from(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()>
     tx.execute("UPDATE cards SET assignee_id = NULL WHERE assignee_id = ?1", params![id])
         .map_err(to_string_err)?;
     tx.execute("UPDATE cards SET author_id = NULL WHERE author_id = ?1", params![id])
+        .map_err(to_string_err)?;
+    // Комментарий остаётся, подпись у него пропадает. Удалять написанное вместе
+    // с человеком нельзя: обсуждение задачи — это её часть, а не его.
+    tx.execute("UPDATE card_comments SET author_id = NULL WHERE author_id = ?1", params![id])
         .map_err(to_string_err)?;
     tx.execute("DELETE FROM members WHERE id = ?1", params![id])
         .map_err(to_string_err)?;
@@ -1455,6 +1569,7 @@ pub fn delete_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let tx = conn.transaction().map_err(to_string_err)?;
     tx.execute("DELETE FROM card_labels WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM checklist_items WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
+    tx.execute("DELETE FROM card_comments WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE id = ?1", params![id]).map_err(to_string_err)?;
     tx.commit().map_err(to_string_err)?;
     Ok(())
@@ -1472,6 +1587,10 @@ pub fn delete_column(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     ).map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM checklist_items WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM card_comments WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
         params![id],
     ).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE column_id = ?1", params![id]).map_err(to_string_err)?;
@@ -1508,6 +1627,14 @@ pub fn delete_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     ).map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM checklist_items WHERE card_id IN (
+            SELECT c.id FROM cards c
+            INNER JOIN columns col ON col.id = c.column_id
+            WHERE col.board_id = ?1
+        )",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM card_comments WHERE card_id IN (
             SELECT c.id FROM cards c
             INNER JOIN columns col ON col.id = c.column_id
             WHERE col.board_id = ?1
@@ -1635,9 +1762,30 @@ fn export_database_to(conn: &rusqlite::Connection, target: &std::path::Path) -> 
             .map_err(|e| format!("Не удалось убрать остаток прошлого экспорта: {}", e))?;
     }
 
+    // Снимок пишется **расшифрованным**, в отличие от автоматических копий.
+    //
+    // Смысл этой кнопки — унести файл на другой диск и открыть его когда
+    // угодно и чем угодно. Зашифрованный экспорт открывался бы только этим
+    // приложением и только с ключом из Диспетчера учётных данных этой учётной
+    // записи Windows: переустановка системы — и файл превращается в шум.
+    // Копия, переживающая смерть машины, — ровно то, ради чего копию и делают.
+    //
+    // Пустой ключ у присоединённой базы означает «без шифрования», и
+    // `sqlcipher_export` переливает в неё всё содержимое. Отсюда же берётся
+    // обычный заголовок SQLite, на который потом смотрит `inspect_export`.
     let partial_str = partial.to_string_lossy().into_owned();
-    conn.execute("VACUUM INTO ?1", params![partial_str])
+    conn.execute("ATTACH DATABASE ?1 AS plaintext KEY ''", params![partial_str])
         .map_err(|e| format!("Не удалось создать копию базы: {}", e))?;
+    let exported = conn
+        .query_row("SELECT sqlcipher_export('plaintext')", [], |_| Ok(()))
+        .and_then(|_| conn.execute_batch("DETACH DATABASE plaintext"));
+    if let Err(e) = exported {
+        // Присоединённая база остаётся висеть, если отвалился именно перенос;
+        // без DETACH следующий экспорт упрётся в занятое имя.
+        let _ = conn.execute_batch("DETACH DATABASE plaintext");
+        let _ = std::fs::remove_file(&partial);
+        return Err(format!("Не удалось перенести данные в копию: {}", e));
+    }
 
     // Read the snapshot back before trusting it. Handing over a corrupt export
     // is worse than failing loudly, because it is only discovered on the day it
@@ -2064,4 +2212,319 @@ pub fn get_mistake_cards(workspace_id: i64, state: State<'_, DbState>) -> CmdRes
     let mut res = Vec::new();
     for i in iter { res.push(i.map_err(to_string_err)?); }
     Ok(res)
+}
+
+// ─── Напоминания о дедлайнах ───
+//
+// Срок в базе — одна дата без времени ('2026-09-01'), и по договорённости
+// раздела 12 заметок он истекает **в конце** этого дня по местному календарю,
+// а не в его начале. Отсюда вся арифметика ниже: момент срабатывания это
+// `конец дня минус N часов`, и сравнивается он с `datetime('now','localtime')`.
+// `datetime('now')` здесь дал бы UTC и сдвинул бы напоминание на величину
+// смещения — ровно тот баг, который чинился в §12.
+
+/// Сколько ждать между проверками. Точность напоминания и так грубая (срок —
+/// это дата, а не время), поэтому чаще незачем: проверка будит базу и ничего
+/// не находит.
+pub const REMINDER_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+#[tauri::command]
+pub fn get_reminder_settings(state: State<'_, DbState>) -> CmdResult<ReminderSettings> {
+    let conn = state.conn.lock().unwrap();
+    read_reminder_settings(&conn)
+}
+
+fn read_reminder_settings(conn: &rusqlite::Connection) -> CmdResult<ReminderSettings> {
+    conn.query_row(
+        "SELECT due_reminders_enabled, due_reminder_hours FROM user_profile WHERE id = 1",
+        [],
+        |row| {
+            let enabled: i64 = row.get(0)?;
+            Ok(ReminderSettings { enabled: enabled != 0, hours: row.get(1)? })
+        },
+    )
+    .map_err(to_string_err)
+}
+
+#[tauri::command]
+pub fn update_reminder_settings(enabled: bool, hours: i64, state: State<'_, DbState>) -> CmdResult<ReminderSettings> {
+    let conn = state.conn.lock().unwrap();
+
+    // Ноль часов означал бы «напомнить ровно в момент истечения» — то есть
+    // никогда до него, а сразу после; отрицательное значение сдвинуло бы
+    // напоминание за срок. Верхняя граница — две недели: дальше напоминание
+    // перестаёт быть напоминанием.
+    let hours = hours.clamp(1, 24 * 14);
+
+    conn.execute(
+        "UPDATE user_profile SET due_reminders_enabled = ?1, due_reminder_hours = ?2 WHERE id = 1",
+        params![enabled as i64, hours],
+    ).map_err(to_string_err)?;
+
+    read_reminder_settings(&conn)
+}
+
+/// Карточки, по которым пора показать напоминание: срок наступает не позже чем
+/// через `hours`, напоминание ещё не показывали, и ничто на пути к карточке не
+/// в архиве.
+///
+/// Просроченные тоже попадают сюда — если приложение было закрыто в момент
+/// срабатывания, человек всё равно должен узнать. Отсекаются только те, что
+/// просрочены больше чем на `OVERDUE_GRACE_DAYS`: при первом запуске после
+/// обновления иначе прилетело бы напоминание про каждую забытую карточку
+/// годовой давности.
+fn due_cards_needing_reminder(conn: &rusqlite::Connection, hours: i64) -> rusqlite::Result<Vec<DueReminder>> {
+    const OVERDUE_GRACE_DAYS: i64 = 3;
+
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.title, c.due_date, b.name
+         FROM cards c
+         INNER JOIN columns col ON col.id = c.column_id
+         INNER JOIN boards b ON b.id = col.board_id
+         INNER JOIN workspaces w ON w.id = b.workspace_id
+         WHERE c.due_date IS NOT NULL
+           AND c.due_reminder_sent_at IS NULL
+           AND c.archived = 0
+           AND col.archived = 0
+           AND b.archived = 0
+           AND w.archived = 0
+           -- Срок истекает в конце своего дня; напоминание — за `hours` до этого.
+           AND datetime('now', 'localtime') >= datetime(c.due_date || ' 23:59:59', '-' || ?1 || ' hours')
+           AND datetime('now', 'localtime') <  datetime(c.due_date || ' 23:59:59', '+' || ?2 || ' days')
+         ORDER BY c.due_date ASC, c.id ASC",
+    )?;
+
+    let rows = stmt.query_map(params![hours, OVERDUE_GRACE_DAYS], |row| {
+        Ok(DueReminder {
+            card_id: row.get(0)?,
+            title: row.get(1)?,
+            due_date: row.get(2)?,
+            board_name: row.get(3)?,
+        })
+    })?;
+
+    rows.collect()
+}
+
+/// Помечает карточки как «напоминание показано», чтобы следующая проверка их не
+/// подняла. Отметка ставится в UTC — как и все остальные в базе.
+fn mark_reminders_sent(conn: &rusqlite::Connection, cards: &[DueReminder]) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare("UPDATE cards SET due_reminder_sent_at = datetime('now') WHERE id = ?1")?;
+    for card in cards {
+        stmt.execute(params![card.card_id])?;
+    }
+    Ok(())
+}
+
+/// Текст уведомления. Одна карточка называется по имени — это и есть польза
+/// напоминания; несколько сворачиваются в одну строку, потому что пять всплывших
+/// подряд окон Windows человек закрывает не читая.
+fn reminder_text(cards: &[DueReminder]) -> (String, String) {
+    if let [only] = cards {
+        (
+            format!("Скоро дедлайн: {}", only.title),
+            format!("{} — срок {}", only.board_name, format_due_date_ru(&only.due_date)),
+        )
+    } else {
+        let titles: Vec<&str> = cards.iter().take(3).map(|c| c.title.as_str()).collect();
+        let tail = if cards.len() > titles.len() {
+            format!(" и ещё {}", cards.len() - titles.len())
+        } else {
+            String::new()
+        };
+        (
+            format!("Приближается {} дедлайна", cards.len()),
+            format!("{}{}", titles.join(", "), tail),
+        )
+    }
+}
+
+/// `2026-09-01` → `1 сентября`. Год не показывается: напоминание приходит не
+/// раньше чем за две недели, и год в нём всегда текущий.
+fn format_due_date_ru(due_date: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "января", "февраля", "марта", "апреля", "мая", "июня",
+        "июля", "августа", "сентября", "октября", "ноября", "декабря",
+    ];
+    let parts: Vec<&str> = due_date.split('-').collect();
+    match parts.as_slice() {
+        [_, month, day] => {
+            let m: usize = month.parse().unwrap_or(0);
+            let d: u32 = day.parse().unwrap_or(0);
+            if (1..=12).contains(&m) && d > 0 {
+                return format!("{} {}", d, MONTHS[m - 1]);
+            }
+            due_date.to_string()
+        }
+        // Дата в неожиданном виде показывается как есть: напоминание без
+        // красивой даты лучше, чем напоминание, упавшее на её разборе.
+        _ => due_date.to_string(),
+    }
+}
+
+/// Одна проверка сроков: читает настройки, находит карточки и показывает одно
+/// уведомление на всех.
+///
+/// Отметка «показано» ставится только если уведомление действительно ушло в
+/// систему. Иначе карточка считалась бы отработанной после проверки, которая
+/// человеку ничего не показала, — и напоминание пропало бы бесследно.
+pub fn run_due_reminder_check(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    use tauri_plugin_notification::NotificationExt;
+
+    let state = app.state::<DbState>();
+    let conn = match state.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let settings = match read_reminder_settings(&conn) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("напоминания: не удалось прочитать настройки: {}", e);
+            return;
+        }
+    };
+    if !settings.enabled {
+        return;
+    }
+
+    let cards = match due_cards_needing_reminder(&conn, settings.hours) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("напоминания: не удалось выбрать карточки: {}", e);
+            return;
+        }
+    };
+    if cards.is_empty() {
+        return;
+    }
+
+    let (title, body) = reminder_text(&cards);
+    match app.notification().builder().title(title).body(body).show() {
+        Ok(()) => {
+            if let Err(e) = mark_reminders_sent(&conn, &cards) {
+                // Уведомление уже показано, а отметка не легла — при следующей
+                // проверке те же карточки придут снова. Неприятно, но честно:
+                // потерять напоминание хуже, чем повторить его.
+                log::warn!("напоминания: показаны, но не отмечены: {}", e);
+            }
+        }
+        Err(e) => log::warn!("напоминания: система отказалась показывать: {}", e),
+    }
+}
+
+// ─── Комментарии к карточке ───
+//
+// Автор всегда «я»: в приложении нет входа в систему и других людей за
+// клавиатурой не бывает. Справочник участников при этом настоящий — на них
+// назначают задачи, — поэтому подпись берётся с той же строки `is_self`, что и
+// профиль, а не пишется текстом. Переименовал себя в Настройках — подписи под
+// старыми комментариями поменялись вместе с именем.
+
+/// Комментарий длиннее этого не влезает ни в какое разумное окно и почти
+/// наверняка означает, что человек вставил туда не то. Обрезать молча нельзя —
+/// это потеря текста, поэтому граница проверяется и возвращается ошибкой.
+const MAX_COMMENT_LENGTH: usize = 5000;
+
+fn row_to_comment(row: &rusqlite::Row) -> rusqlite::Result<CardComment> {
+    // LEFT JOIN без совпадения даёт NULL во всех столбцах участника, поэтому
+    // именно его id решает, есть ли автор вообще.
+    let author = match row.get::<_, Option<i64>>(4)? {
+        Some(id) => Some(Member {
+            id,
+            name: row.get(5)?,
+            initials: row.get(6)?,
+            color: row.get(7)?,
+            is_self: { let s: i64 = row.get(8)?; s != 0 },
+            created_at: row.get(9)?,
+        }),
+        None => None,
+    };
+    Ok(CardComment {
+        id: row.get(0)?,
+        card_id: row.get(1)?,
+        body: row.get(2)?,
+        created_at: row.get(3)?,
+        author,
+    })
+}
+
+const COMMENT_SELECT: &str = "SELECT cc.id, cc.card_id, cc.body, cc.created_at,
+                                     m.id, m.name, m.initials, m.color, m.is_self, m.created_at
+                              FROM card_comments cc
+                              LEFT JOIN members m ON m.id = cc.author_id";
+
+#[tauri::command]
+pub fn list_card_comments(card_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<CardComment>> {
+    let conn = state.conn.lock().unwrap();
+    list_card_comments_in(&conn, card_id)
+}
+
+/// Тело `list_card_comments` без `State` — чтобы тест гонял тот же запрос.
+///
+/// Порядок — от старых к новым, как в любой переписке: читают сверху вниз, и
+/// последний ответ должен оказаться в конце. `id` разбивает ничью, потому что
+/// `datetime('now')` идёт с точностью до секунды и два комментария подряд
+/// вполне могут её разделить.
+fn list_card_comments_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<Vec<CardComment>> {
+    let sql = format!("{} WHERE cc.card_id = ?1 ORDER BY cc.created_at ASC, cc.id ASC", COMMENT_SELECT);
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
+    let iter = stmt.query_map(params![card_id], row_to_comment).map_err(to_string_err)?;
+
+    let mut res = Vec::new();
+    for c in iter { res.push(c.map_err(to_string_err)?); }
+    Ok(res)
+}
+
+#[tauri::command]
+pub fn create_card_comment(card_id: i64, body: String, state: State<'_, DbState>) -> CmdResult<CardComment> {
+    let conn = state.conn.lock().unwrap();
+    create_card_comment_in(&conn, card_id, &body)
+}
+
+fn create_card_comment_in(conn: &rusqlite::Connection, card_id: i64, body: &str) -> CmdResult<CardComment> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("Комментарий не может быть пустым".to_string());
+    }
+    if body.chars().count() > MAX_COMMENT_LENGTH {
+        return Err(format!(
+            "Комментарий длиннее {} символов — вероятно, вставилось не то",
+            MAX_COMMENT_LENGTH
+        ));
+    }
+
+    // Карточка проверяется явно, хотя внешний ключ поймал бы и сам: его
+    // сообщение («FOREIGN KEY constraint failed») человеку ничего не говорит.
+    let exists: bool = conn
+        .query_row("SELECT 1 FROM cards WHERE id = ?1", params![card_id], |_| Ok(true))
+        .optional()
+        .map_err(to_string_err)?
+        .unwrap_or(false);
+    if !exists {
+        return Err("Карточка не найдена".to_string());
+    }
+
+    let author_id: Option<i64> = conn
+        .query_row("SELECT id FROM members WHERE is_self = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(to_string_err)?;
+
+    conn.execute(
+        "INSERT INTO card_comments (card_id, author_id, body) VALUES (?1, ?2, ?3)",
+        params![card_id, author_id, body],
+    ).map_err(to_string_err)?;
+    let id = conn.last_insert_rowid();
+
+    let sql = format!("{} WHERE cc.id = ?1", COMMENT_SELECT);
+    conn.query_row(&sql, params![id], row_to_comment).map_err(to_string_err)
+}
+
+#[tauri::command]
+pub fn delete_card_comment(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    conn.execute("DELETE FROM card_comments WHERE id = ?1", params![id])
+        .map_err(to_string_err)?;
+    Ok(())
 }

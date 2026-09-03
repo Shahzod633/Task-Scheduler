@@ -1,4 +1,4 @@
-use rusqlite::{Connection, DatabaseName, OptionalExtension, Result, params};
+use rusqlite::{Connection, OptionalExtension, Result, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -36,6 +36,15 @@ pub struct DbState {
     pub app_dir: PathBuf,
 }
 
+/// Ошибки шифрования приходят строками, а `init` объявлен через
+/// `rusqlite::Result`. Тот же приём уже используется в `write_backup`.
+fn as_sqlite_error(message: String) -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        message,
+    )))
+}
+
 pub fn init(app_dir: &PathBuf) -> Result<Connection> {
     if !app_dir.exists() {
         fs::create_dir_all(app_dir).expect("Failed to create app data directory");
@@ -50,7 +59,19 @@ pub fn init(app_dir: &PathBuf) -> Result<Connection> {
     // backing up a database that is about to be created empty is pointless.
     let had_existing_db = db_path.exists();
 
-    let conn = Connection::open(&db_path)?;
+    // Ключ достаётся до открытия базы: без него открывать нечего. Любая
+    // неудача здесь — причина не запуститься, а не работать дальше. Открыть
+    // зашифрованную базу с неверным ключом означало бы получить пустую и
+    // писать в неё поверх настоящих данных.
+    let key = crate::crypto::load_or_create_key().map_err(as_sqlite_error)?;
+
+    // Незашифрованный файл на этом месте — база, созданная версией до
+    // шифрования. Переводим её один раз; исходник остаётся рядом под `.bak`.
+    if crate::crypto::is_plaintext_database(&db_path) {
+        crate::crypto::encrypt_existing_database(&db_path, &key).map_err(as_sqlite_error)?;
+    }
+
+    let conn = crate::crypto::open_encrypted(&db_path, &key)?;
 
     // SQLite ignores FOREIGN KEY clauses unless this is switched on per
     // connection — without it the constraints declared below are decorative.
@@ -175,6 +196,23 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         (),
     )?;
 
+    // Комментарии к карточке. Автор — ссылка на участника, а не текст: имя
+    // человека может измениться, и подпись под старым комментарием должна
+    // измениться вместе с ним. NULL означает, что участника удалили, —
+    // комментарий при этом остаётся, потому что написанное никуда не делось.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS card_comments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL,
+            author_id INTEGER,
+            body TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (card_id) REFERENCES cards(id),
+            FOREIGN KEY (author_id) REFERENCES members(id)
+        )",
+        (),
+    )?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS labels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -213,7 +251,9 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             id INTEGER PRIMARY KEY CHECK (id = 1),
             avatar_initials TEXT DEFAULT 'TF',
             display_name TEXT DEFAULT 'Пользователь',
-            theme TEXT DEFAULT 'dark'
+            theme TEXT DEFAULT 'dark',
+            due_reminders_enabled INTEGER DEFAULT 1,
+            due_reminder_hours INTEGER DEFAULT 24
         )",
         (),
     )?;
@@ -271,6 +311,28 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    // Когда по этой карточке уже показали напоминание о сроке. NULL — ещё не
+    // показывали. Хранится в UTC, как и остальные отметки времени в базе; это
+    // флаг «сделано», а не то, что читает человек.
+    if !table_has_column(conn, "cards", "due_reminder_sent_at") {
+        conn.execute("ALTER TABLE cards ADD COLUMN due_reminder_sent_at TEXT", ())?;
+    }
+    // Настройки напоминаний живут в `user_profile` — той же единственной
+    // строке, где уже лежит тема оформления: это настройки приложения, а не
+    // свойства человека и не свойства пространства.
+    if !table_has_column(conn, "user_profile", "due_reminders_enabled") {
+        conn.execute(
+            "ALTER TABLE user_profile ADD COLUMN due_reminders_enabled INTEGER DEFAULT 1",
+            (),
+        )?;
+    }
+    if !table_has_column(conn, "user_profile", "due_reminder_hours") {
+        conn.execute(
+            "ALTER TABLE user_profile ADD COLUMN due_reminder_hours INTEGER DEFAULT 24",
+            (),
+        )?;
+    }
+
     // Ensure the singleton user profile row exists
     conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1)", ())?;
 
@@ -286,7 +348,9 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_boards_workspace ON boards(workspace_id);
          -- Every card on a board asks for its checklist counts, so this one is
          -- read far more often than it is written.
-         CREATE INDEX IF NOT EXISTS idx_checklist_card   ON checklist_items(card_id);",
+         CREATE INDEX IF NOT EXISTS idx_checklist_card   ON checklist_items(card_id);
+         -- Комментарии всегда читаются пачкой по одной карточке.
+         CREATE INDEX IF NOT EXISTS idx_comments_card     ON card_comments(card_id);",
     )?;
 
     // Backfill a hidden Inbox board for every existing workspace
@@ -375,9 +439,15 @@ fn migrate_legacy_db(app_dir: &Path, db_path: &Path) {
 /// Writes a timestamped snapshot of the database into `<app_dir>/backups` and
 /// prunes all but the newest `BACKUP_KEEP` of them.
 ///
-/// Uses SQLite's own backup API rather than a file copy: it takes a consistent
-/// snapshot even if something else is mid-write, which a plain `fs::copy`
-/// cannot promise.
+/// Uses SQLite's own `VACUUM INTO` rather than a file copy: it takes a
+/// consistent snapshot even if something else is mid-write, which a plain
+/// `fs::copy` cannot promise.
+///
+/// Раньше здесь был онлайн-API бэкапа (`conn.backup`). С шифрованием он не
+/// годится: rusqlite открывает файл-приёмник сам, без ключа, и копия страниц
+/// ложится в базу без криптоконтекста. `VACUUM INTO` выполняется тем же
+/// соединением с тем же ключом и пишет полноценный зашифрованный файл —
+/// открыть его можно только этим приложением на этой учётной записи.
 fn write_backup(conn: &Connection, app_dir: &Path) -> Result<()> {
     let backup_dir = app_dir.join(BACKUP_DIR_NAME);
     fs::create_dir_all(&backup_dir).map_err(|e| {
@@ -397,7 +467,11 @@ fn write_backup(conn: &Connection, app_dir: &Path) -> Result<()> {
     )?;
 
     let dest = backup_dir.join(format!("backup-{}.db", stamp));
-    conn.backup(DatabaseName::Main, &dest, None)?;
+    // VACUUM INTO создаёт файл сам и отказывается писать в существующий.
+    if dest.exists() {
+        fs::remove_file(&dest).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+    }
+    conn.execute("VACUUM INTO ?1", params![dest.to_string_lossy()])?;
     log::info!("Резервная копия создана: {:?}", dest);
 
     prune_backups(&backup_dir);

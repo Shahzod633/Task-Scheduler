@@ -366,6 +366,30 @@ export async function getCardsWithDueDates(workspaceId) {
     return await invoke('get_cards_with_due_dates', { workspaceId });
 }
 
+// ─── Комментарии к карточке ───
+
+export async function listCardComments(cardId) {
+    return await invoke('list_card_comments', { cardId });
+}
+
+export async function createCardComment(cardId, body) {
+    return await invoke('create_card_comment', { cardId, body });
+}
+
+export async function deleteCardComment(id) {
+    return await invoke('delete_card_comment', { id });
+}
+
+// ─── Напоминания о дедлайнах ───
+
+export async function getReminderSettings() {
+    return await invoke('get_reminder_settings');
+}
+
+export async function updateReminderSettings(enabled, hours) {
+    return await invoke('update_reminder_settings', { enabled, hours });
+}
+
 // ─── Mistake tracking ───
 
 export async function markCardMistake(cardId) {

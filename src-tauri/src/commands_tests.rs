@@ -20,8 +20,8 @@ fn test_db() -> Connection {
 }
 
 /// A board exercising every field the export format carries: several columns
-/// (one archived), a card with a due date and labels, an archived card, and a
-/// mistake-flagged card.
+/// (one archived), a card with a due date, labels and a checklist, an archived
+/// card, and a mistake-flagged card.
 fn seed_board(conn: &Connection, workspace_id: i64) -> i64 {
     conn.execute(
         "INSERT INTO boards (workspace_id, name, gradient, is_starred) VALUES (?1, 'Доска А', 'linear-gradient(1)', 1)",
@@ -58,6 +58,22 @@ fn seed_board(conn: &Connection, workspace_id: i64) -> i64 {
 
     conn.execute("INSERT INTO card_labels (card_id, label_id) VALUES (?1, ?2)", params![card1, label_bug]).unwrap();
     conn.execute("INSERT INTO card_labels (card_id, label_id) VALUES (?1, ?2)", params![card1, label_urgent]).unwrap();
+
+    // Позиции идут с дырой и не по порядку вставки: так и выглядит настоящая
+    // карточка, из которой что-то удаляли и что-то перетаскивали. Экспорт
+    // обязан отдать их в порядке position, а не в порядке id.
+    conn.execute(
+        "INSERT INTO checklist_items (card_id, text, is_done, position) VALUES (?1, 'Третий', 0, 7)",
+        params![card1],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO checklist_items (card_id, text, is_done, position) VALUES (?1, 'Первый', 1, 0)",
+        params![card1],
+    ).unwrap();
+    conn.execute(
+        "INSERT INTO checklist_items (card_id, text, is_done, position) VALUES (?1, 'Второй', 0, 3)",
+        params![card1],
+    ).unwrap();
 
     board_id
 }
@@ -121,6 +137,11 @@ fn import_round_trip_preserves_the_board() {
             assert_eq!(bc.archived, ac.archived);
             assert_eq!(bc.is_mistake, ac.is_mistake);
             assert_eq!(bc.label_ids.len(), ac.label_ids.len(), "связи с метками должны сохраниться");
+            let before_items: Vec<(&str, bool)> =
+                bc.checklist.iter().map(|i| (i.text.as_str(), i.is_done)).collect();
+            let after_items: Vec<(&str, bool)> =
+                ac.checklist.iter().map(|i| (i.text.as_str(), i.is_done)).collect();
+            assert_eq!(before_items, after_items, "чек-лист карточки «{}» потерялся", bc.title);
         }
     }
 }
@@ -226,6 +247,8 @@ fn import_skips_label_links_the_file_does_not_define() {
                     assignee_id: None,
                     author_id: None,
                     priority: None,
+                    checklist: Vec::new(),
+                    comments: Vec::new(),
                 }],
             }],
         },
@@ -251,13 +274,18 @@ fn delete_board_leaves_no_orphan_rows() {
             SELECT c.id FROM cards c INNER JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1)",
         params![board_id],
     ).unwrap();
+    conn.execute(
+        "DELETE FROM checklist_items WHERE card_id IN (
+            SELECT c.id FROM cards c INNER JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1)",
+        params![board_id],
+    ).unwrap();
     conn.execute("DELETE FROM cards WHERE column_id IN (SELECT id FROM columns WHERE board_id = ?1)", params![board_id]).unwrap();
     conn.execute("DELETE FROM columns WHERE board_id = ?1", params![board_id]).unwrap();
     conn.execute("DELETE FROM labels WHERE board_id = ?1", params![board_id]).unwrap();
     conn.execute("DELETE FROM board_recent_views WHERE board_id = ?1", params![board_id]).unwrap();
     conn.execute("DELETE FROM boards WHERE id = ?1", params![board_id]).unwrap();
 
-    for table in ["cards", "columns", "labels", "card_labels"] {
+    for table in ["cards", "columns", "labels", "card_labels", "checklist_items"] {
         let n: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0, "в таблице {} остались строки удалённой доски", table);
     }
@@ -1219,4 +1247,605 @@ fn measure_stored_background_size_on_real_photos() {
     if checked == 0 {
         println!("обоев Windows на этой машине нет — мерить нечего");
     }
+}
+
+#[test]
+fn export_carries_checklist_items_in_display_order() {
+    let conn = test_db();
+    let board_id = seed_board(&conn, 1);
+
+    let export = build_board_export(&conn, board_id).unwrap();
+    let card = &export.board.columns[0].cards[0];
+
+    let items: Vec<(&str, bool)> =
+        card.checklist.iter().map(|i| (i.text.as_str(), i.is_done)).collect();
+    assert_eq!(
+        items,
+        vec![("Первый", true), ("Второй", false), ("Третий", false)],
+        "пункты должны идти по position, а не по порядку вставки"
+    );
+
+    // Карточка без подзадач отдаёт пустой список, а не отсутствующее поле:
+    // читателю файла не приходится различать «нет чек-листа» и «поле забыли».
+    assert!(export.board.columns[0].cards[1].checklist.is_empty());
+}
+
+#[test]
+fn import_restores_checklists_through_real_json() {
+    let mut conn = test_db();
+    let original_id = seed_board(&conn, 1);
+
+    // Через настоящий JSON: поле, которое сериализуется, но не читается обратно,
+    // выглядит в тесте на структурах живым — а в файле теряется.
+    let json = serde_json::to_string(&build_board_export(&conn, original_id).unwrap()).unwrap();
+    let parsed: BoardExport = serde_json::from_str(&json).unwrap();
+    let new_id = import_board_into(&mut conn, 1, parsed).unwrap();
+
+    let new_card_id: i64 = conn
+        .query_row(
+            "SELECT c.id FROM cards c
+             JOIN columns col ON col.id = c.column_id
+             WHERE col.board_id = ?1 AND c.title = 'Задача 1'",
+            params![new_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    let items: Vec<(String, i64, i64)> = conn
+        .prepare(
+            "SELECT text, is_done, position FROM checklist_items
+             WHERE card_id = ?1 ORDER BY position ASC, id ASC",
+        )
+        .unwrap()
+        .query_map(params![new_card_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+
+    assert_eq!(
+        items,
+        vec![
+            ("Первый".to_string(), 1, 0),
+            ("Второй".to_string(), 0, 1),
+            ("Третий".to_string(), 0, 2),
+        ],
+        "отметки «сделано» должны пережить импорт, а позиции — перенумероваться подряд"
+    );
+
+    // Пункты принадлежат новой карточке и не отобраны у оригинала.
+    let original_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM checklist_items ci
+             JOIN cards c ON c.id = ci.card_id
+             JOIN columns col ON col.id = c.column_id
+             WHERE col.board_id = ?1",
+            params![original_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(original_count, 3, "импорт не должен трогать исходную доску");
+}
+
+#[test]
+fn a_file_written_before_checklists_existed_still_imports() {
+    let mut conn = test_db();
+
+    // Ровно то, что писала предыдущая версия: у карточки нет поля `checklist`.
+    let json = r#"{
+        "taskflow_export_version": 1,
+        "exported_at": "2026-01-01 00:00:00",
+        "board": {
+            "name": "Старый файл",
+            "gradient": "",
+            "is_starred": false,
+            "labels": [],
+            "members": [],
+            "columns": [
+                { "name": "Список", "position": 0, "archived": 0, "cards": [
+                    { "title": "Без подзадач", "description": "", "position": 0 }
+                ] }
+            ]
+        }
+    }"#;
+
+    let parsed: BoardExport = serde_json::from_str(json).expect("старый файл должен читаться");
+    let new_id = import_board_into(&mut conn, 1, parsed).unwrap();
+
+    let after = build_board_export(&conn, new_id).unwrap();
+    assert_eq!(after.board.columns[0].cards[0].title, "Без подзадач");
+    assert!(after.board.columns[0].cards[0].checklist.is_empty());
+}
+
+#[test]
+fn an_empty_checklist_line_in_a_hand_edited_file_is_skipped() {
+    let mut conn = test_db();
+
+    let json = r#"{
+        "taskflow_export_version": 1,
+        "exported_at": "",
+        "board": {
+            "name": "Правленый руками",
+            "columns": [
+                { "name": "Список", "cards": [
+                    { "title": "Карточка", "checklist": [
+                        { "text": "  Настоящий пункт  " },
+                        { "text": "   " },
+                        { "text": "" }
+                    ] }
+                ] }
+            ]
+        }
+    }"#;
+
+    let parsed: BoardExport = serde_json::from_str(json).unwrap();
+    let new_id = import_board_into(&mut conn, 1, parsed).unwrap();
+
+    let after = build_board_export(&conn, new_id).unwrap();
+    let items = &after.board.columns[0].cards[0].checklist;
+    assert_eq!(items.len(), 1, "пустые строки не должны становиться невидимыми пунктами");
+    assert_eq!(items[0].text, "Настоящий пункт", "текст сохраняется без внешних пробелов");
+}
+
+// ─── Напоминания о дедлайнах (Фаза 3) ───
+//
+// Сроки здесь задаются не константами, а сдвигом от сегодняшнего **местного**
+// дня: тест с зашитой датой прошёл бы один раз и сломался бы назавтра, а
+// зашитый UTC-день ещё и разошёлся бы с местным в половине часовых поясов.
+
+/// Доска с одной колонкой; возвращает id колонки.
+fn board_with_column(conn: &Connection) -> i64 {
+    conn.execute(
+        "INSERT INTO boards (workspace_id, name, gradient) VALUES (1, 'Доска сроков', '')",
+        (),
+    ).unwrap();
+    let board_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO columns (board_id, name, position) VALUES (?1, 'В работе', 0)",
+        params![board_id],
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+/// `days` дней от сегодняшнего местного дня в виде 'YYYY-MM-DD'.
+fn local_day(conn: &Connection, days: i64) -> String {
+    conn.query_row(
+        "SELECT date('now', 'localtime', ?1 || ' days')",
+        params![days],
+        |r| r.get(0),
+    ).unwrap()
+}
+
+fn add_card(conn: &Connection, column_id: i64, title: &str, due_days: i64) -> i64 {
+    let due = local_day(conn, due_days);
+    conn.execute(
+        "INSERT INTO cards (column_id, title, description, position, due_date) VALUES (?1, ?2, '', 0, ?3)",
+        params![column_id, title, due],
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+#[test]
+fn a_deadline_inside_the_window_is_picked_up_and_one_outside_is_not() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    add_card(&conn, col, "Сегодня", 0);
+    add_card(&conn, col, "Завтра", 1);
+    add_card(&conn, col, "Через десять дней", 10);
+
+    // Срок истекает в конце своего дня, поэтому при окне в сутки «завтра» ещё
+    // не наступило: до конца завтрашнего дня больше 24 часов.
+    let due = due_cards_needing_reminder(&conn, 24).unwrap();
+    let titles: Vec<&str> = due.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, vec!["Сегодня"]);
+
+    // Окно в двое суток забирает и завтрашнюю, но не ту, что через десять дней.
+    let due = due_cards_needing_reminder(&conn, 48).unwrap();
+    let titles: Vec<&str> = due.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, vec!["Сегодня", "Завтра"]);
+}
+
+#[test]
+fn a_card_reminds_once_and_then_goes_quiet() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    add_card(&conn, col, "Сегодня", 0);
+
+    let first = due_cards_needing_reminder(&conn, 24).unwrap();
+    assert_eq!(first.len(), 1);
+
+    mark_reminders_sent(&conn, &first).unwrap();
+
+    let second = due_cards_needing_reminder(&conn, 24).unwrap();
+    assert!(second.is_empty(), "повторное напоминание о том же сроке — это спам");
+}
+
+#[test]
+fn moving_the_deadline_makes_the_card_remind_again() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    let card_id = add_card(&conn, col, "Сегодня", 0);
+
+    let first = due_cards_needing_reminder(&conn, 24).unwrap();
+    mark_reminders_sent(&conn, &first).unwrap();
+
+    // Тот же срок — отметка на месте, карточка молчит.
+    let same_due = local_day(&conn, 0);
+    update_card_in(&conn, card_id, "Сегодня", "правка текста", Some(&same_due)).unwrap();
+    assert!(
+        due_cards_needing_reminder(&conn, 24).unwrap().is_empty(),
+        "правка описания не должна поднимать напоминание заново"
+    );
+
+    // Срок перенесён на завтра — при окне в двое суток напомнить надо снова.
+    let tomorrow = local_day(&conn, 1);
+    update_card_in(&conn, card_id, "Сегодня", "", Some(&tomorrow)).unwrap();
+    assert_eq!(due_cards_needing_reminder(&conn, 48).unwrap().len(), 1);
+}
+
+#[test]
+fn clearing_the_deadline_also_clears_the_sent_mark() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    let card_id = add_card(&conn, col, "Сегодня", 0);
+
+    let first = due_cards_needing_reminder(&conn, 24).unwrap();
+    mark_reminders_sent(&conn, &first).unwrap();
+
+    update_card_in(&conn, card_id, "Сегодня", "", None).unwrap();
+
+    let mark: Option<String> = conn
+        .query_row("SELECT due_reminder_sent_at FROM cards WHERE id = ?1", params![card_id], |r| r.get(0))
+        .unwrap();
+    assert!(mark.is_none(), "снятый срок — тоже изменение срока");
+}
+
+#[test]
+fn archived_things_do_not_remind() {
+    let conn = test_db();
+
+    // Четыре одинаковые карточки со сроком «сегодня», у каждой в архиве свой
+    // уровень: сама карточка, её колонка, её доска, её пространство.
+    let col = board_with_column(&conn);
+    let archived_card = add_card(&conn, col, "Архивная карточка", 0);
+    conn.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![archived_card]).unwrap();
+
+    let col2 = board_with_column(&conn);
+    add_card(&conn, col2, "В архивной колонке", 0);
+    conn.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![col2]).unwrap();
+
+    let col3 = board_with_column(&conn);
+    add_card(&conn, col3, "На архивной доске", 0);
+    conn.execute(
+        "UPDATE boards SET archived = 1 WHERE id = (SELECT board_id FROM columns WHERE id = ?1)",
+        params![col3],
+    ).unwrap();
+
+    conn.execute("INSERT INTO workspaces (name, archived) VALUES ('Закрытое', 1)", ()).unwrap();
+    let dead_ws = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO boards (workspace_id, name, gradient) VALUES (?1, 'Доска', '')",
+        params![dead_ws],
+    ).unwrap();
+    let dead_board = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO columns (board_id, name, position) VALUES (?1, 'Колонка', 0)",
+        params![dead_board],
+    ).unwrap();
+    let dead_col = conn.last_insert_rowid();
+    add_card(&conn, dead_col, "В архивном пространстве", 0);
+
+    // И одна живая — иначе тест прошёл бы и на запросе, который не находит ничего.
+    let alive_col = board_with_column(&conn);
+    add_card(&conn, alive_col, "Живая", 0);
+
+    let due = due_cards_needing_reminder(&conn, 24).unwrap();
+    let titles: Vec<&str> = due.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, vec!["Живая"]);
+}
+
+#[test]
+fn a_deadline_missed_long_ago_does_not_resurface() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    add_card(&conn, col, "Вчерашняя", -1);
+    add_card(&conn, col, "Забытая в прошлом месяце", -30);
+
+    // Пропущенная вчера ещё стоит напоминания — приложение могло быть закрыто
+    // в момент срабатывания. Месячной давности — уже нет: при первом запуске
+    // после обновления такие посыпались бы пачкой.
+    let due = due_cards_needing_reminder(&conn, 24).unwrap();
+    let titles: Vec<&str> = due.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, vec!["Вчерашняя"]);
+}
+
+#[test]
+fn a_card_without_a_deadline_is_never_considered() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    conn.execute(
+        "INSERT INTO cards (column_id, title, description, position) VALUES (?1, 'Без срока', '', 0)",
+        params![col],
+    ).unwrap();
+
+    assert!(due_cards_needing_reminder(&conn, 168).unwrap().is_empty());
+}
+
+#[test]
+fn reminder_settings_default_to_on_and_read_back_what_was_written() {
+    let conn = test_db();
+
+    // По умолчанию напоминания включены — иначе функция, ради которой всё это
+    // писалось, у большинства просто не работала бы.
+    let defaults = read_reminder_settings(&conn).unwrap();
+    assert_eq!(defaults, ReminderSettings { enabled: true, hours: 24 });
+
+    conn.execute(
+        "UPDATE user_profile SET due_reminders_enabled = 0, due_reminder_hours = 6 WHERE id = 1",
+        (),
+    ).unwrap();
+    assert_eq!(
+        read_reminder_settings(&conn).unwrap(),
+        ReminderSettings { enabled: false, hours: 6 }
+    );
+}
+
+#[test]
+fn one_deadline_is_named_and_several_are_summed_up() {
+    let single = vec![DueReminder {
+        card_id: 1,
+        title: "Сдать отчёт".into(),
+        due_date: "2026-09-01".into(),
+        board_name: "Работа".into(),
+    }];
+    let (title, body) = reminder_text(&single);
+    assert_eq!(title, "Скоро дедлайн: Сдать отчёт");
+    assert_eq!(body, "Работа — срок 1 сентября");
+
+    let many: Vec<DueReminder> = ["Первая", "Вторая", "Третья", "Четвёртая"]
+        .iter()
+        .enumerate()
+        .map(|(i, t)| DueReminder {
+            card_id: i as i64,
+            title: (*t).into(),
+            due_date: "2026-09-01".into(),
+            board_name: "Работа".into(),
+        })
+        .collect();
+    let (title, body) = reminder_text(&many);
+    assert_eq!(title, "Приближается 4 дедлайна");
+    assert_eq!(body, "Первая, Вторая, Третья и ещё 1", "четыре окна подряд человек закрывает не читая");
+}
+
+#[test]
+fn a_due_date_in_an_unexpected_shape_is_shown_as_is() {
+    assert_eq!(format_due_date_ru("2026-01-09"), "9 января");
+    assert_eq!(format_due_date_ru("2026-12-31"), "31 декабря");
+    // Ничего не разбирается — но и не паникует.
+    assert_eq!(format_due_date_ru("завтра"), "завтра");
+    assert_eq!(format_due_date_ru("2026-13-01"), "2026-13-01");
+}
+
+#[test]
+fn the_exported_file_is_readable_without_the_key() {
+    let conn = test_db();
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    seed_board(&conn, ws);
+
+    let target = export_dir("plaintext").join("taskflow-copy.db");
+    export_database_to(&conn, &target).expect("экспорт должен пройти");
+
+    // Осознанное решение, а не побочный эффект: копия, которую нельзя открыть
+    // без ключа из Диспетчера учётных данных этой машины, бесполезна ровно
+    // тогда, когда понадобится (см. PROJECT_NOTES §17.5). Если экспорт когда-то
+    // решат шифровать, этот тест обязан упасть и заставить переписать
+    // предупреждение в Настройках.
+    assert!(
+        crate::crypto::is_plaintext_database(&target),
+        "файл экспорта должен оставаться обычной базой SQLite"
+    );
+
+    // И действительно открываться без всякого ключа.
+    let copy = Connection::open(&target).unwrap();
+    let boards: i64 = copy.query_row("SELECT COUNT(*) FROM boards", [], |r| r.get(0)).unwrap();
+    assert!(boards > 0);
+}
+
+// ─── Комментарии к карточке (Фаза 6) ───
+
+/// Карточка на новой доске; возвращает её id.
+fn card_for_comments(conn: &Connection) -> i64 {
+    conn.execute(
+        "INSERT INTO boards (workspace_id, name, gradient) VALUES (1, 'Обсуждения', '')",
+        (),
+    ).unwrap();
+    let board_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO columns (board_id, name, position) VALUES (?1, 'В работе', 0)",
+        params![board_id],
+    ).unwrap();
+    let col = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO cards (column_id, title, description, position) VALUES (?1, 'Задача', '', 0)",
+        params![col],
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+#[test]
+fn comments_come_back_oldest_first_with_their_author() {
+    let conn = test_db();
+    let card_id = card_for_comments(&conn);
+
+    create_card_comment_in(&conn, card_id, "Первый").unwrap();
+    create_card_comment_in(&conn, card_id, "Второй").unwrap();
+    create_card_comment_in(&conn, card_id, "Третий").unwrap();
+
+    let list = list_card_comments_in(&conn, card_id).unwrap();
+    let bodies: Vec<&str> = list.iter().map(|c| c.body.as_str()).collect();
+    assert_eq!(
+        bodies,
+        vec!["Первый", "Второй", "Третий"],
+        "переписку читают сверху вниз, последний ответ должен быть в конце"
+    );
+
+    // Подпись приезжает целиком, а не идентификатором: рисовать её нужно сразу.
+    let author = list[0].author.as_ref().expect("автором должен стать сам пользователь");
+    assert!(author.is_self);
+    assert!(!author.initials.is_empty());
+}
+
+#[test]
+fn the_signature_follows_a_rename_because_it_is_a_reference_not_a_copy() {
+    let conn = test_db();
+    let card_id = card_for_comments(&conn);
+    create_card_comment_in(&conn, card_id, "Уже написано").unwrap();
+
+    conn.execute("UPDATE members SET name = 'Новое имя' WHERE is_self = 1", ()).unwrap();
+
+    let list = list_card_comments_in(&conn, card_id).unwrap();
+    assert_eq!(list[0].author.as_ref().unwrap().name, "Новое имя");
+}
+
+#[test]
+fn an_empty_or_absurdly_long_comment_is_refused() {
+    let conn = test_db();
+    let card_id = card_for_comments(&conn);
+
+    assert!(create_card_comment_in(&conn, card_id, "").is_err());
+    assert!(create_card_comment_in(&conn, card_id, "    \n  ").is_err(), "одни пробелы — тоже пусто");
+
+    // Обрезать молча нельзя — это потеря текста; поэтому именно ошибка.
+    let huge = "я".repeat(5001);
+    let err = create_card_comment_in(&conn, card_id, &huge).unwrap_err();
+    assert!(err.contains("вставилось не то"), "неожиданное сообщение: {}", err);
+
+    // Ровно по границе — можно. Счёт в символах, а не байтах: кириллица весит
+    // по два байта, и лимит в байтах резал бы русский текст вдвое раньше.
+    assert!(create_card_comment_in(&conn, card_id, &"я".repeat(5000)).is_ok());
+
+    // Пробелы по краям срезаются.
+    let c = create_card_comment_in(&conn, card_id, "  с краями  ").unwrap();
+    assert_eq!(c.body, "с краями");
+}
+
+#[test]
+fn a_comment_on_a_card_that_does_not_exist_says_so_plainly() {
+    let conn = test_db();
+    let err = create_card_comment_in(&conn, 99999, "В пустоту").unwrap_err();
+    assert_eq!(err, "Карточка не найдена", "сообщение внешнего ключа человеку ничего не говорит");
+}
+
+#[test]
+fn deleting_a_member_keeps_what_they_wrote() {
+    let mut conn = test_db();
+    let card_id = card_for_comments(&conn);
+
+    conn.execute("INSERT INTO members (name, initials, color) VALUES ('Пётр', 'ПП', '#f00')", ()).unwrap();
+    let peter = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO card_comments (card_id, author_id, body) VALUES (?1, ?2, 'Мысль Петра')",
+        params![card_id, peter],
+    ).unwrap();
+
+    delete_member_from(&mut conn, peter).unwrap();
+
+    let list = list_card_comments_in(&conn, card_id).unwrap();
+    assert_eq!(list.len(), 1, "обсуждение задачи — её часть, а не участника");
+    assert_eq!(list[0].body, "Мысль Петра");
+    assert!(list[0].author.is_none(), "подпись пропадает, текст остаётся");
+}
+
+#[test]
+fn deleting_a_card_takes_its_comments_with_it() {
+    let mut conn = test_db();
+    let card_id = card_for_comments(&conn);
+    create_card_comment_in(&conn, card_id, "Исчезнет вместе с карточкой").unwrap();
+
+    let tx = conn.transaction().unwrap();
+    // Тот же порядок, что и в `delete_card`.
+    tx.execute("DELETE FROM card_labels WHERE card_id = ?1", params![card_id]).unwrap();
+    tx.execute("DELETE FROM checklist_items WHERE card_id = ?1", params![card_id]).unwrap();
+    tx.execute("DELETE FROM card_comments WHERE card_id = ?1", params![card_id]).unwrap();
+    tx.execute("DELETE FROM cards WHERE id = ?1", params![card_id]).unwrap();
+    tx.commit().unwrap();
+
+    let left: i64 = conn.query_row("SELECT COUNT(*) FROM card_comments", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+    let violations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(violations, 0);
+}
+
+#[test]
+fn comments_survive_an_export_round_trip_with_their_author_and_time() {
+    let mut conn = test_db();
+    let card_id = card_for_comments(&conn);
+    let board_id: i64 = conn
+        .query_row(
+            "SELECT col.board_id FROM cards c JOIN columns col ON col.id = c.column_id WHERE c.id = ?1",
+            params![card_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+
+    // Автор комментария намеренно НЕ исполнитель и НЕ автор карточки: раньше
+    // список участников в экспорте собирался только по этим двум ссылкам, и
+    // такой человек в файл не попадал — подпись терялась при импорте.
+    conn.execute("INSERT INTO members (name, initials, color) VALUES ('Комментатор', 'КМ', '#0f0')", ()).unwrap();
+    let commenter = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO card_comments (card_id, author_id, body, created_at)
+         VALUES (?1, ?2, 'Написано в марте', '2026-03-01 09:30:00')",
+        params![card_id, commenter],
+    ).unwrap();
+
+    let json = serde_json::to_string(&build_board_export(&conn, board_id).unwrap()).unwrap();
+    let parsed: BoardExport = serde_json::from_str(&json).unwrap();
+    let new_id = import_board_into(&mut conn, 1, parsed).unwrap();
+
+    let after = build_board_export(&conn, new_id).unwrap();
+    let card = &after.board.columns[0].cards[0];
+    assert_eq!(card.comments.len(), 1, "комментарий обязан пережить круг через файл");
+    assert_eq!(card.comments[0].body, "Написано в марте");
+    assert_eq!(
+        card.comments[0].created_at, "2026-03-01 09:30:00",
+        "перенос доски не должен делать мартовский комментарий сегодняшним"
+    );
+
+    // Подпись указывает на участника новой доски, а не на строку из исходной.
+    let new_comment_author: Option<String> = conn
+        .query_row(
+            "SELECT m.name FROM card_comments cc
+             JOIN cards c ON c.id = cc.card_id
+             JOIN columns col ON col.id = c.column_id
+             LEFT JOIN members m ON m.id = cc.author_id
+             WHERE col.board_id = ?1",
+            params![new_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(new_comment_author.as_deref(), Some("Комментатор"), "автор комментария потерялся");
+}
+
+#[test]
+fn a_file_written_before_comments_existed_still_imports() {
+    let mut conn = test_db();
+
+    let json = r#"{
+        "taskflow_export_version": 1,
+        "exported_at": "",
+        "board": {
+            "name": "Старый файл",
+            "columns": [
+                { "name": "Список", "cards": [ { "title": "Без обсуждения" } ] }
+            ]
+        }
+    }"#;
+
+    let parsed: BoardExport = serde_json::from_str(json).expect("старый файл должен читаться");
+    let new_id = import_board_into(&mut conn, 1, parsed).unwrap();
+
+    let after = build_board_export(&conn, new_id).unwrap();
+    assert!(after.board.columns[0].cards[0].comments.is_empty());
 }

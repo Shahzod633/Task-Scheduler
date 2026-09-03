@@ -478,6 +478,44 @@
 }
 
 /* ─── Settings: Backups ─── */
+/* Предупреждение про незашифрованный экспорт: не ошибка, но и не проходная
+   подпись — цвет предупреждения, а не вторичного текста. */
+.settings-export__warning {
+    color: var(--color-warning);
+    margin-top: var(--space-xs);
+}
+
+/* ─── Напоминания о дедлайнах ─── */
+
+/* Строка целиком — <label>, поэтому попасть можно и по тексту, а не только по
+   самому квадратику 16×16. */
+.settings-reminders__toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin: var(--space-md) 0;
+    cursor: pointer;
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+}
+
+.settings-reminders__checkbox {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    cursor: pointer;
+    /* Системный чекбокс на тёмном фоне Windows рисуется белым по белому.
+       accent-color красит его в тон интерфейса, не отбирая у него ни
+       клавиатуру, ни поведение по умолчанию. */
+    accent-color: var(--accent-color);
+}
+
+/* Выключенные напоминания оставляют список часов на месте, но неактивным:
+   убрать его совсем значило бы дёргать высоту карточки на каждый щелчок. */
+.settings-reminders__toggle input:not(:checked) ~ span {
+    color: var(--text-secondary);
+}
+
 .settings-backup__intro {
     margin-bottom: var(--space-md);
 }

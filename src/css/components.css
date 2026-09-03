@@ -610,3 +610,288 @@ select.form-input option {
     box-shadow: 0 0 0 0 rgba(244, 104, 95, 0.5);
     animation: pulse-soft 2.4s var(--ease-in-out) infinite;
 }
+
+/* ─── Палитра поиска (Ctrl+K) ─── */
+
+/* Не по центру экрана, а ближе к верху: палитра появляется под руками, и
+   взгляд при наборе не уезжает вниз вслед за списком результатов. */
+.palette-overlay {
+    position: fixed;
+    inset: 0;
+    background: var(--bg-overlay);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    z-index: 600;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 12vh var(--space-lg) var(--space-lg);
+    animation: fade-in var(--duration-2) var(--ease-out);
+}
+
+.palette {
+    width: 560px;
+    max-width: 100%;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-xl), var(--highlight-top);
+    overflow: hidden;
+    animation: scale-in var(--duration-4) var(--ease-spring) both;
+}
+
+.palette__search {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-md) var(--space-lg);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.palette__search-icon {
+    display: flex;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+/* Поле без рамки и фона: рамка здесь ничего не отделяет — вся палитра и есть
+   одно поле ввода со списком под ним. */
+.palette__input {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    outline: none;
+    color: var(--text-primary);
+    font-family: var(--font-family);
+    font-size: var(--font-size-lg);
+}
+
+.palette__input::placeholder {
+    color: var(--text-muted);
+}
+
+.palette__hint {
+    flex-shrink: 0;
+    padding: 2px 6px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: var(--font-size-xs);
+}
+
+/* Высота ограничена, чтобы палитра не выросла на весь экран: список длиннее
+   десятка строк всё равно не читают, его уточняют запросом. */
+.palette__results {
+    max-height: 52vh;
+    overflow-y: auto;
+    padding: var(--space-xs) 0 var(--space-sm);
+}
+
+.palette__group {
+    padding: var(--space-sm) var(--space-lg) var(--space-xs);
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+    letter-spacing: var(--tracking-wide);
+    text-transform: uppercase;
+}
+
+.palette__row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    padding: var(--space-sm) var(--space-lg);
+    cursor: pointer;
+}
+
+/* Подсветка одна на клавиатуру и мышь: наведение делает строку активной, так
+   что «выбранная стрелками» и «под курсором» никогда не спорят друг с другом. */
+.palette__row--active {
+    background: var(--bg-card-hover);
+}
+
+.palette__row-icon {
+    display: flex;
+    flex-shrink: 0;
+    color: var(--text-muted);
+}
+
+.palette__row-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.palette__row-title {
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.palette__row-meta {
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.palette__row-badge {
+    flex-shrink: 0;
+    padding: 2px 8px;
+    border-radius: var(--radius-pill, 999px);
+    background: var(--danger-soft);
+    color: var(--color-danger);
+    font-size: var(--font-size-xs);
+}
+
+/* Совпадение красится текстом, а не заливкой: жёлтая плашка браузера по
+   умолчанию на тёмной теме выжигает строку. */
+.palette__mark {
+    background: none;
+    color: var(--accent-300);
+    font-weight: var(--font-weight-semibold);
+}
+
+.palette__empty {
+    padding: var(--space-lg);
+    color: var(--text-muted);
+    font-size: var(--font-size-md);
+    text-align: center;
+}
+
+/* ─── Комментарии к карточке ─── */
+
+.comments__header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-sm);
+}
+
+/* Счётчик появляется только когда есть что считать: «0» рядом с заголовком
+   ничего не сообщает, а место занимает. */
+.comments__count {
+    padding: 1px 7px;
+    border-radius: var(--radius-pill);
+    background: var(--bg-card-hover);
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+}
+
+/* Переписка длиннее экрана прокручивается внутри себя, чтобы поле ввода не
+   уезжало вниз вместе с ней — писать надо там же, где читаешь. */
+.comments__list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    max-height: 240px;
+    overflow-y: auto;
+    margin-bottom: var(--space-md);
+}
+
+.comments__empty {
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    padding: var(--space-sm) 0;
+}
+
+.comment {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-sm);
+}
+
+.comment__avatar {
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-pill);
+    background: var(--bg-card-hover);
+    color: #fff;
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+}
+
+.comment__main {
+    flex: 1;
+    min-width: 0;
+}
+
+.comment__meta {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-sm);
+    margin-bottom: 2px;
+}
+
+.comment__author {
+    color: var(--text-primary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+}
+
+.comment__time {
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+}
+
+/* `pre-wrap` сохраняет переносы строк, которые человек поставил сам, а
+   `overflow-wrap` не даёт длинной ссылке без пробелов растянуть окно. */
+.comment__body {
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* Удаление показывается только при наведении на комментарий: кнопка у каждой
+   строки превращает переписку в частокол из корзин. Клавиатуре она доступна
+   всегда — :focus-visible возвращает её из прозрачности. */
+.comment__delete {
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    opacity: 0;
+    transition: opacity var(--transition-fast, 120ms), color var(--transition-fast, 120ms);
+}
+
+.comment:hover .comment__delete,
+.comment__delete:focus-visible {
+    opacity: 1;
+}
+
+.comment__delete:hover {
+    color: var(--color-danger);
+    background: var(--danger-soft);
+}
+
+.comments__form {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--space-sm);
+}
+
+.comments__input {
+    flex: 1;
+    min-width: 0;
+    resize: vertical;
+    font-family: var(--font-family);
+    line-height: 1.5;
+}
+
+.comments__send {
+    flex-shrink: 0;
+}

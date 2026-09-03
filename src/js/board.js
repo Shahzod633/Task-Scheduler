@@ -8,6 +8,7 @@ import { openPopover, closePopovers } from './popover.js';
 import { confirmDialog } from './dialog.js';
 import { showBoardArchive } from './archive.js';
 import { renderChecklist } from './checklist.js';
+import { renderComments } from './comments.js';
 import { loadMembers, findMember, createAvatar, createMemberChip, openMemberPicker } from './members.js';
 import {
     createFilterState, createFilterToolbar, matchesFilter, isFilterActive,
@@ -787,6 +788,9 @@ export function showCardEditModal(cardData, options = {}) {
 
     // Loads asynchronously; the modal is already on screen by then.
     renderChecklist(body, cardData.id, () => { checklistDirty = true; });
+    // Комментарии сохраняются сразу, поэтому окно про них ничего не помнит и
+    // обновлять доску из-за них не нужно: на лицевой стороне карточки их нет.
+    renderComments(body, cardData.id);
 
     modal.appendChild(body);
     

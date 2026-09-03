@@ -26,8 +26,26 @@ tauri-plugin-log = "2"
 # Native save/open dialogs for board export and import. Only the path picking
 # happens here — the file itself is written by our own commands.
 tauri-plugin-dialog = "2"
-# "backup" enables SQLite's online backup API, used for automatic backups.
-rusqlite = { version = "0.31", features = ["bundled", "backup"] }
+# Toast notifications from the Windows notification centre, for deadline
+# reminders. Nothing leaves the machine: the plugin talks to the OS shell.
+tauri-plugin-notification = "2"
+# SQLCipher вместо обычного SQLite: база шифруется целиком, ключ — в
+# Диспетчере учётных данных Windows (см. `crypto.rs`).
+#
+# Вариант с «vendored-openssl» собирает OpenSSL из исходников прямо в бинарник:
+# в системе нет ни OpenSSL под MSVC, ни vcpkg, а тянуть внешнюю установку в
+# зависимости локального приложения значит сломать его при первом переезде.
+# Требует полноценного Perl (Strawberry Perl) — у perl из Git Bash вырезано
+# семейство Locale::Maketext, и конфигуратор OpenSSL на нём не стартует.
+#
+# "backup" больше не нужен: копии пишутся через VACUUM INTO, потому что
+# онлайн-API открывает файл-приёмник без ключа.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+# Ключ шифрования лежит в Диспетчере учётных данных Windows, а не в файле рядом
+# с базой: ключ в соседнем файле — это замок с ключом в скважине.
+keyring = { version = "3", features = ["windows-native"] }
+# Ключ генерируется из системного источника случайности, а не из времени.
+getrandom = "0.2"
 thiserror = "1.0"
 # Downscaling and re-encoding the sidebar background picture. Default features
 # pull in a decoder for every format the crate knows; only the three the file

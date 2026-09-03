@@ -1,6 +1,7 @@
 pub mod db;
 pub mod models;
 pub mod commands;
+pub mod crypto;
 
 use tauri::Manager;
 
@@ -9,6 +10,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let app_dir = app.path().app_data_dir().expect("failed to get app data dir");
             let conn = db::init(&app_dir).expect("failed to initialize db");
@@ -16,6 +18,19 @@ pub fn run() {
             app.manage(db::DbState {
                 conn: std::sync::Mutex::new(conn),
                 app_dir,
+            });
+
+            // Проверка сроков живёт в отдельном потоке, а не в таймере на
+            // фронтенде: напоминание должно приходить и тогда, когда окно
+            // свёрнуто, а веб-страница в свёрнутом окне засыпает.
+            //
+            // Первая проверка идёт сразу после запуска — иначе человек,
+            // открывший приложение утром и закрывший через десять минут, не
+            // узнал бы о сегодняшнем сроке до следующего дня.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                commands::run_due_reminder_check(&handle);
+                std::thread::sleep(commands::REMINDER_CHECK_INTERVAL);
             });
 
             Ok(())
@@ -48,6 +63,13 @@ pub fn run() {
             commands::update_card,
             commands::archive_card,
             commands::update_card_position,
+
+            commands::list_card_comments,
+            commands::create_card_comment,
+            commands::delete_card_comment,
+
+            commands::get_reminder_settings,
+            commands::update_reminder_settings,
 
             commands::export_board,
             commands::export_board_to_file,

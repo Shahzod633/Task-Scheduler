@@ -80,6 +80,20 @@ pub struct ChecklistItem {
     pub position: i64,
 }
 
+/// Комментарий к карточке.
+///
+/// Автор приезжает целиком, а не идентификатором: подпись рисуется сразу же, и
+/// отдельный поход за участником ради инициалов и цвета был бы лишним. `None`
+/// — участника удалили; сам комментарий при этом остаётся.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CardComment {
+    pub id: i64,
+    pub card_id: i64,
+    pub body: String,
+    pub created_at: String,
+    pub author: Option<Member>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Label {
     pub id: i64,
@@ -95,6 +109,24 @@ pub struct Notification {
     pub body: String,
     pub created_at: String,
     pub read: bool,
+}
+
+/// Настройки напоминаний о дедлайнах — одни на всё приложение.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReminderSettings {
+    pub enabled: bool,
+    /// За сколько часов до истечения срока показывать напоминание.
+    pub hours: i64,
+}
+
+/// Карточка, по которой пора напомнить. Не хранится — собирается запросом и
+/// живёт до показа уведомления.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DueReminder {
+    pub card_id: i64,
+    pub title: String,
+    pub due_date: String,
+    pub board_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -249,6 +281,37 @@ pub struct ColumnExport {
     pub cards: Vec<CardExport>,
 }
 
+/// Один пункт чек-листа в файле экспорта.
+///
+/// Своего id здесь нет намеренно: на пункт никто не ссылается, в отличие от
+/// меток и участников, — он целиком принадлежит своей карточке и восстановить
+/// его можно как есть.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChecklistItemExport {
+    pub text: String,
+    #[serde(default)]
+    pub is_done: bool,
+    #[serde(default)]
+    pub position: i64,
+}
+
+/// Комментарий в файле экспорта.
+///
+/// `author_id` — экспорт-локальный идентификатор из `BoardExportBody::members`,
+/// как у `CardExport::assignee_id`: настоящий id участника в другой установке
+/// принадлежит другому человеку. `None` — автор был удалён ещё до экспорта.
+///
+/// Время создания переносится как есть: комментарий, написанный в марте, не
+/// должен превратиться в сегодняшний оттого, что доску перенесли.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CommentExport {
+    pub body: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub author_id: Option<i64>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CardExport {
     pub title: String,
@@ -277,6 +340,18 @@ pub struct CardExport {
     /// Absent in older exports; those cards import at the schema default.
     #[serde(default)]
     pub priority: Option<String>,
+    /// Пункты чек-листа. Появились позже формата, поэтому `default`: файл без
+    /// них — это просто карточка без подзадач, а не ошибка чтения. Версия
+    /// формата ради этого не поднималась (как и для `members`/`priority`):
+    /// иначе старая сборка отвергла бы весь файл целиком вместо того, чтобы
+    /// прочитать его без чек-листов.
+    #[serde(default)]
+    pub checklist: Vec<ChecklistItemExport>,
+    /// Комментарии. Как и чек-листы, добавлены позже формата — отсюда
+    /// `default`. Версия формата не поднималась по той же причине: старая
+    /// сборка должна прочитать файл без комментариев, а не отвергнуть его.
+    #[serde(default)]
+    pub comments: Vec<CommentExport>,
 }
 
 /// Result of a full database export, so the Settings screen can confirm what

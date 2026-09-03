@@ -75,6 +75,10 @@ export async function renderSettingsPage(workspaceId) {
     const profileCard = createElement('div', { className: 'settings-card' });
     page.appendChild(profileCard);
 
+    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Напоминания о дедлайнах'));
+    const remindersCard = createElement('div', { className: 'settings-card' });
+    page.appendChild(remindersCard);
+
     page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Резервные копии'));
     const backupCard = createElement('div', { className: 'settings-card' });
     page.appendChild(backupCard);
@@ -84,7 +88,82 @@ export async function renderSettingsPage(workspaceId) {
 
     renderBackgroundSection(backgroundCard, workspaceId);
     renderProfileFields(profileCard);
+    renderRemindersSection(remindersCard);
     renderBackupSection(backupCard);
+}
+
+/**
+ * «Напоминания о дедлайнах» — уведомление Windows, когда до срока карточки
+ * остаётся меньше выбранного времени.
+ *
+ * Настройка одна на всё приложение, а не на пространство: уведомление приходит
+ * когда окно свёрнуто, и «какое пространство сейчас открыто» в этот момент
+ * ничего не значит.
+ */
+async function renderRemindersSection(container) {
+    container.appendChild(createElement('p', { className: 'form-hint' },
+        'Срок карточки истекает в конце указанного дня. Напоминание приходит один раз ' +
+        'и только пока приложение запущено — даже если окно свёрнуто.'));
+
+    let settings;
+    try {
+        settings = await api.getReminderSettings();
+    } catch (e) {
+        container.appendChild(createElement('p', { className: 'form-hint' }, 'Не удалось прочитать настройки напоминаний'));
+        return;
+    }
+
+    const toggleRow = createElement('label', { className: 'settings-reminders__toggle' });
+    const toggle = createElement('input', { type: 'checkbox', className: 'settings-reminders__checkbox' });
+    toggle.checked = settings.enabled;
+    toggleRow.appendChild(toggle);
+    toggleRow.appendChild(createElement('span', {}, 'Напоминать о приближающихся дедлайнах'));
+    container.appendChild(toggleRow);
+
+    const hoursGroup = createElement('div', { className: 'form-group' });
+    hoursGroup.appendChild(createElement('label', { className: 'form-label' }, 'За сколько предупреждать'));
+    const hoursSelect = createElement('select', { className: 'form-input' });
+    const choices = [
+        [2, 'За 2 часа'],
+        [6, 'За 6 часов'],
+        [24, 'За сутки'],
+        [48, 'За двое суток'],
+        [72, 'За трое суток'],
+        [168, 'За неделю'],
+    ];
+    for (const [value, label] of choices) {
+        const opt = createElement('option', { value: String(value) }, label);
+        if (settings.hours === value) opt.setAttribute('selected', 'selected');
+        hoursSelect.appendChild(opt);
+    }
+    // Значение из базы может не совпасть ни с одним пунктом — например, после
+    // правки файла руками. Тогда добавляем его отдельным пунктом, чтобы список
+    // не показывал одно, а база хранила другое.
+    if (!choices.some(([value]) => value === settings.hours)) {
+        const opt = createElement('option', { value: String(settings.hours) }, `За ${settings.hours} ч`);
+        opt.setAttribute('selected', 'selected');
+        hoursSelect.appendChild(opt);
+    }
+    hoursGroup.appendChild(hoursSelect);
+    container.appendChild(hoursGroup);
+
+    const syncEnabled = () => { hoursSelect.disabled = !toggle.checked; };
+    syncEnabled();
+
+    const save = async () => {
+        try {
+            const saved = await api.updateReminderSettings(toggle.checked, Number(hoursSelect.value));
+            // Бэкенд зажимает часы в допустимый диапазон, поэтому список
+            // приводится к тому, что действительно сохранилось.
+            hoursSelect.value = String(saved.hours);
+            showToast(saved.enabled ? 'Напоминания включены' : 'Напоминания выключены');
+        } catch (e) {
+            showToast('Не удалось сохранить настройку', 'error');
+        }
+    };
+
+    toggle.addEventListener('change', () => { syncEnabled(); save(); });
+    hoursSelect.addEventListener('change', save);
 }
 
 /**
@@ -277,6 +356,10 @@ function renderExportRow(container) {
     block.appendChild(createElement('p', { className: 'form-hint' },
         'Полная копия базы в выбранный вами файл — её можно унести на другой диск. ' +
         'Открывается любым просмотрщиком SQLite.'));
+    block.appendChild(createElement('p', { className: 'form-hint settings-export__warning' },
+        'Этот файл не зашифрован — в отличие от самой базы и автоматических копий. ' +
+        'Иначе он открывался бы только на этом компьютере и стал бы бесполезен ' +
+        'как раз тогда, когда понадобится. Храните его там, куда не дотянется чужой.'));
 
     container.appendChild(block);
 }

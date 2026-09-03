@@ -22,6 +22,7 @@ import { renderMistakesPage } from './mistakes.js';
 import { renderListPage } from './list.js';
 import { renderMembersPage } from './members.js';
 import { applyWorkspaceBackground } from './background.js';
+import { openPalette, closePalette, isPaletteOpen } from './palette.js';
 import { $, debounce, showToast } from './utils.js';
 
 let currentView = { name: 'hub', params: {} };
@@ -88,10 +89,34 @@ async function init() {
             navigateTo(view, params);
         });
 
+        initGlobalSearchShortcut();
+
     } catch (error) {
         console.error('Failed to initialize app:', error);
         showToast('Ошибка инициализации приложения', 'error');
     }
+}
+
+/**
+ * Ctrl+K — поиск по всему пространству.
+ *
+ * Обработчик живёт здесь, а не в самой палитре, по одной причине: только
+ * `app.js` знает, какое пространство открыто. Палитра получает id снаружи и не
+ * лезет в состояние маршрутизатора.
+ *
+ * Слушатель повешен на `keydown` в фазе перехвата: иначе поле ввода, из
+ * которого нажали, успело бы обработать событие первым.
+ */
+function initGlobalSearchShortcut() {
+    document.addEventListener('keydown', (e) => {
+        // `metaKey` — ради Cmd+K: приложение пока только для Windows, но
+        // привычка нажимать Cmd приезжает вместе с человеком.
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K' || e.code === 'KeyK')) {
+            e.preventDefault();
+            if (isPaletteOpen()) closePalette();
+            else openPalette(defaultWorkspaceId);
+        }
+    }, true);
 }
 
 /**
