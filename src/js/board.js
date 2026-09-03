@@ -387,8 +387,15 @@ function createColumnElement(colData) {
             'data-tooltip': 'Финальная колонка: карточку отсюда уже не вернуть'
         }));
     }
-    const title = createElement('span', { className: 'column__title' }, colData.name);
-    title.addEventListener('click', () => editColumnTitle(colData, title));
+    
+    const title = createElement('span', {
+        className: `column__title ${colData.is_required ? 'column__title--locked' : ''}`
+    }, colData.name);
+    if (colData.is_required) {
+        title.dataset.tooltip = 'Обязательная колонка — название менять нельзя';
+    } else {
+        title.addEventListener('click', () => editColumnTitle(colData, title));
+    }
     titleWrapper.appendChild(title);
     
     const count = createElement('span', { className: 'column__count' }, String(colData.cards.length));
@@ -475,36 +482,17 @@ function showColumnMenu(event, colData) {
     
     const menu = createElement('div', { className: 'context-menu' });
 
-    // ─── Финальная колонка ───
-    //
-    // Отдельный пункт, а не галочка в переименовании: название — косметика, а
-    // финальность меняет правила для каждой карточки, которая сюда попадёт.
-    const finalItem = createElement('div', {
-        className: 'context-menu__item',
-        innerHTML: colData.is_final
-            ? `${Icons.rotateCcw} <span>Снять финальный статус</span>`
-            : `${Icons.lock} <span>Сделать финальной</span>`,
-        'data-tooltip': colData.is_final
-            ? 'Карточки снова можно будет переносить из этой колонки'
-            : 'Карточку, попавшую сюда, нельзя будет вернуть на доску'
-    });
-    finalItem.addEventListener('click', async () => {
-        closePopovers();
-        // Значения снимаются до перерисовки: она собирает `columnsData` заново,
-        // и `colData` после неё — объект от прежнего рендера.
-        const wasFinal = colData.is_final;
-        const columnName = colData.name;
-        try {
-            await api.setColumnFinal(colData.id, !wasFinal);
-            await renderBoard(currentBoardId);
-            showToast(wasFinal
-                ? `Колонка «${columnName}» больше не финальная`
-                : `Колонка «${columnName}» стала финальной`);
-        } catch (e) {
-            showToast('Не удалось изменить статус колонки', 'error');
-        }
-    });
-    menu.appendChild(finalItem);
+    // Обязательную колонку нельзя ни архивировать, ни переименовать, поэтому
+    // меню у неё пустое — вместо кнопки, которая всё равно откажет, честная
+    // строчка о том, почему её нет (см. правило про заглушки в §5 заметок).
+    if (colData.is_required) {
+        menu.appendChild(createElement('div', {
+            className: 'context-menu__item context-menu__item--info',
+            innerHTML: `${Icons.lock} <span>Обязательная колонка — её нельзя убрать или переименовать</span>`
+        }));
+        openPopover(menu, event.currentTarget, { placement: 'bottom', align: 'start', gap: 4 });
+        return;
+    }
 
     const archiveItem = createElement('div', {
         className: 'context-menu__item context-menu__item--danger',
@@ -1091,7 +1079,18 @@ function initSortable() {
         scrollSpeed: 14,
         ghostClass: 'sortable-ghost',
         chosenClass: 'sortable-chosen',
-        filter: '.add-column',
+        // Финальную колонку не сдвинуть с последнего места — она конец доски.
+        filter: '.add-column, .column--final',
+        // ...и правее неё ничего не встаёт. Без этого «Закрыто» саму никто не
+        // трогает, но её легко обойти справа любой другой колонкой.
+        onMove: (evt) => {
+            if (evt.related
+                && evt.related.classList.contains('column--final')
+                && evt.willInsertAfter) {
+                return false;
+            }
+            return true;
+        },
         // See the note on the card Sortable below — the WebView2 host makes
         // native HTML5 drag unreliable, so drive drags from pointer events.
         forceFallback: true,
@@ -1104,6 +1103,11 @@ function initSortable() {
                 await api.reorderColumns(currentBoardId, columnIds);
             } catch (e) {
                 console.error('Failed to reorder columns:', e);
+                // Бэкенд отклонит порядок, в котором «Закрыто» не последняя.
+                // Порядок на экране в этот момент уже не тот, что в базе, —
+                // перерисовываем, иначе доска врала бы до перехода на неё.
+                showToast(typeof e === 'string' ? e : 'Не удалось изменить порядок колонок', 'error');
+                renderBoard(currentBoardId);
             }
         }
     });

@@ -39,6 +39,11 @@ pub struct Column {
     /// Проверяется в `update_card_position`, а не только в интерфейсе, — иначе
     /// «необратимо» держалось бы на одном лишь диалоге подтверждения.
     pub is_final: bool,
+    /// Колонка из обязательного костяка (`commands::REQUIRED_COLUMNS`): её
+    /// нельзя удалить и нельзя переименовать. Флаг отвечает за защиту самой
+    /// колонки, `is_final` — за судьбу карточек в ней; совпадают они только
+    /// на «Закрыто».
+    pub is_required: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -287,6 +292,10 @@ pub struct ColumnExport {
     /// поэтому `default` — файл без него читается как «обычная колонка».
     #[serde(default)]
     pub is_final: bool,
+    /// То же и для обязательности: иначе после переезда доски костяк
+    /// оказался бы незащищённым.
+    #[serde(default)]
+    pub is_required: bool,
     #[serde(default)]
     pub cards: Vec<CardExport>,
 }

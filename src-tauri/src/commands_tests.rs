@@ -235,6 +235,7 @@ fn import_skips_label_links_the_file_does_not_define() {
                 position: 0,
                 archived: 0,
                 is_final: false,
+                is_required: false,
                 cards: vec![CardExport {
                     title: "Карточка".into(),
                     description: String::new(),
@@ -2065,4 +2066,716 @@ fn a_file_written_before_final_columns_still_imports() {
 
     let after = build_board_export(&conn, new_id).unwrap();
     assert!(!after.board.columns[0].is_final, "колонка из старого файла — обычная");
+}
+
+// ─── Обязательный костяк колонок ───
+//
+// Раньше набор колонок по умолчанию жил на фронтенде в двух местах и в каждом
+// был свой. Теперь он один, в `create_board`, и тесты стерегут именно это: не
+// «команда что-то создала», а что именно и в каком порядке.
+
+/// Названия колонок доски по возрастанию позиции.
+fn column_names(conn: &Connection, board_id: i64) -> Vec<String> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM columns WHERE board_id = ?1 ORDER BY position ASC")
+        .unwrap();
+    let names = stmt
+        .query_map(params![board_id], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    names
+}
+
+fn column_id_by_name(conn: &Connection, board_id: i64, name: &str) -> i64 {
+    conn.query_row(
+        "SELECT id FROM columns WHERE board_id = ?1 AND name = ?2",
+        params![board_id, name],
+        |r| r.get(0),
+    ).unwrap()
+}
+
+/// Доска, заведённая до появления костяка: одна обычная колонка, флагов нет.
+fn legacy_board(conn: &Connection) -> (i64, i64) {
+    conn.execute(
+        "INSERT INTO boards (workspace_id, name) VALUES (1, 'Старая доска')",
+        (),
+    ).unwrap();
+    let board_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO columns (board_id, name, position) VALUES (?1, 'Всякое', 0)",
+        params![board_id],
+    ).unwrap();
+    (board_id, conn.last_insert_rowid())
+}
+
+#[test]
+fn a_new_board_gets_the_four_required_columns_in_order() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+
+    assert_eq!(
+        column_names(&conn, board.id),
+        vec!["Новые", "В работе", "Тестирование", "Закрыто"],
+    );
+
+    // Все четыре обязательны, финальная — ровно одна.
+    let required: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM columns WHERE board_id = ?1 AND is_required = 1",
+            params![board.id], |r| r.get(0),
+        ).unwrap();
+    assert_eq!(required, 4);
+
+    let final_name: String = conn
+        .query_row(
+            "SELECT name FROM columns WHERE board_id = ?1 AND is_final = 1",
+            params![board.id], |r| r.get(0),
+        ).unwrap();
+    assert_eq!(final_name, "Закрыто");
+}
+
+#[test]
+fn the_final_column_is_the_rightmost_one() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+
+    let last = column_names(&conn, board.id).pop().unwrap();
+    assert_eq!(last, "Закрыто");
+}
+
+#[test]
+fn a_required_column_can_be_neither_renamed_nor_archived_nor_deleted() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let testing = column_id_by_name(&conn, board.id, "Тестирование");
+
+    assert_eq!(rename_column_in(&conn, testing, "Проверка").unwrap_err(), ERR_COLUMN_IS_REQUIRED);
+    assert_eq!(archive_column_in(&conn, testing).unwrap_err(), ERR_COLUMN_IS_REQUIRED);
+    assert_eq!(delete_column_in(&mut conn, testing).unwrap_err(), ERR_COLUMN_IS_REQUIRED);
+
+    // Ни имя, ни сама колонка не пострадали ни от одной из трёх попыток.
+    assert_eq!(
+        column_names(&conn, board.id),
+        vec!["Новые", "В работе", "Тестирование", "Закрыто"],
+    );
+}
+
+#[test]
+fn an_ordinary_column_is_still_free_to_rename_and_remove() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let extra = create_column_in(&mut conn, board.id, "Черновик").unwrap();
+
+    rename_column_in(&conn, extra.id, "Идеи").unwrap();
+    assert!(column_names(&conn, board.id).contains(&"Идеи".to_string()));
+
+    delete_column_in(&mut conn, extra.id).unwrap();
+    assert_eq!(
+        column_names(&conn, board.id),
+        vec!["Новые", "В работе", "Тестирование", "Закрыто"],
+    );
+}
+
+#[test]
+fn a_new_column_lands_before_the_final_one() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+
+    create_column_in(&mut conn, board.id, "Ревью").unwrap();
+    create_column_in(&mut conn, board.id, "Демо").unwrap();
+
+    // Обе новые встали слева от «Закрыто», в порядке добавления.
+    assert_eq!(
+        column_names(&conn, board.id),
+        vec!["Новые", "В работе", "Тестирование", "Ревью", "Демо", "Закрыто"],
+    );
+}
+
+#[test]
+fn positions_stay_unique_after_inserting_before_the_final_column() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    create_column_in(&mut conn, board.id, "Ревью").unwrap();
+
+    // Позиции — ключ сортировки на доске; дубль означал бы, что порядок двух
+    // колонок решает случай.
+    let distinct: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT position) FROM columns WHERE board_id = ?1",
+            params![board.id], |r| r.get(0),
+        ).unwrap();
+    assert_eq!(distinct, 5);
+}
+
+#[test]
+fn a_column_still_lands_at_the_end_of_a_board_without_the_spine() {
+    let mut conn = test_db();
+    let (board_id, _) = legacy_board(&conn);
+
+    create_column_in(&mut conn, board_id, "Ещё одна").unwrap();
+
+    // Доска до миграции живёт по старым правилам, а не получает их наполовину.
+    assert_eq!(column_names(&conn, board_id), vec!["Всякое", "Ещё одна"]);
+}
+
+#[test]
+fn the_order_may_change_as_long_as_the_final_column_stays_last() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let new = column_id_by_name(&conn, board.id, "Новые");
+    let working = column_id_by_name(&conn, board.id, "В работе");
+    let testing = column_id_by_name(&conn, board.id, "Тестирование");
+    let closed = column_id_by_name(&conn, board.id, "Закрыто");
+
+    reorder_columns_in(&mut conn, board.id, &[working, new, testing, closed]).unwrap();
+    assert_eq!(
+        column_names(&conn, board.id),
+        vec!["В работе", "Новые", "Тестирование", "Закрыто"],
+    );
+}
+
+#[test]
+fn nothing_can_be_dragged_past_the_final_column() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let new = column_id_by_name(&conn, board.id, "Новые");
+    let working = column_id_by_name(&conn, board.id, "В работе");
+    let testing = column_id_by_name(&conn, board.id, "Тестирование");
+    let closed = column_id_by_name(&conn, board.id, "Закрыто");
+
+    // Порядок приезжает списком id, и список можно прислать любой — мимо
+    // Sortable, из «Списка» или напрямую.
+    let err = reorder_columns_in(&mut conn, board.id, &[new, working, closed, testing]).unwrap_err();
+    assert_eq!(err, ERR_FINAL_COLUMN_NOT_LAST);
+
+    assert_eq!(
+        column_names(&conn, board.id),
+        vec!["Новые", "В работе", "Тестирование", "Закрыто"],
+        "отклонённая перестановка не должна ничего сдвинуть"
+    );
+}
+
+#[test]
+fn reordering_a_board_without_a_spine_is_left_alone() {
+    let mut conn = test_db();
+    let (board_id, first) = legacy_board(&conn);
+    conn.execute(
+        "INSERT INTO columns (board_id, name, position) VALUES (?1, 'Второе', 1)",
+        params![board_id],
+    ).unwrap();
+    let second = conn.last_insert_rowid();
+
+    reorder_columns_in(&mut conn, board_id, &[second, first]).unwrap();
+    assert_eq!(column_names(&conn, board_id), vec!["Второе", "Всякое"]);
+}
+
+#[test]
+fn the_spine_flags_survive_an_export_round_trip() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+
+    let json = serde_json::to_string(&build_board_export(&conn, board.id).unwrap()).unwrap();
+    let parsed: BoardExport = serde_json::from_str(&json).unwrap();
+    let new_id = import_board_into(&mut conn, 1, parsed).unwrap();
+
+    let after = build_board_export(&conn, new_id).unwrap();
+    let flags: Vec<(bool, bool)> = after
+        .board
+        .columns
+        .iter()
+        .map(|c| (c.is_required, c.is_final))
+        .collect();
+    assert_eq!(flags, vec![(true, false), (true, false), (true, false), (true, true)]);
+
+    // И защита работает на перенесённой доске, а не только числится в поле.
+    let imported_testing = column_id_by_name(&conn, new_id, "Тестирование");
+    assert_eq!(
+        delete_column_in(&mut conn, imported_testing).unwrap_err(),
+        ERR_COLUMN_IS_REQUIRED
+    );
+}
+
+#[test]
+fn cards_cannot_leave_the_closed_column_of_a_fresh_board() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let new = column_id_by_name(&conn, board.id, "Новые");
+    let closed = column_id_by_name(&conn, board.id, "Закрыто");
+
+    let card = add_plain_card(&conn, new, "Задача", 0);
+    move_card_in(&mut conn, card, closed, 0).unwrap();
+
+    // Костяк и правило Фазы A сходятся здесь: «Закрыто» — единственный
+    // источник финальности, и она работает сразу, без всякой настройки.
+    assert_eq!(move_card_in(&mut conn, card, new, 0).unwrap_err(), ERR_CARD_IS_FINAL);
+}
+
+#[test]
+fn a_column_restored_from_the_archive_lands_before_the_final_one() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let extra = create_column_in(&mut conn, board.id, "Ревью").unwrap();
+
+    archive_column_in(&conn, extra.id).unwrap();
+    restore_column_in(&mut conn, extra.id).unwrap();
+
+    // Иначе одно нажатие в «Архиве доски» отправляло бы «Закрыто» в середину.
+    assert_eq!(
+        column_names(&conn, board.id),
+        vec!["Новые", "В работе", "Тестирование", "Ревью", "Закрыто"],
+    );
+}
+
+// ─── Миграция существующих досок к костяку ───
+//
+// Главное, что здесь проверяется, — не «колонки появились», а что **ничего
+// не пропало**: карточки остались в своих колонках и на своих местах, чужие
+// колонки не переименованы и не удалены. Формы досок взяты те, что реально
+// могли получиться: набор старой кнопки «Создать доску», наборы четырёх
+// прежних шаблонов, доска с уже существующей «Закрыто» не на месте.
+
+/// Доска с произвольными колонками, как её застала бы миграция: без флагов,
+/// позиции 0..n. Возвращает `(board_id, id колонок по порядку)`.
+fn board_with_columns(conn: &Connection, name: &str, columns: &[&str]) -> (i64, Vec<i64>) {
+    conn.execute(
+        "INSERT INTO boards (workspace_id, name) VALUES (1, ?1)",
+        params![name],
+    ).unwrap();
+    let board_id = conn.last_insert_rowid();
+
+    let mut ids = Vec::new();
+    for (position, column) in columns.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO columns (board_id, name, position) VALUES (?1, ?2, ?3)",
+            params![board_id, column, position as i64],
+        ).unwrap();
+        ids.push(conn.last_insert_rowid());
+    }
+    (board_id, ids)
+}
+
+/// Названия только живых колонок, в порядке показа.
+fn active_column_names(conn: &Connection, board_id: i64) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM columns WHERE board_id = ?1 AND archived = 0
+             ORDER BY position ASC, id ASC",
+        )
+        .unwrap();
+    let names = stmt
+        .query_map(params![board_id], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    names
+}
+
+fn report_for<'a>(reports: &'a [BoardSpineReport], board_id: i64) -> &'a BoardSpineReport {
+    reports
+        .iter()
+        .find(|r| r.board_id == board_id)
+        .expect("доска должна попасть в отчёт")
+}
+
+#[test]
+fn a_board_from_the_old_create_button_keeps_its_columns_and_gains_the_missing_ones() {
+    let conn = test_db();
+    // Ровно то, что создавала кнопка «Создать доску» до костяка.
+    let (board_id, _) = board_with_columns(
+        &conn, "LUSEXPRESS", &["Новые", "В работе", "На проверке", "Готово"],
+    );
+
+    let reports = ensure_required_columns_everywhere(&conn).unwrap();
+
+    // «На проверке» и «Готово» остались как были — их не переименовали в
+    // похожие обязательные и не убрали.
+    assert_eq!(
+        active_column_names(&conn, board_id),
+        vec!["Новые", "В работе", "Тестирование", "На проверке", "Готово", "Закрыто"],
+    );
+
+    let report = report_for(&reports, board_id);
+    assert_eq!(report.created, vec!["Тестирование", "Закрыто"]);
+    assert_eq!(report.flagged, vec!["Новые", "В работе"]);
+}
+
+#[test]
+fn an_old_template_board_gets_the_whole_spine_and_keeps_its_own_columns() {
+    let conn = test_db();
+    // Шаблон «Управление проектами» до костяка.
+    let (board_id, _) = board_with_columns(
+        &conn, "UGET", &["Бэклог", "В работе", "На проверке", "Готово"],
+    );
+
+    ensure_required_columns_everywhere(&conn).unwrap();
+
+    // Недостающие встают по смыслу, а не в хвост: «Новые» — в начало,
+    // «Тестирование» — сразу за «В работе».
+    assert_eq!(
+        active_column_names(&conn, board_id),
+        vec!["Новые", "Бэклог", "В работе", "Тестирование", "На проверке", "Готово", "Закрыто"],
+    );
+}
+
+#[test]
+fn not_a_single_card_moves() {
+    let conn = test_db();
+    let (board_id, columns) = board_with_columns(
+        &conn, "Доска с карточками", &["Бэклог", "В работе", "Готово"],
+    );
+
+    // По две карточки в каждой колонке, чтобы было видно и колонку, и порядок.
+    let mut placed = Vec::new();
+    for (i, column_id) in columns.iter().enumerate() {
+        for position in 0..2 {
+            let title = format!("Задача {}-{}", i, position);
+            let card = add_plain_card(&conn, *column_id, &title, position);
+            placed.push((card, *column_id, position));
+        }
+    }
+
+    ensure_required_columns_everywhere(&conn).unwrap();
+
+    for (card, column_id, position) in placed {
+        assert_eq!(
+            card_column_and_position(&conn, card),
+            (column_id, position),
+            "карточка {} уехала", card
+        );
+    }
+
+    // И ни одной карточки не появилось и не пропало.
+    let total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM cards c JOIN columns col ON col.id = c.column_id
+             WHERE col.board_id = ?1",
+            params![board_id], |r| r.get(0),
+        ).unwrap();
+    assert_eq!(total, 6);
+}
+
+#[test]
+fn an_existing_closed_column_is_kept_with_its_cards_and_moved_to_the_end() {
+    let conn = test_db();
+    let (board_id, columns) = board_with_columns(&conn, "Задом наперёд", &["Закрыто", "Новые"]);
+    let closed = columns[0];
+    let done_card = add_plain_card(&conn, closed, "Давно сделано", 0);
+
+    let reports = ensure_required_columns_everywhere(&conn).unwrap();
+
+    assert_eq!(
+        active_column_names(&conn, board_id),
+        vec!["Новые", "В работе", "Тестирование", "Закрыто"],
+    );
+    // Та же самая колонка, а не новая рядом: карточка осталась в ней.
+    assert_eq!(card_column_and_position(&conn, done_card).0, closed);
+
+    let report = report_for(&reports, board_id);
+    assert!(report.final_moved);
+    assert!(report.created.contains(&"В работе".to_string()));
+    assert!(!report.created.contains(&"Закрыто".to_string()));
+}
+
+#[test]
+fn an_empty_board_gets_all_four() {
+    let conn = test_db();
+    let (board_id, _) = board_with_columns(&conn, "Пустая", &[]);
+
+    let reports = ensure_required_columns_everywhere(&conn).unwrap();
+
+    assert_eq!(
+        active_column_names(&conn, board_id),
+        vec!["Новые", "В работе", "Тестирование", "Закрыто"],
+    );
+    assert_eq!(report_for(&reports, board_id).created.len(), 4);
+}
+
+#[test]
+fn the_migration_is_idempotent() {
+    let conn = test_db();
+    let (board_id, _) = board_with_columns(&conn, "Доска", &["Бэклог", "Готово"]);
+
+    ensure_required_columns_everywhere(&conn).unwrap();
+    let after_first = active_column_names(&conn, board_id);
+
+    // Миграция идёт при каждом запуске приложения — второй прогон обязан быть
+    // холостым, иначе доска обрастала бы колонками с каждым стартом.
+    let second = ensure_required_columns_everywhere(&conn).unwrap();
+
+    assert!(second.is_empty(), "второй прогон не должен ничего менять: {:?}", second);
+    assert_eq!(active_column_names(&conn, board_id), after_first);
+}
+
+#[test]
+fn a_board_that_already_matches_is_only_flagged_once() {
+    let conn = test_db();
+    let (board_id, _) = board_with_columns(
+        &conn, "Уже по канону", &["Новые", "В работе", "Тестирование", "Закрыто"],
+    );
+
+    let reports = ensure_required_columns_everywhere(&conn).unwrap();
+
+    let report = report_for(&reports, board_id);
+    assert!(report.created.is_empty(), "создавать было нечего");
+    assert!(!report.final_moved, "«Закрыто» и так последняя");
+    assert_eq!(report.flagged.len(), 4);
+
+    // Правила при этом заработали: колонку не удалить.
+    let testing = column_id_by_name(&conn, board_id, "Тестирование");
+    let mut conn = conn;
+    assert_eq!(delete_column_in(&mut conn, testing).unwrap_err(), ERR_COLUMN_IS_REQUIRED);
+}
+
+#[test]
+fn the_inbox_board_is_left_alone() {
+    let conn = test_db();
+    let inbox_column = crate::db::ensure_inbox_board(&conn, 1).unwrap();
+    let inbox_board: i64 = conn
+        .query_row("SELECT board_id FROM columns WHERE id = ?1", params![inbox_column], |r| r.get(0))
+        .unwrap();
+
+    ensure_required_columns_everywhere(&conn).unwrap();
+
+    // `get_inbox_column` берёт у служебной доски первую попавшуюся колонку —
+    // четыре канбан-этапа рядом сломали бы весь экран Inbox.
+    assert_eq!(active_column_names(&conn, inbox_board), vec!["Inbox"]);
+}
+
+#[test]
+fn an_archived_column_does_not_count_as_present() {
+    let conn = test_db();
+    let (board_id, columns) = board_with_columns(&conn, "С архивом", &["Новые", "Закрыто"]);
+    conn.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![columns[1]]).unwrap();
+
+    ensure_required_columns_everywhere(&conn).unwrap();
+
+    // Колонка в архиве — это убранная с доски колонка; засчитывать её значило
+    // бы оставить доску без видимой «Закрыто».
+    assert_eq!(
+        active_column_names(&conn, board_id),
+        vec!["Новые", "В работе", "Тестирование", "Закрыто"],
+    );
+    // Архивную при этом не тронули и не разархивировали.
+    let still_archived: i8 = conn
+        .query_row("SELECT archived FROM columns WHERE id = ?1", params![columns[1]], |r| r.get(0))
+        .unwrap();
+    assert_eq!(still_archived, 1);
+}
+
+#[test]
+fn a_column_finalised_by_hand_in_phase_a_loses_the_flag() {
+    let conn = test_db();
+    let (board_id, columns) = board_with_columns(&conn, "После Фазы A", &["Новые", "Готово"]);
+    // «Готово» пометили финальной вручную, пока такая кнопка существовала.
+    conn.execute("UPDATE columns SET is_final = 1 WHERE id = ?1", params![columns[1]]).unwrap();
+
+    let reports = ensure_required_columns_everywhere(&conn).unwrap();
+
+    assert_eq!(report_for(&reports, board_id).unfinalised, vec!["Готово"]);
+
+    // Источник финальности теперь один — иначе на доске остался бы запирающий
+    // этап, который уже нечем отменить.
+    let finals: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM columns WHERE board_id = ?1 AND is_final = 1")
+            .unwrap();
+        let rows = stmt.query_map(params![board_id], |r| r.get::<_, String>(0)).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    };
+    assert_eq!(finals, vec!["Закрыто"]);
+}
+
+#[test]
+fn duplicate_positions_are_renumbered_without_reshuffling() {
+    let conn = test_db();
+    let (board_id, columns) = board_with_columns(&conn, "Кривые позиции", &["Первая", "Вторая"]);
+    // У старых досок позиции бывают с дублями и дырами.
+    conn.execute("UPDATE columns SET position = 5 WHERE id = ?1", params![columns[0]]).unwrap();
+    conn.execute("UPDATE columns SET position = 5 WHERE id = ?1", params![columns[1]]).unwrap();
+
+    ensure_required_columns_everywhere(&conn).unwrap();
+
+    // Ничья разбита по id, то есть по порядку создания, а не случайно:
+    // «Первая» осталась левее «Второй». Костяк встал в начало целиком —
+    // якоря среди существующих колонок не нашлось.
+    assert_eq!(
+        active_column_names(&conn, board_id),
+        vec!["Новые", "В работе", "Тестирование", "Первая", "Вторая", "Закрыто"],
+    );
+    let distinct: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT position) FROM columns WHERE board_id = ?1 AND archived = 0",
+            params![board_id], |r| r.get(0),
+        ).unwrap();
+    assert_eq!(distinct, 6, "позиции должны стать уникальными");
+}
+
+#[test]
+fn an_archived_board_is_migrated_too() {
+    let conn = test_db();
+    let (board_id, _) = board_with_columns(&conn, "В архиве", &["Всякое"]);
+    conn.execute("UPDATE boards SET archived = 1 WHERE id = ?1", params![board_id]).unwrap();
+
+    ensure_required_columns_everywhere(&conn).unwrap();
+
+    // Доска в архиве — те же данные; восстановить её надо уже с костяком.
+    // Своя колонка доски осталась на месте, между костяком и «Закрыто».
+    assert_eq!(
+        active_column_names(&conn, board_id),
+        vec!["Новые", "В работе", "Тестирование", "Всякое", "Закрыто"],
+    );
+}
+
+#[test]
+fn every_old_template_shape_ends_up_with_a_working_spine() {
+    let conn = test_db();
+
+    // Все четыре набора, которые раздавали прежние шаблоны, плюс набор старой
+    // кнопки. Проверяется не порядок, а инвариант: на каждой доске ровно
+    // четыре обязательные колонки и «Закрыто» справа.
+    let shapes: [&[&str]; 5] = [
+        &["Бэклог", "В работе", "На проверке", "Готово"],
+        &["Сделать", "В процессе", "Готово"],
+        &["Новые", "В работе", "Тестирование", "Закрыто"],
+        &["Идеи", "Дизайн", "Разработка", "Завершено"],
+        &["Новые", "В работе", "На проверке", "Готово"],
+    ];
+
+    let mut boards = Vec::new();
+    for (i, shape) in shapes.iter().enumerate() {
+        let (board_id, _) = board_with_columns(&conn, &format!("Доска {}", i), shape);
+        boards.push(board_id);
+    }
+
+    ensure_required_columns_everywhere(&conn).unwrap();
+
+    for board_id in boards {
+        let names = active_column_names(&conn, board_id);
+        for required in REQUIRED_COLUMNS.iter() {
+            assert!(names.contains(&required.to_string()), "нет «{}» на доске {}", required, board_id);
+        }
+        assert_eq!(names.last().unwrap(), FINAL_COLUMN_NAME);
+
+        let required_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM columns
+                 WHERE board_id = ?1 AND archived = 0 AND is_required = 1",
+                params![board_id], |r| r.get(0),
+            ).unwrap();
+        assert_eq!(required_count, 4, "на доске {} обязательных не четыре", board_id);
+    }
+}
+
+/// Отчёт миграции на досках всех форм, которые реально могли получиться до
+/// костяка. Не проверяет ничего — печатает, что произойдёт с каждой формой.
+///
+/// Запуск:
+/// `cargo test --lib spine_migration_report -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn spine_migration_report() {
+    let conn = test_db();
+
+    // Формы: старая кнопка «Создать доску», четыре прежних шаблона, доска с
+    // «Закрыто» не на месте, доска с ручной финальностью времён Фазы A,
+    // пустая доска и доска, уже совпадающая с каноном.
+    let shapes: Vec<(&str, Vec<&str>)> = vec![
+        ("Кнопка «Создать доску»", vec!["Новые", "В работе", "На проверке", "Готово"]),
+        ("Шаблон «Управление проектами»", vec!["Бэклог", "В работе", "На проверке", "Готово"]),
+        ("Шаблон «Kanban»", vec!["Сделать", "В процессе", "Готово"]),
+        ("Шаблон «Отслеживание ошибок»", vec!["Новые", "В работе", "Тестирование", "Закрыто"]),
+        ("Шаблон «Дизайн-процесс»", vec!["Идеи", "Дизайн", "Разработка", "Завершено"]),
+        ("«Закрыто» не последняя", vec!["Закрыто", "Новые", "В работе"]),
+        ("С ручной финальностью (Фаза A)", vec!["Новые", "Готово"]),
+        ("Пустая доска", vec![]),
+    ];
+
+    let mut before = Vec::new();
+    for (name, columns) in &shapes {
+        let (board_id, ids) = board_with_columns(&conn, name, columns);
+        // Карточки, чтобы было видно: миграция их не трогает.
+        for (i, column_id) in ids.iter().enumerate() {
+            add_plain_card(&conn, *column_id, &format!("Задача {}", i), 0);
+        }
+        if *name == "С ручной финальностью (Фаза A)" {
+            conn.execute(
+                "UPDATE columns SET is_final = 1 WHERE id = ?1",
+                params![ids[1]],
+            ).unwrap();
+        }
+        before.push((board_id, name.to_string(), columns.join(" | ")));
+    }
+
+    let cards_before: i64 = conn.query_row("SELECT COUNT(*) FROM cards", [], |r| r.get(0)).unwrap();
+    let reports = ensure_required_columns_everywhere(&conn).unwrap();
+    let cards_after: i64 = conn.query_row("SELECT COUNT(*) FROM cards", [], |r| r.get(0)).unwrap();
+
+    println!("\n================ ОТЧЁТ МИГРАЦИИ КОСТЯКА ================");
+    println!("Досок в базе: {}, затронуто: {}", before.len(), reports.len());
+    println!("Карточек до: {}, после: {}\n", cards_before, cards_after);
+
+    for (board_id, name, was) in &before {
+        println!("── {} ──", name);
+        println!("   было:  {}", if was.is_empty() { "(нет колонок)" } else { was });
+        println!("   стало: {}", active_column_names(&conn, *board_id).join(" | "));
+        match reports.iter().find(|r| r.board_id == *board_id) {
+            None => println!("   действий: нет, доска уже соответствовала"),
+            Some(r) => {
+                if !r.created.is_empty() {
+                    println!("   создано пустых: {}", r.created.join(", "));
+                }
+                if !r.flagged.is_empty() {
+                    println!("   помечено существующих: {}", r.flagged.join(", "));
+                }
+                if r.final_moved {
+                    println!("   «Закрыто» переставлена в конец");
+                }
+                if !r.unfinalised.is_empty() {
+                    println!("   снята ручная финальность: {}", r.unfinalised.join(", "));
+                }
+            }
+        }
+        println!();
+    }
+
+    println!("Второй прогон (проверка идемпотентности): {} затронутых досок",
+        ensure_required_columns_everywhere(&conn).unwrap().len());
+    println!("=======================================================\n");
+
+    assert_eq!(cards_before, cards_after, "миграция не должна трогать карточки");
+}
+
+#[test]
+fn a_migrated_board_is_not_rewritten_on_every_start() {
+    let conn = test_db();
+    let (board_id, _) = board_with_columns(&conn, "Доска", &["Бэклог"]);
+    ensure_required_columns_everywhere(&conn).unwrap();
+
+    // Позиции после первой миграции запоминаем целиком: второй прогон не
+    // должен трогать ни одной строки — иначе каждый запуск приложения
+    // переписывал бы все колонки всех досок впустую.
+    let snapshot: Vec<(i64, i64, i8, i8)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, position, is_required, is_final FROM columns WHERE board_id = ?1 ORDER BY id",
+        ).unwrap();
+        let rows = stmt.query_map(params![board_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        }).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    };
+
+    let second = ensure_required_columns_everywhere(&conn).unwrap();
+    assert!(second.is_empty());
+
+    let after: Vec<(i64, i64, i8, i8)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, position, is_required, is_final FROM columns WHERE board_id = ?1 ORDER BY id",
+        ).unwrap();
+        let rows = stmt.query_map(params![board_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        }).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    };
+    assert_eq!(snapshot, after);
 }

@@ -133,15 +133,44 @@ pub fn get_board(id: i64, state: State<'_, DbState>) -> CmdResult<Board> {
 
 #[tauri::command]
 pub fn create_board(workspace_id: i64, name: String, gradient: String, state: State<'_, DbState>) -> CmdResult<Board> {
-    let conn = state.conn.lock().unwrap();
-    conn.execute(
+    let mut conn = state.conn.lock().unwrap();
+    create_board_in(&mut conn, workspace_id, &name, &gradient)
+}
+
+/// Создаёт доску вместе с обязательным костяком колонок — в одной транзакции,
+/// так что доски без костяка не бывает даже при сбое посередине.
+///
+/// Раньше колонки дописывал фронтенд после `createBoard`, каждый экран своим
+/// списком: `hub.js` создавал «Новые/В работе/На проверке/Готово», шаблоны —
+/// свои наборы. Отсюда и разнобой, который теперь разгребает миграция.
+fn create_board_in(
+    conn: &mut rusqlite::Connection,
+    workspace_id: i64,
+    name: &str,
+    gradient: &str,
+) -> CmdResult<Board> {
+    let tx = conn.transaction().map_err(to_string_err)?;
+
+    tx.execute(
         "INSERT INTO boards (workspace_id, name, gradient) VALUES (?1, ?2, ?3)",
         params![workspace_id, name, gradient],
     ).map_err(to_string_err)?;
+    let id = tx.last_insert_rowid();
 
-    let id = conn.last_insert_rowid();
+    for (position, column_name) in REQUIRED_COLUMNS.iter().enumerate() {
+        let is_final = *column_name == FINAL_COLUMN_NAME;
+        tx.execute(
+            "INSERT INTO columns (board_id, name, position, is_required, is_final)
+             VALUES (?1, ?2, ?3, 1, ?4)",
+            params![id, column_name, position as i64, is_final as i64],
+        ).map_err(to_string_err)?;
+    }
+
+    tx.commit().map_err(to_string_err)?;
+
     Ok(Board {
-        id, workspace_id, name, gradient, is_starred: false, created_at: "".into(), archived: 0, is_system: false
+        id, workspace_id, name: name.to_string(), gradient: gradient.to_string(),
+        is_starred: false, created_at: "".into(), archived: 0, is_system: false
     })
 }
 
@@ -183,8 +212,27 @@ pub fn restore_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
 }
 
 // ─── Columns ───
+//
+// Костяк колонок один на все доски. Он не настройка и не шаблон: доска без
+// него не создаётся, а его колонки нельзя ни удалить, ни переименовать.
+// Раньше набор по умолчанию лежал в двух местах фронтенда (`hub.js` и
+// `templates.js`) и в каждом был свой — отсюда и разнобой на существующих
+// досках.
 
-const COLUMN_COLUMNS: &str = "id, board_id, name, position, created_at, archived, is_final";
+/// Обязательные колонки любой доски, в этом порядке.
+pub const REQUIRED_COLUMNS: [&str; 4] = ["Новые", "В работе", "Тестирование", "Закрыто"];
+
+/// Последняя из обязательных: она же единственная финальная в системе и
+/// всегда крайняя правая на доске.
+pub const FINAL_COLUMN_NAME: &str = "Закрыто";
+
+pub const ERR_COLUMN_IS_REQUIRED: &str =
+    "Это одна из обязательных колонок — её нельзя удалить или переименовать";
+
+pub const ERR_FINAL_COLUMN_NOT_LAST: &str =
+    "Колонка «Закрыто» должна оставаться последней на доске";
+
+const COLUMN_COLUMNS: &str = "id, board_id, name, position, created_at, archived, is_final, is_required";
 
 fn row_to_column(row: &rusqlite::Row) -> rusqlite::Result<Column> {
     Ok(Column {
@@ -195,7 +243,33 @@ fn row_to_column(row: &rusqlite::Row) -> rusqlite::Result<Column> {
         created_at: row.get(4)?,
         archived: row.get(5)?,
         is_final: { let f: i8 = row.get(6)?; f != 0 },
+        is_required: { let r: i8 = row.get(7)?; r != 0 },
     })
+}
+
+/// Обязательна ли колонка. Отдельная функция, потому что спрашивают об этом
+/// три команды подряд — архивирование, удаление и переименование.
+fn column_is_required(conn: &rusqlite::Connection, id: i64) -> CmdResult<bool> {
+    let flag: i8 = conn
+        .query_row("SELECT is_required FROM columns WHERE id = ?1", params![id], |row| row.get(0))
+        .map_err(to_string_err)?;
+    Ok(flag != 0)
+}
+
+/// Id обязательной финальной колонки доски, если она на ней есть.
+///
+/// У досок, созданных до костяка, её нет — до миграции они живут по-старому,
+/// и правило «Закрыто» справа» к ним просто не применяется.
+fn final_column_of_board(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM columns WHERE board_id = ?1 AND is_required = 1 AND is_final = 1 LIMIT 1",
+        params![board_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 #[tauri::command]
@@ -216,58 +290,116 @@ pub fn get_columns(board_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Co
 
 #[tauri::command]
 pub fn create_column(board_id: i64, name: String, state: State<'_, DbState>) -> CmdResult<Column> {
-    let conn = state.conn.lock().unwrap();
+    let mut conn = state.conn.lock().unwrap();
+    create_column_in(&mut conn, board_id, &name)
+}
 
-    // Get max position
-    let pos: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(position), -1) + 1 FROM columns WHERE board_id = ?1",
-        params![board_id],
-        |row| row.get(0)
-    ).unwrap_or(0);
+/// Добавляет колонку **перед** «Закрыто», а не в конец доски.
+///
+/// «Закрыто» обязана оставаться крайней правой: это конец пути карточки, и
+/// этап после конца пути смысла не имеет. На досках, где костяка ещё нет,
+/// колонка по-прежнему встаёт последней.
+fn create_column_in(conn: &mut rusqlite::Connection, board_id: i64, name: &str) -> CmdResult<Column> {
+    let tx = conn.transaction().map_err(to_string_err)?;
 
-    conn.execute(
+    let final_id = final_column_of_board(&tx, board_id).map_err(to_string_err)?;
+
+    let pos: i64 = match final_id {
+        Some(final_id) => {
+            // Место «Закрыто» и достаётся новой колонке, а сама «Закрыто»
+            // (и всё, что каким-то образом оказалось правее) съезжает вправо.
+            let final_pos: i64 = tx.query_row(
+                "SELECT position FROM columns WHERE id = ?1",
+                params![final_id],
+                |row| row.get(0),
+            ).map_err(to_string_err)?;
+            tx.execute(
+                "UPDATE columns SET position = position + 1 WHERE board_id = ?1 AND position >= ?2",
+                params![board_id, final_pos],
+            ).map_err(to_string_err)?;
+            final_pos
+        }
+        None => tx.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM columns WHERE board_id = ?1",
+            params![board_id],
+            |row| row.get(0),
+        ).unwrap_or(0),
+    };
+
+    tx.execute(
         "INSERT INTO columns (board_id, name, position) VALUES (?1, ?2, ?3)",
         params![board_id, name, pos],
     ).map_err(to_string_err)?;
+    let id = tx.last_insert_rowid();
 
-    let id = conn.last_insert_rowid();
-    Ok(Column { id, board_id, name, position: pos, created_at: "".into(), archived: 0, is_final: false })
+    tx.commit().map_err(to_string_err)?;
+
+    Ok(Column {
+        id, board_id, name: name.to_string(), position: pos,
+        created_at: "".into(), archived: 0, is_final: false, is_required: false,
+    })
 }
 
 #[tauri::command]
 pub fn update_column(id: i64, name: String, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
-    conn.execute("UPDATE columns SET name = ?1 WHERE id = ?2", params![name, id]).map_err(to_string_err)?;
+    rename_column_in(&conn, id, &name)
+}
+
+fn rename_column_in(conn: &rusqlite::Connection, id: i64, name: &str) -> CmdResult<()> {
+    // Костяк одинаков на всех досках — иначе «Тестирование» на одной доске и
+    // «Тестирование» на другой перестали бы значить одно и то же, а весь
+    // смысл обязательных колонок в том, что они сравнимы между досками.
+    if column_is_required(conn, id)? {
+        return Err(ERR_COLUMN_IS_REQUIRED.to_string());
+    }
+    conn.execute("UPDATE columns SET name = ?1 WHERE id = ?2", params![name, id])
+        .map_err(to_string_err)?;
     Ok(())
 }
 
-/// Помечает колонку финальной или снимает пометку.
-///
-/// Отдельная команда, а не поле в `update_column`: переименование колонки —
-/// косметика, а финальность меняет правила для всех карточек, которые в неё
-/// попадут. Смешивать их в одном вызове значит менять правила случайной
-/// опечаткой в названии.
-#[tauri::command]
-pub fn set_column_final(id: i64, is_final: bool, state: State<'_, DbState>) -> CmdResult<()> {
-    let conn = state.conn.lock().unwrap();
-    conn.execute(
-        "UPDATE columns SET is_final = ?1 WHERE id = ?2",
-        params![is_final as i64, id],
-    ).map_err(to_string_err)?;
-    Ok(())
-}
+// Команды `set_column_final` больше нет. Финальность перестала быть выбором:
+// её носит ровно одна колонка костяка — «Закрыто», — и снять её нельзя ничем,
+// потому что нечему.
 
 #[tauri::command]
 pub fn archive_column(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
-    conn.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![id]).map_err(to_string_err)?;
+    archive_column_in(&conn, id)
+}
+
+fn archive_column_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<()> {
+    // Архив для колонки — это и есть удаление с доски, поэтому проверка та же,
+    // что и в `delete_column`.
+    if column_is_required(conn, id)? {
+        return Err(ERR_COLUMN_IS_REQUIRED.to_string());
+    }
+    conn.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![id])
+        .map_err(to_string_err)?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn reorder_columns(board_id: i64, column_ids: Vec<i64>, state: State<'_, DbState>) -> CmdResult<()> {
     let mut conn = state.conn.lock().unwrap();
+    reorder_columns_in(&mut conn, board_id, &column_ids)
+}
+
+fn reorder_columns_in(
+    conn: &mut rusqlite::Connection,
+    board_id: i64,
+    column_ids: &[i64],
+) -> CmdResult<()> {
     let tx = conn.transaction().map_err(to_string_err)?;
+
+    // Перетащить что-нибудь правее «Закрыто» нельзя: конец доски — это конец
+    // пути. Фронтенд не даёт этого сделать мышью, но порядок приезжает сюда
+    // списком id, и список можно прислать любой.
+    if let Some(final_id) = final_column_of_board(&tx, board_id).map_err(to_string_err)? {
+        if column_ids.contains(&final_id) && column_ids.last() != Some(&final_id) {
+            return Err(ERR_FINAL_COLUMN_NOT_LAST.to_string());
+        }
+    }
 
     for (i, id) in column_ids.iter().enumerate() {
         tx.execute(
@@ -278,6 +410,249 @@ pub fn reorder_columns(board_id: i64, column_ids: Vec<i64>, state: State<'_, DbS
 
     tx.commit().map_err(to_string_err)?;
     Ok(())
+}
+
+// ─── Миграция: костяк на существующих досках ───
+//
+// Доски, заведённые до костяка, приводятся к нему один раз — при старте
+// приложения, из `db::create_schema`. Правило намеренно осторожное:
+// **ничего не удаляем и не переименовываем**. Была на доске «Готово» или
+// «Бэклог» — остаётся обычной колонкой, а рядом появляется обязательная.
+// Дубли по смыслу — осознанная цена за нулевую потерю данных.
+
+/// Что миграция сделала с одной доской.
+#[derive(Debug, Default, PartialEq)]
+pub struct BoardSpineReport {
+    pub board_id: i64,
+    pub board_name: String,
+    /// Колонки, которые уже были на доске под нужным именем: им только
+    /// проставлены флаги, карточки и соседи не тронуты.
+    pub flagged: Vec<String>,
+    /// Колонки, созданные пустыми, потому что таких на доске не было.
+    pub created: Vec<String>,
+    /// «Закрыто» пришлось переставить в конец доски.
+    pub final_moved: bool,
+    /// Колонки, с которых снят ручной `is_final` времён Фазы A: финальной
+    /// теперь может быть только «Закрыто».
+    pub unfinalised: Vec<String>,
+}
+
+impl BoardSpineReport {
+    /// Тронула ли миграция эту доску вообще.
+    pub fn is_noop(&self) -> bool {
+        self.created.is_empty()
+            && self.flagged.is_empty()
+            && !self.final_moved
+            && self.unfinalised.is_empty()
+    }
+}
+
+/// Приводит к костяку все пользовательские доски базы.
+///
+/// Идемпотентна: со второго запуска не находит работы и возвращает пустой
+/// отчёт. Служебные доски Inbox (`is_system = 1`) пропускаются — там одна
+/// колонка-приёмник, и четыре канбан-этапа в ней сломали бы
+/// `get_inbox_column`, который берёт у такой доски первую попавшуюся колонку.
+///
+/// Архивные доски обрабатываются наравне с активными: доска в архиве — те же
+/// данные, и восстановить её надо уже с костяком.
+pub fn ensure_required_columns_everywhere(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<Vec<BoardSpineReport>> {
+    let boards: Vec<(i64, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, name FROM boards WHERE is_system = 0 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    // Одна транзакция на всю миграцию: половина приведённых досок хуже, чем
+    // ни одной — при следующем запуске не понять, что уже сделано.
+    let tx = conn.unchecked_transaction()?;
+
+    let mut reports = Vec::new();
+    for (board_id, board_name) in boards {
+        let report = ensure_board_spine(&tx, board_id, &board_name)?;
+        if !report.is_noop() {
+            reports.push(report);
+        }
+    }
+
+    tx.commit()?;
+    Ok(reports)
+}
+
+/// Место в будущем порядке колонок: существующая строка или ещё не созданная.
+enum Slot {
+    Existing(i64),
+    New(&'static str),
+}
+
+/// Одна колонка доски в том виде, в каком её застала миграция.
+struct ExistingColumn {
+    id: i64,
+    name: String,
+    is_required: bool,
+}
+
+fn ensure_board_spine(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    board_name: &str,
+) -> rusqlite::Result<BoardSpineReport> {
+    let mut report = BoardSpineReport {
+        board_id,
+        board_name: board_name.to_string(),
+        ..Default::default()
+    };
+
+    // Порядок показа доски: тот же ключ сортировки, что и в `get_columns`,
+    // плюс id как разбиватель ничьей — у старых досок позиции бывают с
+    // дублями, и без него порядок решал бы случай.
+    //
+    // Архивные колонки не участвуют: колонка в архиве — это убранная с доски
+    // колонка, и одноимённая ей не считается «уже имеющейся».
+    let existing: Vec<ExistingColumn> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, is_required FROM columns
+             WHERE board_id = ?1 AND archived = 0
+             ORDER BY position ASC, id ASC",
+        )?;
+        let rows = stmt.query_map(params![board_id], |row| {
+            Ok(ExistingColumn {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                is_required: { let r: i8 = row.get(2)?; r != 0 },
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    // Совпадение по точному имени; при дублях берётся самая левая колонка.
+    let find = |name: &str| -> Option<&ExistingColumn> {
+        existing.iter().find(|c| c.name == name)
+    };
+
+    // Быстрый выход для доски, уже приведённой к костяку. Миграция идёт при
+    // каждом запуске, и без него она переписывала бы позиции и флаги всех
+    // колонок всех досок каждый раз — работа впустую и лишние правки файла.
+    let spine_complete = REQUIRED_COLUMNS
+        .iter()
+        .all(|name| find(name).is_some_and(|c| c.is_required));
+    let final_is_last = existing.last().is_some_and(|c| c.name == FINAL_COLUMN_NAME);
+    let no_stray_finals: bool = {
+        let strays: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM columns
+             WHERE board_id = ?1 AND is_final = 1 AND is_required = 0",
+            params![board_id],
+            |row| row.get(0),
+        )?;
+        strays == 0
+    };
+    if spine_complete && final_is_last && no_stray_finals {
+        return Ok(report);
+    }
+
+    let mut order: Vec<Slot> = existing.iter().map(|c| Slot::Existing(c.id)).collect();
+    let index_of = |order: &Vec<Slot>, id: i64| -> Option<usize> {
+        order.iter().position(|slot| matches!(slot, Slot::Existing(x) if *x == id))
+    };
+
+    // Три рабочих этапа. Отсутствующий встаёт сразу за предыдущим
+    // обязательным — так «Тестирование» оказывается после «В работе», а не в
+    // хвосте доски. Существующие не двигаются: их взаимный порядок с прочими
+    // колонками — решение пользователя, а не миграции.
+    let mut anchor: Option<usize> = None;
+    for name in REQUIRED_COLUMNS.iter().take(REQUIRED_COLUMNS.len() - 1) {
+        match find(name) {
+            Some(column) => {
+                if !column.is_required {
+                    report.flagged.push((*name).to_string());
+                }
+                anchor = index_of(&order, column.id);
+            }
+            None => {
+                report.created.push((*name).to_string());
+                let at = anchor.map(|i| i + 1).unwrap_or(0);
+                order.insert(at, Slot::New(name));
+                anchor = Some(at);
+            }
+        }
+    }
+
+    // «Закрыто» — всегда последняя, даже если она на доске уже была.
+    match find(FINAL_COLUMN_NAME) {
+        Some(column) => {
+            if !column.is_required {
+                report.flagged.push(FINAL_COLUMN_NAME.to_string());
+            }
+            let at = index_of(&order, column.id).expect("колонка есть среди существующих");
+            if at != order.len() - 1 {
+                report.final_moved = true;
+            }
+            let slot = order.remove(at);
+            order.push(slot);
+        }
+        None => {
+            report.created.push(FINAL_COLUMN_NAME.to_string());
+            order.push(Slot::New(FINAL_COLUMN_NAME));
+        }
+    }
+
+    // Создание недостающих и простановка позиций одним проходом. Позиции
+    // переписываются подряд с нуля: у старых досок они бывают с дырами и
+    // дублями, а взаимный порядок при этом сохраняется.
+    for (position, slot) in order.iter().enumerate() {
+        let position = position as i64;
+        match slot {
+            Slot::Existing(id) => {
+                conn.execute(
+                    "UPDATE columns SET position = ?1 WHERE id = ?2",
+                    params![position, id],
+                )?;
+            }
+            Slot::New(name) => {
+                let is_final = *name == FINAL_COLUMN_NAME;
+                conn.execute(
+                    "INSERT INTO columns (board_id, name, position, is_required, is_final)
+                     VALUES (?1, ?2, ?3, 1, ?4)",
+                    params![board_id, name, position, is_final as i64],
+                )?;
+            }
+        }
+    }
+
+    // Флаги по имени: под них попадают и созданные только что, и те, что уже
+    // были на доске. Повторный запуск здесь ничего не меняет.
+    for name in REQUIRED_COLUMNS.iter() {
+        let is_final = *name == FINAL_COLUMN_NAME;
+        conn.execute(
+            "UPDATE columns SET is_required = 1, is_final = ?1
+             WHERE board_id = ?2 AND name = ?3 AND archived = 0",
+            params![is_final as i64, board_id, name],
+        )?;
+    }
+
+    // Ручная финальность времён Фазы A снимается: источник финальности теперь
+    // один — «Закрыто». Иначе на доске остался бы запирающий этап, который
+    // пользователь уже не может ни увидеть в меню, ни отменить.
+    {
+        let mut stmt = conn.prepare(
+            "SELECT name FROM columns
+             WHERE board_id = ?1 AND is_final = 1 AND is_required = 0",
+        )?;
+        let rows = stmt.query_map(params![board_id], |row| row.get::<_, String>(0))?;
+        report.unfinalised = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    }
+    if !report.unfinalised.is_empty() {
+        conn.execute(
+            "UPDATE columns SET is_final = 0 WHERE board_id = ?1 AND is_required = 0",
+            params![board_id],
+        )?;
+    }
+
+    Ok(report)
 }
 
 // ─── Cards ───
@@ -598,11 +973,11 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .map_err(to_string_err)?;
 
     let mut column_stmt = conn
-        .prepare("SELECT id, name, position, archived, is_final FROM columns WHERE board_id = ?1 ORDER BY position ASC")
+        .prepare("SELECT id, name, position, archived, is_final, is_required FROM columns WHERE board_id = ?1 ORDER BY position ASC")
         .map_err(to_string_err)?;
-    let raw_columns: Vec<(i64, String, i64, i8, i8)> = column_stmt
+    let raw_columns: Vec<(i64, String, i64, i8, i8, i8)> = column_stmt
         .query_map(params![board_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
         })
         .map_err(to_string_err)?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -637,7 +1012,7 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .map_err(to_string_err)?;
 
     let mut columns = Vec::new();
-    for (column_id, name, position, archived, is_final) in raw_columns {
+    for (column_id, name, position, archived, is_final, is_required) in raw_columns {
         // (card id, card without its labels) — the ids are needed for the
         // card_labels lookup below and then dropped.
         let raw_cards: Vec<(i64, CardExport)> = card_stmt
@@ -698,7 +1073,12 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
             cards.push(card);
         }
 
-        columns.push(ColumnExport { name, position, archived, is_final: is_final != 0, cards });
+        columns.push(ColumnExport {
+            name, position, archived,
+            is_final: is_final != 0,
+            is_required: is_required != 0,
+            cards,
+        });
     }
 
     let exported_at: String = conn
@@ -822,8 +1202,12 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
 
     for (col_index, column) in export.board.columns.iter().enumerate() {
         tx.execute(
-            "INSERT INTO columns (board_id, name, position, archived, is_final) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![board_id, column.name, col_index as i64, column.archived, column.is_final as i64],
+            "INSERT INTO columns (board_id, name, position, archived, is_final, is_required)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                board_id, column.name, col_index as i64, column.archived,
+                column.is_final as i64, column.is_required as i64
+            ],
         ).map_err(to_string_err)?;
         let column_id = tx.last_insert_rowid();
 
@@ -1283,7 +1667,8 @@ fn build_workspace_card_list(conn: &rusqlite::Connection, workspace_id: i64) -> 
     // columns of its own board.
     let mut col_stmt = conn.prepare(
         "SELECT b.id, b.name, b.is_system,
-                col.id, col.board_id, col.name, col.position, col.created_at, col.archived, col.is_final
+                col.id, col.board_id, col.name, col.position, col.created_at, col.archived,
+                col.is_final, col.is_required
          FROM boards b
          LEFT JOIN columns col ON col.board_id = b.id AND col.archived = 0
          WHERE b.workspace_id = ?1 AND b.archived = 0
@@ -1302,6 +1687,7 @@ fn build_workspace_card_list(conn: &rusqlite::Connection, workspace_id: i64) -> 
                 created_at: row.get(7)?,
                 archived: row.get(8)?,
                 is_final: { let f: i8 = row.get(9)?; f != 0 },
+                is_required: { let r: i8 = row.get(10)?; r != 0 },
             }),
             None => None,
         };
@@ -1598,6 +1984,10 @@ pub fn restore_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
 #[tauri::command]
 pub fn restore_column(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let mut conn = state.conn.lock().unwrap();
+    restore_column_in(&mut conn, id)
+}
+
+fn restore_column_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     let tx = conn.transaction().map_err(to_string_err)?;
 
     let board_id: i64 = tx.query_row(
@@ -1606,11 +1996,28 @@ pub fn restore_column(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
         |row| row.get(0),
     ).map_err(|e| format!("Колонка не найдена: {}", e))?;
 
-    let position: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(position), -1) + 1 FROM columns WHERE board_id = ?1 AND archived = 0",
-        params![board_id],
-        |row| row.get(0),
-    ).unwrap_or(0);
+    // Возвращённая из архива колонка встаёт туда же, куда встала бы новая, —
+    // перед «Закрыто». Класть её в самый конец значило бы одним нажатием в
+    // «Архиве доски» отправить финальную колонку в середину доски.
+    let position: i64 = match final_column_of_board(&tx, board_id).map_err(to_string_err)? {
+        Some(final_id) => {
+            let final_pos: i64 = tx.query_row(
+                "SELECT position FROM columns WHERE id = ?1",
+                params![final_id],
+                |row| row.get(0),
+            ).map_err(to_string_err)?;
+            tx.execute(
+                "UPDATE columns SET position = position + 1 WHERE board_id = ?1 AND position >= ?2",
+                params![board_id, final_pos],
+            ).map_err(to_string_err)?;
+            final_pos
+        }
+        None => tx.query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM columns WHERE board_id = ?1 AND archived = 0",
+            params![board_id],
+            |row| row.get(0),
+        ).unwrap_or(0),
+    };
 
     tx.execute(
         "UPDATE columns SET archived = 0, position = ?1 WHERE id = ?2",
@@ -1638,6 +2045,13 @@ pub fn delete_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
 #[tauri::command]
 pub fn delete_column(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let mut conn = state.conn.lock().unwrap();
+    delete_column_in(&mut conn, id)
+}
+
+fn delete_column_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
+    if column_is_required(conn, id)? {
+        return Err(ERR_COLUMN_IS_REQUIRED.to_string());
+    }
     let tx = conn.transaction().map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM card_labels WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",

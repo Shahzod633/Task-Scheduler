@@ -61,6 +61,11 @@ export async function getBoard(id) {
     return await invoke('get_board', { id });
 }
 
+/**
+ * Создаёт доску вместе с обязательным костяком колонок
+ * (Новые → В работе → Тестирование → Закрыто) — их дописывает бэкенд в той же
+ * транзакции, отдельно создавать не нужно.
+ */
 export async function createBoard(workspaceId, name, gradient) {
     return await invoke('create_board', { workspaceId, name, gradient });
 }
@@ -87,6 +92,10 @@ export async function getColumns(boardId) {
     return await invoke('get_columns', { boardId });
 }
 
+/**
+ * Добавляет колонку на доску — **перед** «Закрыто», а не в самый конец:
+ * финальная колонка всегда остаётся крайней правой.
+ */
 export async function createColumn(boardId, name) {
     return await invoke('create_column', { boardId, name });
 }
@@ -101,16 +110,6 @@ export async function reorderColumns(boardId, columnIds) {
 
 export async function archiveColumn(id) {
     return await invoke('archive_column', { id });
-}
-
-/**
- * Помечает колонку финальной (или снимает пометку).
- *
- * Карточка, доехавшая до финальной колонки, обратно уже не уезжает — это
- * проверяет `update_card_position` на бэкенде, а не только интерфейс.
- */
-export async function setColumnFinal(id, isFinal) {
-    return await invoke('set_column_final', { id, isFinal });
 }
 
 // ─── Cards ───

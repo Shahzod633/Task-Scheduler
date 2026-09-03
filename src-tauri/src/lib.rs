@@ -55,7 +55,6 @@ pub fn run() {
             commands::get_columns,
             commands::create_column,
             commands::update_column,
-            commands::set_column_final,
             commands::archive_column,
             commands::reorder_columns,
 

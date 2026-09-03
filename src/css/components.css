@@ -511,6 +511,21 @@ select.form-input option {
     padding-left: calc(var(--space-md) + 3px);
 }
 
+/* Строка-объяснение, а не действие: почему у этой колонки нет пунктов меню.
+   Ни курсора-руки, ни подсветки при наведении — нажимать здесь нечего. */
+.context-menu__item--info {
+    color: var(--text-muted);
+    cursor: default;
+    font-size: var(--font-size-sm);
+    line-height: 1.4;
+}
+
+.context-menu__item--info:hover {
+    background: transparent;
+    color: var(--text-muted);
+    padding-left: var(--space-md);
+}
+
 .context-menu__item--danger {
     color: var(--color-danger);
 }

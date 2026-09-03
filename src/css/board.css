@@ -85,6 +85,16 @@
     background: var(--bg-card-hover);
 }
 
+/* Название обязательной колонки не редактируется, поэтому и не притворяется
+   кликабельным. */
+.column__title--locked {
+    cursor: default;
+}
+
+.column__title--locked:hover {
+    background: transparent;
+}
+
 .column__title-input {
     width: 100%;
     padding: 4px var(--space-sm);

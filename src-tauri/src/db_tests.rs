@@ -185,9 +185,58 @@ fn rehearse_migration_on_a_real_database() {
         no_author, bad_priority, violations
     );
 
+    // ─── Костяк колонок ───
+    //
+    // Колонок после миграции становится БОЛЬШЕ — она дописывает недостающие
+    // обязательные, — поэтому их число сверяется отдельно от остальных.
+    // Печатаем построчно: «затронуто N досок» не показывает, где колонку
+    // просто пометили, а где на доске появились новые пустые.
+    println!("
+Колонки: было {}, стало {}", columns_before, count("SELECT COUNT(*) FROM columns"));
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT b.name, group_concat(c.name, ' | ')
+                 FROM boards b
+                 LEFT JOIN columns c ON c.board_id = b.id AND c.archived = 0
+                 WHERE b.is_system = 0
+                 GROUP BY b.id ORDER BY b.id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)))
+            .unwrap();
+        for row in rows {
+            let (board, columns) = row.unwrap();
+            println!("  «{}»: {}", board, columns.unwrap_or_else(|| "(нет колонок)".into()));
+        }
+    }
+
+    let boards_without_spine = count(
+        "SELECT COUNT(*) FROM boards b WHERE b.is_system = 0 AND (
+            SELECT COUNT(*) FROM columns c
+            WHERE c.board_id = b.id AND c.archived = 0 AND c.is_required = 1
+         ) <> 4",
+    );
+    let stray_finals = count(
+        "SELECT COUNT(*) FROM columns WHERE is_final = 1 AND (is_required = 0 OR name <> 'Закрыто')",
+    );
+    let final_not_last = count(
+        "SELECT COUNT(*) FROM columns f WHERE f.is_final = 1 AND f.archived = 0 AND EXISTS (
+            SELECT 1 FROM columns o
+            WHERE o.board_id = f.board_id AND o.archived = 0 AND o.position > f.position
+         )",
+    );
+
     assert_eq!(cards_before, cards_after, "миграция не должна терять карточки");
     assert_eq!(boards_before, count("SELECT COUNT(*) FROM boards"), "миграция не должна терять доски");
-    assert_eq!(columns_before, count("SELECT COUNT(*) FROM columns"), "миграция не должна терять колонки");
+    assert!(
+        count("SELECT COUNT(*) FROM columns") >= columns_before,
+        "миграция не должна терять колонки"
+    );
+    assert_eq!(boards_without_spine, 0, "на каждой доске должно быть ровно 4 обязательных колонки");
+    assert_eq!(stray_finals, 0, "финальной может быть только обязательная «Закрыто»");
+    assert_eq!(final_not_last, 0, "«Закрыто» должна быть крайней правой на своей доске");
     assert_eq!(labels_before, count("SELECT COUNT(*) FROM labels"), "миграция не должна терять метки");
     assert_eq!(members, 1, "должен появиться ровно один участник — сам пользователь");
     assert_eq!(self_name, name_before, "имя из профиля должно перенестись дословно");

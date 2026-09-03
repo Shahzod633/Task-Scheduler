@@ -131,6 +131,7 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             created_at TEXT DEFAULT (datetime('now')),
             archived INTEGER DEFAULT 0,
             is_final INTEGER DEFAULT 0,
+            is_required INTEGER DEFAULT 0,
             FOREIGN KEY (board_id) REFERENCES boards(id)
         )",
         (),
@@ -289,6 +290,14 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
     if !table_has_column(conn, "columns", "is_final") {
         conn.execute("ALTER TABLE columns ADD COLUMN is_final INTEGER DEFAULT 0", ())?;
     }
+    // Обязательная колонка — часть костяка, одинакового на всех досках
+    // (`commands::REQUIRED_COLUMNS`). Флаг отдельный от `is_final` и отвечает
+    // за другое: `is_required` защищает колонку от удаления и переименования,
+    // `is_final` запирает в ней карточки. Совпадают они ровно на одной
+    // колонке — «Закрыто».
+    if !table_has_column(conn, "columns", "is_required") {
+        conn.execute("ALTER TABLE columns ADD COLUMN is_required INTEGER DEFAULT 0", ())?;
+    }
     if !table_has_column(conn,"cards", "is_mistake") {
         conn.execute("ALTER TABLE cards ADD COLUMN is_mistake INTEGER DEFAULT 0", ())?;
     }
@@ -374,7 +383,41 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         }
     }
 
+    // ─── columns → обязательный костяк ───
+    //
+    // Идёт последней: к этому моменту схема уже полная, а Inbox-доски созданы
+    // и помечены `is_system`, иначе миграция приняла бы их за обычные.
+    log_spine_migration(crate::commands::ensure_required_columns_everywhere(conn)?);
+
     Ok(())
+}
+
+/// Пишет в журнал, что миграция костяка сделала с каждой доской.
+///
+/// Отчёт нужен именно построчный: «затронуто 7 досок» не даёт понять, где
+/// колонку просто пометили, а где на доске появились новые пустые.
+fn log_spine_migration(reports: Vec<crate::commands::BoardSpineReport>) {
+    if reports.is_empty() {
+        return;
+    }
+
+    log::info!("Костяк колонок: приведено досок — {}", reports.len());
+    for r in &reports {
+        let mut parts: Vec<String> = Vec::new();
+        if !r.created.is_empty() {
+            parts.push(format!("создано: {}", r.created.join(", ")));
+        }
+        if !r.flagged.is_empty() {
+            parts.push(format!("помечено существующих: {}", r.flagged.join(", ")));
+        }
+        if r.final_moved {
+            parts.push("«Закрыто» переставлена в конец".to_string());
+        }
+        if !r.unfinalised.is_empty() {
+            parts.push(format!("снята ручная финальность: {}", r.unfinalised.join(", ")));
+        }
+        log::info!("  #{} «{}» — {}", r.board_id, r.board_name, parts.join("; "));
+    }
 }
 
 /// Seeds the member directory from the existing single-user profile.

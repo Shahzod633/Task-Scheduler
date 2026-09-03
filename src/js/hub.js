@@ -13,7 +13,10 @@ import { createElement, $, $$, showToast, debounce, getRandomGradient, getGradie
 let currentWorkspaceId = null;
 let showTemplates = true;
 
-const DEFAULT_COLUMNS = ['Новые', 'В работе', 'На проверке', 'Готово'];
+// Списка колонок по умолчанию здесь больше нет. Костяк
+// (Новые → В работе → Тестирование → Закрыто) создаёт `create_board` в той же
+// транзакции, что и саму доску: пока список жил на фронтенде, у кнопки
+// «Создать доску» и у шаблонов он был разный.
 
 /**
  * Render the hub/dashboard view
@@ -392,9 +395,6 @@ function showCreateBoardModal() {
         
         try {
             const board = await api.createBoard(currentWorkspaceId, name, selectedGradient);
-            for (const colName of DEFAULT_COLUMNS) {
-                await api.createColumn(board.id, colName);
-            }
             overlay.remove();
             showToast(`Доска "${name}" создана`);
             window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'board', boardId: board.id } }));
