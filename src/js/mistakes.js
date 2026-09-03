@@ -1,7 +1,11 @@
 // ============================================
-// TaskFlow — Mistake Tracking Dashboard
+// TaskFlow — раздел «Требуют внимания»
 // (cross-board analytics for cards marked is_mistake = 1)
 // ============================================
+// Раздел назывался «Отслеживание ошибок». Переименован только на экране:
+// поля в базе (`is_mistake`, `mistake_marked_at`) и имя маршрута остались
+// прежними — это внутренние технические имена, и переименовывать их ради
+// подписи значит платить регрессией без всякой пользы.
 
 import * as api from './api.js';
 import { showCardEditModal } from './board.js';
@@ -14,8 +18,8 @@ export async function renderMistakesPage(workspaceId) {
     content.classList.add('view-enter');
 
     const page = createElement('div', { className: 'page page--mistakes' });
-    page.appendChild(createElement('h2', { className: 'page__title' }, 'Отслеживание ошибок'));
-    page.appendChild(createElement('p', { className: 'page__subtitle' }, 'Сквозная аналитика по всем карточкам, отмеченным как ошибка, во всех досках пространства'));
+    page.appendChild(createElement('h2', { className: 'page__title' }, 'Требуют внимания'));
+    page.appendChild(createElement('p', { className: 'page__subtitle' }, 'Сквозная аналитика по всем карточкам, требующим внимания, во всех досках пространства'));
 
     const statsRow = createElement('div', { className: 'mistake-stats' });
     page.appendChild(statsRow);

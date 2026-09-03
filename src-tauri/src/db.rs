@@ -130,6 +130,7 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             position INTEGER NOT NULL,
             created_at TEXT DEFAULT (datetime('now')),
             archived INTEGER DEFAULT 0,
+            is_final INTEGER DEFAULT 0,
             FOREIGN KEY (board_id) REFERENCES boards(id)
         )",
         (),
@@ -280,6 +281,13 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
     // exists; a bare name survives both.
     if !table_has_column(conn, "workspaces", "background_image_path") {
         conn.execute("ALTER TABLE workspaces ADD COLUMN background_image_path TEXT", ())?;
+    }
+    // Финальная колонка — конец пути карточки: попав туда, она уже не
+    // возвращается (см. `update_card_position`). Флаг живёт на колонке, а не
+    // на карточке, потому что «финальность» — свойство этапа процесса, и
+    // задаётся один раз на доску, а не по одной карточке.
+    if !table_has_column(conn, "columns", "is_final") {
+        conn.execute("ALTER TABLE columns ADD COLUMN is_final INTEGER DEFAULT 0", ())?;
     }
     if !table_has_column(conn,"cards", "is_mistake") {
         conn.execute("ALTER TABLE cards ADD COLUMN is_mistake INTEGER DEFAULT 0", ())?;

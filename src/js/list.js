@@ -18,6 +18,7 @@ import {
     priorityLabel, priorityModifier, PRIORITIES,
 } from './filters.js';
 import { showCardEditModal } from './board.js';
+import { confirmDialog } from './dialog.js';
 import { createElement, $, showToast, formatDueDate, isOverdue, pluralize } from './utils.js';
 
 // Kept across re-renders of the same screen so a refresh after an edit does not
@@ -355,12 +356,35 @@ function openStatusPicker(anchor, card) {
             className: `context-menu__item ${isCurrent ? 'context-menu__item--current' : ''}`
         });
         row.appendChild(createElement('span', {}, col.name));
+        // Финальная колонка помечена замком прямо в списке: выбор её здесь
+        // так же необратим, как перенос карточки мышью на доске.
+        if (col.is_final) {
+            row.appendChild(createElement('span', {
+                className: 'context-menu__lock',
+                innerHTML: Icons.lock,
+                'data-tooltip': 'Финальная колонка: вернуть задачу будет нельзя'
+            }));
+        }
         if (isCurrent) {
             row.appendChild(createElement('span', { className: 'member-picker__check', innerHTML: Icons.check }));
         }
         row.addEventListener('click', async () => {
             closePopovers();
             if (isCurrent) return;
+
+            // Тот же вопрос, что и при перетаскивании на доске: смена статуса
+            // здесь — это тот же перенос карточки, и запирает её так же
+            // насовсем. Спрашиваем до записи, а не откатываем после.
+            if (col.is_final) {
+                const ok = await confirmDialog({
+                    title: 'Перенести в финальную колонку?',
+                    message: `Перемещение в «${col.name}» необратимо — задачу нельзя будет вернуть обратно.`,
+                    confirmText: 'Подтвердить',
+                    danger: true,
+                });
+                if (!ok) return;
+            }
+
             try {
                 // Same command drag-and-drop uses. The card lands at the end of
                 // the target column: `data.cards` holds only unarchived cards,
@@ -370,7 +394,9 @@ function openStatusPicker(anchor, card) {
                 await refresh();
                 showToast(`Задача перенесена в «${col.name}»`);
             } catch (e) {
-                showToast('Не удалось сменить статус', 'error');
+                // Бэкенд отказывает, если задача уже в финальной колонке —
+                // его текст объясняет причину лучше общей фразы.
+                showToast(typeof e === 'string' ? e : 'Не удалось сменить статус', 'error');
             }
         });
         menu.appendChild(row);

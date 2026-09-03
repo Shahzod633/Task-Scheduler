@@ -103,6 +103,16 @@ export async function archiveColumn(id) {
     return await invoke('archive_column', { id });
 }
 
+/**
+ * Помечает колонку финальной (или снимает пометку).
+ *
+ * Карточка, доехавшая до финальной колонки, обратно уже не уезжает — это
+ * проверяет `update_card_position` на бэкенде, а не только интерфейс.
+ */
+export async function setColumnFinal(id, isFinal) {
+    return await invoke('set_column_final', { id, isFinal });
+}
+
 // ─── Cards ───
 
 export async function getCards(columnId) {

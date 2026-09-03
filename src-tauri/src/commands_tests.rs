@@ -234,6 +234,7 @@ fn import_skips_label_links_the_file_does_not_define() {
                 name: "Колонка".into(),
                 position: 0,
                 archived: 0,
+                is_final: false,
                 cards: vec![CardExport {
                     title: "Карточка".into(),
                     description: String::new(),
@@ -1459,8 +1460,14 @@ fn a_card_reminds_once_and_then_goes_quiet() {
     assert!(second.is_empty(), "повторное напоминание о том же сроке — это спам");
 }
 
+// Раньше здесь стояли два теста, проверявшие, что перенос и снятие срока
+// сбрасывают отметку «напоминание показано». С Фазы A срок неизменяем, и через
+// `update_card_in` его больше не двигают — правило переехало в тесты ниже.
+// Законный перенос срока (продление ретрая) появится в Фазе B и сбрасывать
+// отметку будет уже он.
+
 #[test]
-fn moving_the_deadline_makes_the_card_remind_again() {
+fn editing_the_text_does_not_disturb_the_deadline_or_its_reminder() {
     let conn = test_db();
     let col = board_with_column(&conn);
     let card_id = add_card(&conn, col, "Сегодня", 0);
@@ -1468,35 +1475,37 @@ fn moving_the_deadline_makes_the_card_remind_again() {
     let first = due_cards_needing_reminder(&conn, 24).unwrap();
     mark_reminders_sent(&conn, &first).unwrap();
 
-    // Тот же срок — отметка на месте, карточка молчит.
     let same_due = local_day(&conn, 0);
     update_card_in(&conn, card_id, "Сегодня", "правка текста", Some(&same_due)).unwrap();
+
     assert!(
         due_cards_needing_reminder(&conn, 24).unwrap().is_empty(),
         "правка описания не должна поднимать напоминание заново"
     );
-
-    // Срок перенесён на завтра — при окне в двое суток напомнить надо снова.
-    let tomorrow = local_day(&conn, 1);
-    update_card_in(&conn, card_id, "Сегодня", "", Some(&tomorrow)).unwrap();
-    assert_eq!(due_cards_needing_reminder(&conn, 48).unwrap().len(), 1);
 }
 
 #[test]
-fn clearing_the_deadline_also_clears_the_sent_mark() {
+fn a_first_deadline_clears_a_stale_sent_mark() {
     let conn = test_db();
     let col = board_with_column(&conn);
-    let card_id = add_card(&conn, col, "Сегодня", 0);
 
-    let first = due_cards_needing_reminder(&conn, 24).unwrap();
-    mark_reminders_sent(&conn, &first).unwrap();
+    // Карточка без срока, но с отметкой о напоминании: так выглядит строка из
+    // базы, где срок сняли ещё до того, как он стал неизменяемым.
+    conn.execute(
+        "INSERT INTO cards (column_id, title, description, position, due_reminder_sent_at)
+         VALUES (?1, 'Наследство', '', 0, '2026-01-01 10:00:00')",
+        params![col],
+    ).unwrap();
+    let card_id = conn.last_insert_rowid();
 
-    update_card_in(&conn, card_id, "Сегодня", "", None).unwrap();
+    let today = local_day(&conn, 0);
+    update_card_in(&conn, card_id, "Наследство", "", Some(&today)).unwrap();
 
     let mark: Option<String> = conn
         .query_row("SELECT due_reminder_sent_at FROM cards WHERE id = ?1", params![card_id], |r| r.get(0))
         .unwrap();
-    assert!(mark.is_none(), "снятый срок — тоже изменение срока");
+    assert!(mark.is_none(), "старая отметка заглушила бы напоминание о новом сроке");
+    assert_eq!(due_cards_needing_reminder(&conn, 24).unwrap().len(), 1);
 }
 
 #[test]
@@ -1848,4 +1857,212 @@ fn a_file_written_before_comments_existed_still_imports() {
 
     let after = build_board_export(&conn, new_id).unwrap();
     assert!(after.board.columns[0].cards[0].comments.is_empty());
+}
+
+// ─── Фаза A: срок задаётся один раз, финальная колонка не отпускает ───
+//
+// Оба правила проверяются на уровне базы, а не интерфейса: окно карточки
+// рисует нередактируемое поле, а Sortable не даёт вытащить карточку из
+// финальной колонки, но обе команды можно позвать и мимо экрана — из «Списка»,
+// из Inbox или напрямую. Тесты гоняют ровно тот код, который стоит за IPC.
+
+/// Доска с рабочей и финальной колонками. Возвращает `(рабочая, финальная)`.
+fn board_with_final_column(conn: &Connection) -> (i64, i64) {
+    conn.execute(
+        "INSERT INTO boards (workspace_id, name) VALUES (1, 'Доска с финалом')",
+        (),
+    ).unwrap();
+    let board_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO columns (board_id, name, position) VALUES (?1, 'В работе', 0)",
+        params![board_id],
+    ).unwrap();
+    let working = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO columns (board_id, name, position, is_final) VALUES (?1, 'Сдано', 1, 1)",
+        params![board_id],
+    ).unwrap();
+    let final_col = conn.last_insert_rowid();
+
+    (working, final_col)
+}
+
+fn add_plain_card(conn: &Connection, column_id: i64, title: &str, position: i64) -> i64 {
+    conn.execute(
+        "INSERT INTO cards (column_id, title, position) VALUES (?1, ?2, ?3)",
+        params![column_id, title, position],
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+fn card_column_and_position(conn: &Connection, card_id: i64) -> (i64, i64) {
+    conn.query_row(
+        "SELECT column_id, position FROM cards WHERE id = ?1",
+        params![card_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap()
+}
+
+fn due_of(conn: &Connection, card_id: i64) -> Option<String> {
+    conn.query_row("SELECT due_date FROM cards WHERE id = ?1", params![card_id], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_card_without_a_deadline_can_still_be_given_one() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    let card_id = add_plain_card(&conn, col, "Пока без срока", 0);
+
+    // Задачу заводят раньше, чем узнают дату сдачи, — первая установка обязана
+    // проходить, иначе поле было бы бесполезным для всех новых карточек.
+    update_card_in(&conn, card_id, "Пока без срока", "", Some("2026-12-01")).unwrap();
+    assert_eq!(due_of(&conn, card_id).as_deref(), Some("2026-12-01"));
+}
+
+#[test]
+fn a_deadline_that_exists_can_be_neither_moved_nor_cleared() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    let card_id = add_plain_card(&conn, col, "Со сроком", 0);
+    update_card_in(&conn, card_id, "Со сроком", "", Some("2026-12-01")).unwrap();
+
+    // Попытка отодвинуть срок правкой карточки. Команда не падает — она
+    // сохраняет текст и оставляет срок прежним: ошибка на каждом сохранении
+    // названия ради поля, которого в окне и нет, была бы хуже.
+    update_card_in(&conn, card_id, "Со сроком", "описание", Some("2027-01-01")).unwrap();
+    assert_eq!(
+        due_of(&conn, card_id).as_deref(),
+        Some("2026-12-01"),
+        "срок, однажды заданный, двигать нельзя"
+    );
+
+    // Снятие срока — тоже изменение, и оно тоже не проходит.
+    update_card_in(&conn, card_id, "Со сроком", "описание", None).unwrap();
+    assert_eq!(due_of(&conn, card_id).as_deref(), Some("2026-12-01"), "срок нельзя и снять");
+
+    // При этом обычная правка текста доезжает до базы.
+    let description: String = conn
+        .query_row("SELECT description FROM cards WHERE id = ?1", params![card_id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(description, "описание");
+}
+
+#[test]
+fn a_card_cannot_leave_a_final_column() {
+    let mut conn = test_db();
+    let (working, final_col) = board_with_final_column(&conn);
+    let card_id = add_plain_card(&conn, working, "Задача", 0);
+
+    // Доехать до финальной колонки можно.
+    move_card_in(&mut conn, card_id, final_col, 0).unwrap();
+    assert_eq!(card_column_and_position(&conn, card_id).0, final_col);
+
+    // А обратно — нет, и не только через доску: этой же командой меняют статус
+    // «Список» и Inbox.
+    let err = move_card_in(&mut conn, card_id, working, 0).unwrap_err();
+    assert_eq!(err, ERR_CARD_IS_FINAL);
+    assert_eq!(
+        card_column_and_position(&conn, card_id).0,
+        final_col,
+        "отклонённый перенос не должен ничего менять"
+    );
+}
+
+#[test]
+fn a_rejected_move_leaves_the_neighbours_alone() {
+    let mut conn = test_db();
+    let (working, final_col) = board_with_final_column(&conn);
+    let stays = add_plain_card(&conn, working, "Остаётся", 0);
+    let locked = add_plain_card(&conn, final_col, "Заперта", 0);
+    let neighbour = add_plain_card(&conn, final_col, "Соседка", 1);
+
+    move_card_in(&mut conn, locked, working, 0).unwrap_err();
+
+    // Ни исходная колонка, ни целевая не поехали: отказ случается до первого
+    // UPDATE, а транзакция всё равно откатывается.
+    assert_eq!(card_column_and_position(&conn, stays), (working, 0));
+    assert_eq!(card_column_and_position(&conn, locked), (final_col, 0));
+    assert_eq!(card_column_and_position(&conn, neighbour), (final_col, 1));
+}
+
+#[test]
+fn cards_can_still_be_reordered_inside_a_final_column() {
+    let mut conn = test_db();
+    let (_working, final_col) = board_with_final_column(&conn);
+    let first = add_plain_card(&conn, final_col, "Первая", 0);
+    let second = add_plain_card(&conn, final_col, "Вторая", 1);
+
+    // Перестановка внутри финальной колонки карточку оттуда не выпускает,
+    // поэтому запрещать её незачем.
+    move_card_in(&mut conn, second, final_col, 0).unwrap();
+
+    assert_eq!(card_column_and_position(&conn, second), (final_col, 0));
+    assert_eq!(card_column_and_position(&conn, first), (final_col, 1));
+}
+
+#[test]
+fn the_final_flag_survives_an_export_round_trip() {
+    let mut conn = test_db();
+    let (working, final_col) = board_with_final_column(&conn);
+    add_plain_card(&conn, working, "В работе", 0);
+    add_plain_card(&conn, final_col, "Сдана", 0);
+
+    let board_id: i64 = conn
+        .query_row("SELECT board_id FROM columns WHERE id = ?1", params![working], |r| r.get(0))
+        .unwrap();
+
+    let json = serde_json::to_string(&build_board_export(&conn, board_id).unwrap()).unwrap();
+    let parsed: BoardExport = serde_json::from_str(&json).unwrap();
+    let new_id = import_board_into(&mut conn, 1, parsed).unwrap();
+
+    let after = build_board_export(&conn, new_id).unwrap();
+    let flags: Vec<bool> = after.board.columns.iter().map(|c| c.is_final).collect();
+    assert_eq!(
+        flags,
+        vec![false, true],
+        "перенесённая доска не должна терять правило, ради которого её так настроили"
+    );
+
+    // И правило работает на новой доске, а не только числится в поле.
+    let new_final: i64 = conn
+        .query_row(
+            "SELECT id FROM columns WHERE board_id = ?1 AND is_final = 1",
+            params![new_id],
+            |r| r.get(0),
+        ).unwrap();
+    let new_working: i64 = conn
+        .query_row(
+            "SELECT id FROM columns WHERE board_id = ?1 AND is_final = 0",
+            params![new_id],
+            |r| r.get(0),
+        ).unwrap();
+    let moved_card: i64 = conn
+        .query_row("SELECT id FROM cards WHERE column_id = ?1", params![new_final], |r| r.get(0))
+        .unwrap();
+    assert_eq!(move_card_in(&mut conn, moved_card, new_working, 0).unwrap_err(), ERR_CARD_IS_FINAL);
+}
+
+#[test]
+fn a_file_written_before_final_columns_still_imports() {
+    let mut conn = test_db();
+
+    let json = r#"{
+        "taskflow_export_version": 1,
+        "exported_at": "",
+        "board": {
+            "name": "Старый файл",
+            "columns": [
+                { "name": "Готово", "cards": [ { "title": "Задача" } ] }
+            ]
+        }
+    }"#;
+
+    let parsed: BoardExport = serde_json::from_str(json).expect("старый файл должен читаться");
+    let new_id = import_board_into(&mut conn, 1, parsed).unwrap();
+
+    let after = build_board_export(&conn, new_id).unwrap();
+    assert!(!after.board.columns[0].is_final, "колонка из старого файла — обычная");
 }

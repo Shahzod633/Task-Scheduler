@@ -370,7 +370,7 @@ function editBoardTitle(board) {
  */
 function createColumnElement(colData) {
     const column = createElement('div', {
-        className: 'column',
+        className: `column ${colData.is_final ? 'column--final' : ''}`,
         dataset: { columnId: colData.id }
     });
     
@@ -378,6 +378,15 @@ function createColumnElement(colData) {
     const header = createElement('div', { className: 'column__header' });
     
     const titleWrapper = createElement('div', { className: 'column__title-wrapper' });
+    // Замок стоит перед названием, а не после счётчика: правило колонки важно
+    // прочитать до того, как тащишь в неё карточку, а не после.
+    if (colData.is_final) {
+        titleWrapper.appendChild(createElement('span', {
+            className: 'column__final-badge',
+            innerHTML: Icons.lock,
+            'data-tooltip': 'Финальная колонка: карточку отсюда уже не вернуть'
+        }));
+    }
     const title = createElement('span', { className: 'column__title' }, colData.name);
     title.addEventListener('click', () => editColumnTitle(colData, title));
     titleWrapper.appendChild(title);
@@ -399,7 +408,9 @@ function createColumnElement(colData) {
     // Cards list
     const cardsList = createElement('div', {
         className: 'column__cards',
-        dataset: { columnId: colData.id }
+        // `final` читает `initSortable` и обработчик броска: DOM-узел знает
+        // про свою колонку сам, без похода в `columnsData` на каждое событие.
+        dataset: { columnId: colData.id, final: colData.is_final ? '1' : '' }
     });
     
     for (const card of colData.cards) {
@@ -463,7 +474,38 @@ function showColumnMenu(event, colData) {
     if (existing) existing.remove();
     
     const menu = createElement('div', { className: 'context-menu' });
-    
+
+    // ─── Финальная колонка ───
+    //
+    // Отдельный пункт, а не галочка в переименовании: название — косметика, а
+    // финальность меняет правила для каждой карточки, которая сюда попадёт.
+    const finalItem = createElement('div', {
+        className: 'context-menu__item',
+        innerHTML: colData.is_final
+            ? `${Icons.rotateCcw} <span>Снять финальный статус</span>`
+            : `${Icons.lock} <span>Сделать финальной</span>`,
+        'data-tooltip': colData.is_final
+            ? 'Карточки снова можно будет переносить из этой колонки'
+            : 'Карточку, попавшую сюда, нельзя будет вернуть на доску'
+    });
+    finalItem.addEventListener('click', async () => {
+        closePopovers();
+        // Значения снимаются до перерисовки: она собирает `columnsData` заново,
+        // и `colData` после неё — объект от прежнего рендера.
+        const wasFinal = colData.is_final;
+        const columnName = colData.name;
+        try {
+            await api.setColumnFinal(colData.id, !wasFinal);
+            await renderBoard(currentBoardId);
+            showToast(wasFinal
+                ? `Колонка «${columnName}» больше не финальная`
+                : `Колонка «${columnName}» стала финальной`);
+        } catch (e) {
+            showToast('Не удалось изменить статус колонки', 'error');
+        }
+    });
+    menu.appendChild(finalItem);
+
     const archiveItem = createElement('div', {
         className: 'context-menu__item context-menu__item--danger',
         innerHTML: `${Icons.archive} <span>Архивировать колонку</span>`
@@ -713,16 +755,31 @@ export function showCardEditModal(cardData, options = {}) {
     descGroup.appendChild(descInput);
     body.appendChild(descGroup);
     
-    // Due date
+    // ─── Дедлайн ───
+    //
+    // Срок задаётся один раз. Пока его нет — поле обычное: задачу заводят
+    // раньше, чем узнают дату сдачи. Как только дата появилась, поле
+    // становится нередактируемым навсегда. То же правило продублировано в
+    // `update_card` на бэкенде — окно можно и обойти.
+    const hasDeadline = Boolean(cardData.due_date);
     const dueGroup = createElement('div', { className: 'form-group' });
     dueGroup.appendChild(createElement('label', { className: 'form-label' }, 'Дедлайн'));
     const dueInput = createElement('input', {
-        className: 'form-input',
+        className: `form-input ${hasDeadline ? 'form-input--locked' : ''}`,
         type: 'date',
         id: 'card-edit-due',
         value: cardData.due_date ? cardData.due_date.split('T')[0] : ''
     });
+    if (hasDeadline) {
+        // Именно `disabled`, а не `readonly`: у `<input type="date">` readonly
+        // не мешает открыть календарь и выбрать в нём другую дату.
+        dueInput.disabled = true;
+    }
     dueGroup.appendChild(dueInput);
+    dueGroup.appendChild(createElement('p', { className: 'form-hint' },
+        hasDeadline
+            ? 'Дедлайн задан и больше не меняется.'
+            : 'Дедлайн задаётся один раз — после сохранения изменить его будет нельзя.'));
     body.appendChild(dueGroup);
 
     // ─── Исполнитель / Автор / Приоритет ───
@@ -827,7 +884,9 @@ export function showCardEditModal(cardData, options = {}) {
     saveBtn.addEventListener('click', async () => {
         const title = titleInput.value.trim();
         if (!title) return;
-        const dueDate = dueInput.value || null;
+        // Заданный срок уходит обратно как есть: поле выключено, менять
+        // нечего, а бэкенд всё равно принимает дату только вместо пустой.
+        const dueDate = hasDeadline ? cardData.due_date : (dueInput.value || null);
         try {
             await api.updateCard(cardData.id, title, descInput.value, dueDate);
 
@@ -1052,8 +1111,13 @@ function initSortable() {
     // Card drag-and-drop for each column
     const cardLists = $$('.column__cards', boardEl);
     for (const list of cardLists) {
+        const isFinal = list.dataset.final === '1';
         const sortable = new Sortable(list, {
-            group: 'cards',
+            // `pull: false` у финальной колонки — это и есть запрет вытащить
+            // карточку: Sortable просто не отдаёт её другим спискам, а внутри
+            // самой колонки порядок менять по-прежнему можно. Тот же запрет
+            // продублирован в `update_card_position`: интерфейс обойти легко.
+            group: { name: 'cards', pull: !isFinal, put: true },
             animation: 200,
             // Sortable animates the neighbouring cards itself, writing an
             // inline `transition: transform 200ms <easing>` on each one, so
@@ -1111,20 +1175,60 @@ function initSortable() {
                 // Dropped back where it started — nothing to persist.
                 if (evt.to === evt.from && evt.newIndex === evt.oldIndex) return;
 
+                // Переезд в финальную колонку необратим, поэтому спрашиваем
+                // ДО записи в базу, а не откатываем после. Отказ возвращает
+                // карточку на прежнее место в DOM — в базу при этом не уходит
+                // ничего, откатывать нечего.
+                if (evt.to !== evt.from && evt.to.dataset.final === '1') {
+                    const ok = await confirmDialog({
+                        title: 'Перенести в финальную колонку?',
+                        message: 'Перемещение в финальную колонку необратимо — карточку нельзя будет вернуть обратно.',
+                        confirmText: 'Подтвердить',
+                        danger: true,
+                    });
+                    if (!ok) {
+                        returnCardToItsPlace(evt);
+                        return;
+                    }
+                }
+
                 try {
                     await api.updateCardPosition(cardId, newColumnId, newPosition);
 
                     // Update card counts
                     updateCardCounts();
+
+                    if (evt.to !== evt.from && evt.to.dataset.final === '1') {
+                        showToast('Карточка в финальной колонке — вернуть её нельзя');
+                    }
                 } catch (e) {
                     console.error('Failed to move card:', e);
-                    showToast('Не удалось переместить карточку', 'error');
+                    // Текст ошибки приходит с бэкенда (например, отказ выпустить
+                    // карточку из финальной колонки) — показываем его, а не
+                    // общую фразу: человек должен понять, почему не вышло.
+                    showToast(typeof e === 'string' ? e : 'Не удалось переместить карточку', 'error');
                     renderBoard(currentBoardId);
                 }
             }
         });
         cardSortables.push(sortable);
     }
+}
+
+/**
+ * Возвращает карточку туда, откуда её потащили.
+ *
+ * Sortable уже перенёс узел в другой список, и `oldIndex` — это его индекс в
+ * исходном списке ДО переноса. Раз узел оттуда исчез, вставка перед элементом
+ * с тем же индексом кладёт его ровно на прежнее место.
+ *
+ * Работает только потому, что во время перетаскивания в списке нет ничего,
+ * кроме карточек: при группировке и фильтрации drag-and-drop выключен
+ * (`setCardDragEnabled`).
+ */
+function returnCardToItsPlace(evt) {
+    evt.from.insertBefore(evt.item, evt.from.children[evt.oldIndex] || null);
+    updateCardCounts();
 }
 
 /**

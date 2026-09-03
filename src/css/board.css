@@ -97,6 +97,33 @@
     font-weight: var(--font-weight-semibold);
 }
 
+/* ─── Финальная колонка ─── */
+/* Правило колонки должно читаться раньше, чем в неё тащат карточку, поэтому
+   рамка и замок в заголовке, а не подсказка после броска. */
+.column--final {
+    border-color: var(--border-hover);
+}
+
+.column--final .column__header {
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.column__final-badge {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-muted);
+    flex-shrink: 0;
+}
+
+.column__final-badge svg {
+    width: 14px;
+    height: 14px;
+}
+
+.column--final:hover .column__final-badge {
+    color: var(--text-secondary);
+}
+
 .column__count {
     font-size: var(--font-size-xs);
     color: var(--text-muted);

@@ -2,7 +2,7 @@
 // TaskFlow — Checklists (sub-tasks inside a card)
 // ============================================
 // Lives in its own module because the card modal is opened from three places
-// (board, "Список", "Отслеживание ошибок") and none of them should have to know
+// (board, "Список", "Требуют внимания") and none of them should have to know
 // how a checklist works.
 //
 // Unlike the rest of the card modal, edits here are saved immediately rather

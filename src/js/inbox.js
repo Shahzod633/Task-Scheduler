@@ -5,6 +5,7 @@
 // ============================================
 
 import * as api from './api.js';
+import { confirmDialog } from './dialog.js';
 import { createElement, $, showToast } from './utils.js';
 
 export async function renderInboxPage(workspaceId) {
@@ -51,13 +52,33 @@ export async function renderInboxPage(workspaceId) {
         for (const { board, columns } of boardOptions) {
             const group = createElement('optgroup', { label: board.name });
             for (const col of columns) {
-                group.appendChild(createElement('option', { value: String(col.id) }, col.name));
+                // Замок в названии, а не иконкой: внутри <option> разметки нет.
+                group.appendChild(createElement('option', { value: String(col.id) },
+                    col.is_final ? `${col.name} (финальная)` : col.name));
             }
             select.appendChild(group);
         }
         select.addEventListener('change', async () => {
             const targetColumnId = parseInt(select.value, 10);
             if (!targetColumnId) return;
+
+            // Назначение в финальную колонку запирает задачу так же, как
+            // перенос мышью на доске, — поэтому и вопрос тот же. Отказ
+            // возвращает выпадающий список в исходное положение: сама задача
+            // никуда не уезжала.
+            const target = boardOptions
+                .flatMap(o => o.columns)
+                .find(c => c.id === targetColumnId);
+            if (target && target.is_final) {
+                const ok = await confirmDialog({
+                    title: 'Назначить в финальную колонку?',
+                    message: `Перемещение в «${target.name}» необратимо — задачу нельзя будет вернуть обратно.`,
+                    confirmText: 'Подтвердить',
+                    danger: true,
+                });
+                if (!ok) { select.value = ''; return; }
+            }
+
             try {
                 const targetCards = await api.getCards(targetColumnId);
                 await api.updateCardPosition(card.id, targetColumnId, targetCards.length);
@@ -67,7 +88,8 @@ export async function renderInboxPage(workspaceId) {
                     list.appendChild(createElement('p', { className: 'page__empty' }, 'Inbox пуст'));
                 }
             } catch (e) {
-                showToast('Ошибка назначения', 'error');
+                select.value = '';
+                showToast(typeof e === 'string' ? e : 'Ошибка назначения', 'error');
             }
         });
         row.appendChild(select);

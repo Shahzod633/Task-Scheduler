@@ -184,21 +184,30 @@ pub fn restore_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
 
 // ─── Columns ───
 
+const COLUMN_COLUMNS: &str = "id, board_id, name, position, created_at, archived, is_final";
+
+fn row_to_column(row: &rusqlite::Row) -> rusqlite::Result<Column> {
+    Ok(Column {
+        id: row.get(0)?,
+        board_id: row.get(1)?,
+        name: row.get(2)?,
+        position: row.get(3)?,
+        created_at: row.get(4)?,
+        archived: row.get(5)?,
+        is_final: { let f: i8 = row.get(6)?; f != 0 },
+    })
+}
+
 #[tauri::command]
 pub fn get_columns(board_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Column>> {
     let conn = state.conn.lock().unwrap();
-    let mut stmt = conn.prepare("SELECT id, board_id, name, position, created_at, archived FROM columns WHERE board_id = ?1 AND archived = 0 ORDER BY position ASC").map_err(to_string_err)?;
+    let sql = format!(
+        "SELECT {} FROM columns WHERE board_id = ?1 AND archived = 0 ORDER BY position ASC",
+        COLUMN_COLUMNS
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
 
-    let iter = stmt.query_map(params![board_id], |row| {
-        Ok(Column {
-            id: row.get(0)?,
-            board_id: row.get(1)?,
-            name: row.get(2)?,
-            position: row.get(3)?,
-            created_at: row.get(4)?,
-            archived: row.get(5)?,
-        })
-    }).map_err(to_string_err)?;
+    let iter = stmt.query_map(params![board_id], row_to_column).map_err(to_string_err)?;
 
     let mut res = Vec::new();
     for i in iter { res.push(i.map_err(to_string_err)?); }
@@ -222,13 +231,29 @@ pub fn create_column(board_id: i64, name: String, state: State<'_, DbState>) -> 
     ).map_err(to_string_err)?;
 
     let id = conn.last_insert_rowid();
-    Ok(Column { id, board_id, name, position: pos, created_at: "".into(), archived: 0 })
+    Ok(Column { id, board_id, name, position: pos, created_at: "".into(), archived: 0, is_final: false })
 }
 
 #[tauri::command]
 pub fn update_column(id: i64, name: String, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
     conn.execute("UPDATE columns SET name = ?1 WHERE id = ?2", params![name, id]).map_err(to_string_err)?;
+    Ok(())
+}
+
+/// Помечает колонку финальной или снимает пометку.
+///
+/// Отдельная команда, а не поле в `update_column`: переименование колонки —
+/// косметика, а финальность меняет правила для всех карточек, которые в неё
+/// попадут. Смешивать их в одном вызове значит менять правила случайной
+/// опечаткой в названии.
+#[tauri::command]
+pub fn set_column_final(id: i64, is_final: bool, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    conn.execute(
+        "UPDATE columns SET is_final = ?1 WHERE id = ?2",
+        params![is_final as i64, id],
+    ).map_err(to_string_err)?;
     Ok(())
 }
 
@@ -368,6 +393,15 @@ pub fn update_card(id: i64, title: String, description: String, due_date: Option
 
 /// Тело `update_card` без `State`, чтобы тест мог гонять тот же SQL на обычном
 /// соединении, а не собственную копию запроса.
+///
+/// **Срок задаётся один раз.** Пока `due_date` пуст, его можно поставить —
+/// карточку заводят раньше, чем узнают дату сдачи. Как только дата появилась,
+/// она перестаёт быть редактируемой: ни сдвинуть, ни снять. Отсюда `COALESCE`
+/// — входящее значение принимается только вместо NULL.
+///
+/// Правило держится в базе, а не только в окне карточки: поле в интерфейсе
+/// рисуется нередактируемым, но команду можно позвать и мимо него. Единственный
+/// законный способ отодвинуть срок — продление через ретрай (Фаза B).
 fn update_card_in(
     conn: &rusqlite::Connection,
     id: i64,
@@ -375,16 +409,19 @@ fn update_card_in(
     description: &str,
     due_date: Option<&str>,
 ) -> CmdResult<()> {
-    // Перенесли срок — напомнить надо заново. Без сброса отметки карточка,
-    // по которой уже напоминали, молчала бы про новый срок навсегда;
-    // `IS NOT` сравнивает и NULL, поэтому снятие и установка срока тоже
-    // считаются изменением.
+    // Срок появился впервые — отметка «напоминание показано» снимается.
+    // Практически она и так пуста (напоминать было не о чем), но у базы,
+    // пережившей версии до этого правила, срок могли снять уже после
+    // напоминания — и тогда старая отметка заглушила бы новый срок навсегда.
     conn.execute(
         "UPDATE cards
             SET title = ?1,
                 description = ?2,
-                due_reminder_sent_at = CASE WHEN due_date IS NOT ?3 THEN NULL ELSE due_reminder_sent_at END,
-                due_date = ?3
+                due_reminder_sent_at = CASE
+                    WHEN due_date IS NULL AND ?3 IS NOT NULL THEN NULL
+                    ELSE due_reminder_sent_at
+                END,
+                due_date = COALESCE(due_date, ?3)
           WHERE id = ?4",
         params![title, description, due_date, id],
     ).map_err(to_string_err)?;
@@ -398,11 +435,29 @@ pub fn archive_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     Ok(())
 }
 
+/// Сообщение об отказе перенести карточку из финальной колонки.
+///
+/// Константа, а не литерал в одном месте: этот же текст проверяет тест, и
+/// расхождение между «что сказали пользователю» и «что ждёт тест» — верный
+/// способ починить одно и сломать другое.
+pub const ERR_CARD_IS_FINAL: &str = "Карточка в финальной колонке — перенести её нельзя";
+
 /// Moves a card to `new_column_id` at `new_position`, renumbering only the
 /// neighboring cards actually affected by the move (not the whole board).
 #[tauri::command]
 pub fn update_card_position(id: i64, new_column_id: i64, new_position: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let mut conn = state.conn.lock().unwrap();
+    move_card_in(&mut conn, id, new_column_id, new_position)
+}
+
+/// Тело `update_card_position` без `State` — чтобы тест гонял тот же самый
+/// код, а не свою копию запросов (правило раздела 5 заметок).
+fn move_card_in(
+    conn: &mut rusqlite::Connection,
+    id: i64,
+    new_column_id: i64,
+    new_position: i64,
+) -> CmdResult<()> {
     let tx = conn.transaction().map_err(to_string_err)?;
 
     let (old_column_id, old_position): (i64, i64) = tx.query_row(
@@ -410,6 +465,24 @@ pub fn update_card_position(id: i64, new_column_id: i64, new_position: i64, stat
         params![id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(to_string_err)?;
+
+    // Финальная колонка — конец пути: карточка, доехавшая туда (после явного
+    // подтверждения в интерфейсе), обратно не возвращается.
+    //
+    // Проверка стоит здесь, а не только в Sortable: этой же командой статус
+    // меняют «Список» и Inbox, а вызвать её можно и в обход любого экрана.
+    // Перестановка внутри самой финальной колонки разрешена — карточка при
+    // этом остаётся там же, где её и заперли.
+    if old_column_id != new_column_id {
+        let source_is_final: i8 = tx.query_row(
+            "SELECT is_final FROM columns WHERE id = ?1",
+            params![old_column_id],
+            |row| row.get(0),
+        ).map_err(to_string_err)?;
+        if source_is_final != 0 {
+            return Err(ERR_CARD_IS_FINAL.to_string());
+        }
+    }
 
     if old_column_id == new_column_id {
         if new_position > old_position {
@@ -525,11 +598,11 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .map_err(to_string_err)?;
 
     let mut column_stmt = conn
-        .prepare("SELECT id, name, position, archived FROM columns WHERE board_id = ?1 ORDER BY position ASC")
+        .prepare("SELECT id, name, position, archived, is_final FROM columns WHERE board_id = ?1 ORDER BY position ASC")
         .map_err(to_string_err)?;
-    let raw_columns: Vec<(i64, String, i64, i8)> = column_stmt
+    let raw_columns: Vec<(i64, String, i64, i8, i8)> = column_stmt
         .query_map(params![board_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
         })
         .map_err(to_string_err)?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -564,7 +637,7 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .map_err(to_string_err)?;
 
     let mut columns = Vec::new();
-    for (column_id, name, position, archived) in raw_columns {
+    for (column_id, name, position, archived, is_final) in raw_columns {
         // (card id, card without its labels) — the ids are needed for the
         // card_labels lookup below and then dropped.
         let raw_cards: Vec<(i64, CardExport)> = card_stmt
@@ -625,7 +698,7 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
             cards.push(card);
         }
 
-        columns.push(ColumnExport { name, position, archived, cards });
+        columns.push(ColumnExport { name, position, archived, is_final: is_final != 0, cards });
     }
 
     let exported_at: String = conn
@@ -749,8 +822,8 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
 
     for (col_index, column) in export.board.columns.iter().enumerate() {
         tx.execute(
-            "INSERT INTO columns (board_id, name, position, archived) VALUES (?1, ?2, ?3, ?4)",
-            params![board_id, column.name, col_index as i64, column.archived],
+            "INSERT INTO columns (board_id, name, position, archived, is_final) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![board_id, column.name, col_index as i64, column.archived, column.is_final as i64],
         ).map_err(to_string_err)?;
         let column_id = tx.last_insert_rowid();
 
@@ -1210,7 +1283,7 @@ fn build_workspace_card_list(conn: &rusqlite::Connection, workspace_id: i64) -> 
     // columns of its own board.
     let mut col_stmt = conn.prepare(
         "SELECT b.id, b.name, b.is_system,
-                col.id, col.board_id, col.name, col.position, col.created_at, col.archived
+                col.id, col.board_id, col.name, col.position, col.created_at, col.archived, col.is_final
          FROM boards b
          LEFT JOIN columns col ON col.board_id = b.id AND col.archived = 0
          WHERE b.workspace_id = ?1 AND b.archived = 0
@@ -1218,6 +1291,8 @@ fn build_workspace_card_list(conn: &rusqlite::Connection, workspace_id: i64) -> 
     ).map_err(to_string_err)?;
 
     let rows = col_stmt.query_map(params![workspace_id], |row| {
+        // Не `row_to_column`: здесь колонка приезжает со сдвигом на три поля
+        // доски и может целиком отсутствовать (LEFT JOIN у доски без колонок).
         let column = match row.get::<_, Option<i64>>(3)? {
             Some(id) => Some(Column {
                 id,
@@ -1226,6 +1301,7 @@ fn build_workspace_card_list(conn: &rusqlite::Connection, workspace_id: i64) -> 
                 position: row.get(6)?,
                 created_at: row.get(7)?,
                 archived: row.get(8)?,
+                is_final: { let f: i8 = row.get(9)?; f != 0 },
             }),
             None => None,
         };
@@ -1408,18 +1484,8 @@ pub fn get_recent_boards(workspace_id: i64, limit: i64, state: State<'_, DbState
 pub fn get_inbox_column(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<Column> {
     let conn = state.conn.lock().unwrap();
     let column_id = crate::db::ensure_inbox_board(&conn, workspace_id).map_err(to_string_err)?;
-    let column = conn.query_row(
-        "SELECT id, board_id, name, position, created_at, archived FROM columns WHERE id = ?1",
-        params![column_id],
-        |row| Ok(Column {
-            id: row.get(0)?,
-            board_id: row.get(1)?,
-            name: row.get(2)?,
-            position: row.get(3)?,
-            created_at: row.get(4)?,
-            archived: row.get(5)?,
-        })
-    ).map_err(to_string_err)?;
+    let sql = format!("SELECT {} FROM columns WHERE id = ?1", COLUMN_COLUMNS);
+    let column = conn.query_row(&sql, params![column_id], row_to_column).map_err(to_string_err)?;
     Ok(column)
 }
 
@@ -1456,21 +1522,13 @@ pub fn get_cards_with_due_dates(workspace_id: i64, state: State<'_, DbState>) ->
 #[tauri::command]
 pub fn get_archived_columns(board_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Column>> {
     let conn = state.conn.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "SELECT id, board_id, name, position, created_at, archived
-         FROM columns WHERE board_id = ?1 AND archived = 1 ORDER BY id DESC"
-    ).map_err(to_string_err)?;
+    let sql = format!(
+        "SELECT {} FROM columns WHERE board_id = ?1 AND archived = 1 ORDER BY id DESC",
+        COLUMN_COLUMNS
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
 
-    let iter = stmt.query_map(params![board_id], |row| {
-        Ok(Column {
-            id: row.get(0)?,
-            board_id: row.get(1)?,
-            name: row.get(2)?,
-            position: row.get(3)?,
-            created_at: row.get(4)?,
-            archived: row.get(5)?,
-        })
-    }).map_err(to_string_err)?;
+    let iter = stmt.query_map(params![board_id], row_to_column).map_err(to_string_err)?;
 
     let mut res = Vec::new();
     for i in iter { res.push(i.map_err(to_string_err)?); }

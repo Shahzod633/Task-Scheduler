@@ -35,6 +35,10 @@ pub struct Column {
     pub position: i64,
     pub created_at: String,
     pub archived: i8,
+    /// Финальная колонка: карточка, попавшая сюда, обратно уже не уезжает.
+    /// Проверяется в `update_card_position`, а не только в интерфейсе, — иначе
+    /// «необратимо» держалось бы на одном лишь диалоге подтверждения.
+    pub is_final: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -277,6 +281,12 @@ pub struct ColumnExport {
     pub position: i64,
     #[serde(default)]
     pub archived: i8,
+    /// Финальность колонки переносится вместе с доской: без неё
+    /// перенесённая доска молча теряла бы правило, ради которого её так
+    /// настроили. Как и `checklist`/`comments`, поле добавлено позже формата,
+    /// поэтому `default` — файл без него читается как «обычная колонка».
+    #[serde(default)]
+    pub is_final: bool,
     #[serde(default)]
     pub cards: Vec<CardExport>,
 }
