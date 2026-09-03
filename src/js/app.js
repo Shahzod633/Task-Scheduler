@@ -34,7 +34,7 @@ const SIDEBAR_VIEWS = new Set(['hub', 'templates', 'home', 'settings', 'recent',
 // Views that show the floating dock (board working context)
 const DOCK_VIEWS = new Set(['board', 'inbox', 'planner']);
 // view name -> sidebar top-level item id
-const SIDEBAR_ITEM_IDS = { hub: 'sidebar-boards', list: 'sidebar-list', templates: 'sidebar-templates', home: 'sidebar-home', settings: 'sidebar-settings' };
+const SIDEBAR_ITEM_IDS = { hub: 'sidebar-boards', list: 'sidebar-list', mistakes: 'sidebar-mistakes', templates: 'sidebar-templates', home: 'sidebar-home', settings: 'sidebar-settings' };
 
 const ROUTES = {
     hub: (params) => renderHub(params.workspaceId || defaultWorkspaceId),
@@ -169,6 +169,10 @@ function renderLayout() {
                         <span class="sidebar__item-icon">${Icons.list}</span>
                         <span class="sidebar__item-text">Список</span>
                     </div>
+                    <div class="sidebar__item" id="sidebar-mistakes">
+                        <span class="sidebar__item-icon">${Icons.alertTriangle}</span>
+                        <span class="sidebar__item-text">Требуют внимания</span>
+                    </div>
                     <div class="sidebar__item" id="sidebar-templates">
                         <span class="sidebar__item-icon">${Icons.template}</span>
                         <span class="sidebar__item-text">Шаблоны</span>
@@ -226,6 +230,10 @@ function renderLayout() {
 
     $('#sidebar-list').addEventListener('click', () => {
         navigateTo('list', { workspaceId: defaultWorkspaceId });
+    });
+
+    $('#sidebar-mistakes').addEventListener('click', () => {
+        navigateTo('mistakes', { workspaceId: defaultWorkspaceId });
     });
 
     $('#sidebar-templates').addEventListener('click', () => {
