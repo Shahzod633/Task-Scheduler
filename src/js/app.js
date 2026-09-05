@@ -22,6 +22,7 @@ import { renderMistakesPage } from './mistakes.js';
 import { renderListPage } from './list.js';
 import { renderMembersPage } from './members.js';
 import { applyWorkspaceBackground } from './background.js';
+import { initTheme } from './theme.js';
 import { openPalette, closePalette, isPaletteOpen } from './palette.js';
 import { $, debounce, showToast } from './utils.js';
 
@@ -65,6 +66,11 @@ const ROUTES = {
  */
 async function init() {
     try {
+        // Тема — до первой отрисовки и раньше всего остального: пока режим не
+        // прочитан, действует тёмная палитра из `:root`, и человек, выбравший
+        // светлую, увидел бы тёмную вспышку на весь экран.
+        await initTheme();
+
         // Ensure we have at least one workspace
         defaultWorkspaceId = await ensureDefaultWorkspace();
 

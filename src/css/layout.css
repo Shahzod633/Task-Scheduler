@@ -233,7 +233,7 @@
 }
 
 .header__search:focus-within .header__search-icon {
-    color: var(--accent-300);
+    color: var(--accent-text);
 }
 
 /* ─── Header Right Section ─── */
@@ -283,7 +283,7 @@
     font-weight: var(--font-weight-bold);
     color: var(--text-on-accent);
     cursor: pointer;
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1), var(--shadow-sm);
+    box-shadow: var(--ring-on-accent), var(--shadow-sm);
     transition: transform var(--transition-spring), box-shadow var(--transition-normal);
 }
 
@@ -425,7 +425,7 @@
 }
 
 .sidebar__item--active .sidebar__item-icon {
-    color: var(--accent-300);
+    color: var(--accent-text);
 }
 
 .sidebar__item-text {

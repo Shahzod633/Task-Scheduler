@@ -201,7 +201,7 @@
 
 /* ─── Card ─── */
 .card {
-    background: var(--bg-card);
+    background: var(--bg-board-card);
     border-radius: var(--radius-md);
     padding: var(--space-md);
     cursor: grab;
@@ -225,7 +225,7 @@
 }
 
 .card:hover {
-    background: var(--bg-card-hover);
+    background: var(--bg-board-card-hover);
     border-color: var(--border-hover);
     box-shadow: var(--shadow-card-hover);
 }
@@ -271,7 +271,7 @@
     background: var(--bg-elevated);
     border: 1px solid var(--accent-border);
     border-radius: var(--radius-md);
-    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    box-shadow: var(--shadow-drag);
 }
 
 .card.sortable-fallback .card__edit-btn,
@@ -352,7 +352,7 @@ body.is-dragging-card .card:hover {
 .card__meta-item--due {
     padding: 2px 7px;
     border-radius: var(--radius-pill);
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--bg-card);
     color: var(--text-secondary);
 }
 

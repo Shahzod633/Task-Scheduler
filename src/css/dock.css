@@ -77,7 +77,7 @@
 }
 
 .dock__btn--active svg {
-    color: var(--accent-300);
+    color: var(--accent-text);
 }
 
 .dock__btn--active:hover {

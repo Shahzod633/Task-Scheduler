@@ -2,6 +2,7 @@ pub mod db;
 pub mod models;
 pub mod commands;
 pub mod crypto;
+pub mod email;
 
 use tauri::Manager;
 
@@ -71,6 +72,12 @@ pub fn run() {
             commands::get_reminder_settings,
             commands::update_reminder_settings,
 
+            commands::get_email_settings,
+            commands::update_email_settings,
+            commands::set_email_password,
+            commands::clear_email_password,
+            commands::send_test_email,
+
             commands::export_board,
             commands::export_board_to_file,
             commands::import_board,
@@ -116,6 +123,7 @@ pub fn run() {
 
             commands::get_user_profile,
             commands::update_user_profile,
+            commands::update_theme,
 
             commands::record_board_view,
             commands::get_recent_boards,

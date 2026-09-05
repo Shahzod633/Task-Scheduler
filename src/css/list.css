@@ -74,7 +74,7 @@
 .member-picker__check {
     margin-left: auto;
     display: inline-flex;
-    color: var(--accent-color);
+    color: var(--accent-text);
 }
 
 .member-picker__check svg { width: 14px; height: 14px; }
@@ -121,7 +121,7 @@
 .priority-pill--medium .priority-pill__dot { background: var(--priority-medium); }
 .priority-pill--high .priority-pill__dot { background: var(--priority-high); }
 
-.priority-pill--high { border-color: rgba(244, 104, 95, 0.35); }
+.priority-pill--high { border-color: var(--danger-border); }
 
 /* ─── Тулбар фильтров ─── */
 
@@ -383,7 +383,7 @@
     transition: color var(--transition-fast);
 }
 
-.task-table__title:hover { color: var(--accent-300); }
+.task-table__title:hover { color: var(--accent-text); }
 
 .task-table__flag {
     display: inline-flex;
@@ -463,7 +463,7 @@
 .filter-toggle--on .filter-toggle__box {
     background: var(--accent-500);
     border-color: transparent;
-    color: #fff;
+    color: var(--text-on-accent);
 }
 
 .filter-toggle__box svg { width: 11px; height: 11px; }

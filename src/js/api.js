@@ -351,8 +351,21 @@ export async function getUserProfile() {
     return await invoke('get_user_profile');
 }
 
-export async function updateUserProfile(displayName, avatarInitials, theme) {
-    return await invoke('update_user_profile', { displayName, avatarInitials, theme });
+export async function updateUserProfile(displayName, avatarInitials) {
+    return await invoke('update_user_profile', { displayName, avatarInitials });
+}
+
+/**
+ * Сохраняет выбранную тему: 'dark' | 'light' | 'system'.
+ *
+ * Отдельно от профиля, потому что применяется сразу по щелчку, а не по кнопке
+ * «Сохранить»: пока тема ехала вместе с формой, сохранение профиля затирало
+ * её тем значением, которое форма подставила при открытии.
+ *
+ * @returns {Promise<string>} то, что действительно сохранилось
+ */
+export async function updateTheme(theme) {
+    return await invoke('update_theme', { theme });
 }
 
 // ─── Recently viewed boards ───
@@ -399,6 +412,43 @@ export async function getReminderSettings() {
 
 export async function updateReminderSettings(enabled, hours) {
     return await invoke('update_reminder_settings', { enabled, hours });
+}
+
+// ─── Email-напоминания ───
+
+export async function getEmailSettings() {
+    return await invoke('get_email_settings');
+}
+
+export async function updateEmailSettings(enabled, smtpHost, smtpPort, username, recipient) {
+    return await invoke('update_email_settings', { enabled, smtpHost, smtpPort, username, recipient });
+}
+
+/**
+ * Кладёт пароль приложения в Диспетчер учётных данных Windows.
+ *
+ * Пароль не хранится в базе и обратно не читается: наружу приходит только
+ * признак `has_password`, который возвращает эта команда. Пустая строка
+ * означает «убрать пароль».
+ *
+ * @returns {Promise<boolean>} есть ли теперь сохранённый пароль
+ */
+export async function setEmailPassword(password) {
+    return await invoke('set_email_password', { password });
+}
+
+export async function clearEmailPassword() {
+    return await invoke('clear_email_password');
+}
+
+/**
+ * Отправляет проверочное письмо прямо сейчас, независимо от переключателя.
+ *
+ * Возвращает строку с адресом получателя при успехе; при неудаче бросает
+ * настоящую причину отказа сервера — её и надо показать человеку целиком.
+ */
+export async function sendTestEmail() {
+    return await invoke('send_test_email');
 }
 
 // ─── Mistake tracking ───

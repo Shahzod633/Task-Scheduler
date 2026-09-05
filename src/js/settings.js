@@ -79,6 +79,10 @@ export async function renderSettingsPage(workspaceId) {
     const remindersCard = createElement('div', { className: 'settings-card' });
     page.appendChild(remindersCard);
 
+    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Email-напоминания'));
+    const emailCard = createElement('div', { className: 'settings-card' });
+    page.appendChild(emailCard);
+
     page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Резервные копии'));
     const backupCard = createElement('div', { className: 'settings-card' });
     page.appendChild(backupCard);
@@ -89,6 +93,7 @@ export async function renderSettingsPage(workspaceId) {
     renderBackgroundSection(backgroundCard, workspaceId);
     renderProfileFields(profileCard);
     renderRemindersSection(remindersCard);
+    renderEmailSection(emailCard);
     renderBackupSection(backupCard);
 }
 
@@ -164,6 +169,246 @@ async function renderRemindersSection(container) {
 
     toggle.addEventListener('change', () => { syncEnabled(); save(); });
     hoursSelect.addEventListener('change', save);
+}
+
+/**
+ * «Email-напоминания» — письмо за неделю до срока, второй канал того же
+ * напоминания. Всплывающее окно Windows видно, только пока человек за этим
+ * компьютером; письмо догонит его где угодно, и приходит оно сильно раньше —
+ * когда ещё можно что-то успеть.
+ *
+ * Пароль приложения живёт в Диспетчере учётных данных Windows, а не в базе, и
+ * обратно не читается никогда: в поле ввода он не подставляется, наружу
+ * приходит только признак «сохранён».
+ */
+async function renderEmailSection(container) {
+    container.appendChild(createElement('p', { className: 'form-hint' },
+        'Письмо уходит за 7 дней до срока — по одному на задачу, один раз. ' +
+        'Проверка идёт при каждом запуске приложения, поэтому пропущенное за ' +
+        'время простоя письмо всё равно придёт.'));
+
+    let settings;
+    try {
+        settings = await api.getEmailSettings();
+    } catch (e) {
+        container.appendChild(createElement('p', { className: 'form-hint' },
+            'Не удалось прочитать настройки почты'));
+        return;
+    }
+
+    const toggleRow = createElement('label', { className: 'settings-reminders__toggle' });
+    const toggle = createElement('input', { type: 'checkbox', className: 'settings-reminders__checkbox' });
+    toggle.checked = settings.enabled;
+    toggleRow.appendChild(toggle);
+    toggleRow.appendChild(createElement('span', {}, 'Присылать письма о приближающихся сроках'));
+    container.appendChild(toggleRow);
+
+    // Поля остаются доступными и при выключенном переключателе: заполняют их
+    // как раз до того, как включить, а тестовое письмо надо уметь отправить
+    // до того, как полагаться на рассылку.
+    const grid = createElement('div', { className: 'settings-email__grid' });
+
+    const hostInput = createElement('input', { className: 'form-input', placeholder: 'smtp.gmail.com' });
+    hostInput.value = settings.smtp_host;
+    grid.appendChild(field('SMTP-сервер', hostInput));
+
+    const portInput = createElement('input', {
+        className: 'form-input', type: 'number', min: '1', max: '65535',
+    });
+    portInput.value = String(settings.smtp_port);
+    grid.appendChild(field('Порт', portInput,
+        '465 — TLS сразу, 587 — STARTTLS. Без шифрования письма не уходят ни на каком порту.'));
+
+    container.appendChild(grid);
+
+    const userInput = createElement('input', { className: 'form-input', placeholder: 'ваш.адрес@gmail.com' });
+    userInput.value = settings.username;
+    container.appendChild(field('Логин отправителя', userInput,
+        'Он же адрес в поле «От кого»: отправлять от чужого имени почтовые серверы всё равно не дают.'));
+
+    const toInput = createElement('input', { className: 'form-input' });
+    toInput.value = settings.recipient;
+    container.appendChild(field('Кому присылать', toInput));
+
+    // ─── Пароль приложения ───
+
+    const passGroup = createElement('div', { className: 'form-group' });
+    passGroup.appendChild(createElement('label', { className: 'form-label' }, 'Пароль приложения'));
+
+    const passRow = createElement('div', { className: 'settings-email__password' });
+    const passInput = createElement('input', {
+        className: 'form-input', type: 'password', autocomplete: 'off',
+        placeholder: 'Вставьте пароль приложения',
+    });
+    const passSaveBtn = createElement('button', { className: 'btn btn--secondary' }, 'Сохранить пароль');
+    const passClearBtn = createElement('button', {
+        className: 'btn btn--ghost settings-email__password-clear',
+        title: 'Удалить сохранённый пароль',
+        innerHTML: Icons.trash,
+    });
+    passRow.appendChild(passInput);
+    passRow.appendChild(passSaveBtn);
+    passRow.appendChild(passClearBtn);
+    passGroup.appendChild(passRow);
+
+    const passState = createElement('p', { className: 'form-hint settings-email__password-state' });
+    passGroup.appendChild(passState);
+    passGroup.appendChild(createElement('p', { className: 'form-hint' },
+        'Пароль хранится в Диспетчере учётных данных Windows, а не в базе — ' +
+        'поэтому его нет ни в резервных копиях, ни в файле экспорта. ' +
+        'Для Gmail нужен именно пароль приложения из настроек аккаунта, а не пароль от почты.'));
+    container.appendChild(passGroup);
+
+    // ─── Действия ───
+
+    const actions = createElement('div', { className: 'settings-email__actions' });
+    const saveBtn = createElement('button', { className: 'btn btn--primary' }, 'Сохранить');
+    const testBtn = createElement('button', {
+        className: 'btn btn--secondary',
+        innerHTML: `${Icons.mail} <span>Отправить тестовое письмо</span>`,
+    });
+    actions.appendChild(saveBtn);
+    actions.appendChild(testBtn);
+    container.appendChild(actions);
+
+    // Результат проверки остаётся на экране, в отличие от всплывающей
+    // подсказки: причину отказа сервера читают и перечитывают, а иногда и
+    // переписывают в поиск.
+    const result = createElement('p', { className: 'settings-email__result', hidden: 'hidden' });
+    container.appendChild(result);
+
+    function showResult(text, kind) {
+        result.textContent = text;
+        result.className = `settings-email__result settings-email__result--${kind}`;
+        result.hidden = false;
+    }
+
+    function syncPasswordState() {
+        passClearBtn.hidden = !settings.has_password;
+        if (settings.has_password) {
+            passState.textContent = 'Пароль сохранён';
+            passState.classList.add('settings-email__password-state--set');
+        } else {
+            passState.textContent = toggle.checked
+                ? 'Пароль не задан — письма не пойдут'
+                : 'Пароль не задан';
+            passState.classList.remove('settings-email__password-state--set');
+        }
+    }
+    syncPasswordState();
+    toggle.addEventListener('change', syncPasswordState);
+
+    /** Сохраняет то, что сейчас в полях, и возвращает `true` при успехе. */
+    async function saveSettings(quiet) {
+        try {
+            const saved = await api.updateEmailSettings(
+                toggle.checked,
+                hostInput.value,
+                Number(portInput.value) || 0,
+                userInput.value,
+                toInput.value,
+            );
+            // Бэкенд срезает пробелы и зажимает порт — показываем то, что
+            // действительно сохранилось, а не то, что было набрано.
+            settings = saved;
+            hostInput.value = saved.smtp_host;
+            portInput.value = String(saved.smtp_port);
+            userInput.value = saved.username;
+            toInput.value = saved.recipient;
+            toggle.checked = saved.enabled;
+            syncPasswordState();
+            if (!quiet) showToast('Настройки почты сохранены');
+            return true;
+        } catch (e) {
+            showToast(String(e), 'error');
+            return false;
+        }
+    }
+
+    /** Кладёт набранный пароль в Диспетчер; пустое поле не трогает ничего. */
+    async function savePasswordIfTyped() {
+        const typed = passInput.value.trim();
+        if (!typed) return true;
+        try {
+            settings.has_password = await api.setEmailPassword(typed);
+            // Поле очищается сразу: пароль уже в Диспетчере, а вторая его
+            // копия в памяти страницы никому не нужна.
+            passInput.value = '';
+            syncPasswordState();
+            return true;
+        } catch (e) {
+            showToast(String(e), 'error');
+            return false;
+        }
+    }
+
+    passSaveBtn.addEventListener('click', async () => {
+        if (!passInput.value.trim()) {
+            showToast('Введите пароль приложения', 'error');
+            return;
+        }
+        passSaveBtn.disabled = true;
+        try {
+            if (await savePasswordIfTyped()) showToast('Пароль сохранён');
+        } finally {
+            passSaveBtn.disabled = false;
+        }
+    });
+
+    passClearBtn.addEventListener('click', async () => {
+        const ok = await confirmDialog({
+            title: 'Удалить пароль?',
+            message: 'Пароль будет стёрт из Диспетчера учётных данных Windows. ' +
+                     'Письма перестанут отправляться, пока вы не введёте его снова.',
+            confirmText: 'Удалить',
+            danger: true,
+        });
+        if (!ok) return;
+        try {
+            settings.has_password = await api.clearEmailPassword();
+            syncPasswordState();
+            showToast('Пароль удалён');
+        } catch (e) {
+            showToast(String(e), 'error');
+        }
+    });
+
+    saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        try {
+            await savePasswordIfTyped();
+            await saveSettings(false);
+        } finally {
+            saveBtn.disabled = false;
+        }
+    });
+
+    testBtn.addEventListener('click', async () => {
+        testBtn.disabled = true;
+        showResult('Отправляем…', 'pending');
+        try {
+            // Сначала сохраняем — иначе проверялось бы не то, что человек
+            // видит на экране, а то, что лежало в базе до правок.
+            if (!await savePasswordIfTyped()) return;
+            if (!await saveSettings(true)) return;
+
+            const message = await api.sendTestEmail();
+            showResult(message + '. Проверьте ящик — письмо могло попасть в «Спам».', 'ok');
+        } catch (e) {
+            showResult(String(e), 'error');
+        } finally {
+            testBtn.disabled = false;
+        }
+    });
+}
+
+/** Подпись, поле и необязательное пояснение под ним. */
+function field(label, input, hint) {
+    const group = createElement('div', { className: 'form-group' });
+    group.appendChild(createElement('label', { className: 'form-label' }, label));
+    group.appendChild(input);
+    if (hint) group.appendChild(createElement('p', { className: 'form-hint' }, hint));
+    return group;
 }
 
 /**

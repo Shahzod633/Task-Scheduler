@@ -141,6 +141,55 @@ pub struct DueReminder {
     pub board_name: String,
 }
 
+/// Настройки email-напоминаний — тоже одни на всё приложение, рядом с
+/// `ReminderSettings`: это два канала одного и того же напоминания.
+///
+/// Пароля приложения здесь нет и быть не может: он лежит в Диспетчере учётных
+/// данных (`email.rs`), а наружу отдаётся только `has_password` — признак
+/// того, что он там есть.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct EmailSettings {
+    pub enabled: bool,
+    pub smtp_host: String,
+    pub smtp_port: i64,
+    /// Логин отправителя. Он же адрес в поле `From`: почтовые серверы всё
+    /// равно не дают отправлять от чужого имени.
+    pub username: String,
+    pub recipient: String,
+    /// Заполняется не из базы, а из Диспетчера учётных данных. Читатель
+    /// настроек оставляет здесь `false`, команда подставляет настоящее
+    /// значение.
+    #[serde(default)]
+    pub has_password: bool,
+}
+
+/// Значения по умолчанию живут константами, а не значениями `DEFAULT` в схеме:
+/// в схеме они оказались бы сразу в двух местах (`CREATE TABLE` и миграция
+/// `ALTER TABLE`) и со временем разошлись бы. В базе новые поля пустые, а
+/// пустое читается как «ещё не настраивали» — см. `read_email_settings`.
+pub const DEFAULT_SMTP_HOST: &str = "smtp.gmail.com";
+
+/// 465 — TLS с первого байта. Выбран вместо 587 (STARTTLS) потому, что
+/// шифрование на нём не зависит от того, объявит ли сервер поддержку
+/// STARTTLS.
+pub const DEFAULT_SMTP_PORT: i64 = 465;
+
+/// Адрес, который подставляется в поле получателя при первом открытии
+/// настроек. Редактируется, как и всё остальное.
+pub const DEFAULT_EMAIL_RECIPIENT: &str = "shahzodisorbon633@gmail.com";
+
+/// Карточка, по которой пора отправить письмо. Как и `DueReminder`, не
+/// хранится: собирается запросом и живёт до отправки.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmailReminder {
+    pub card_id: i64,
+    pub title: String,
+    pub due_date: String,
+    pub board_name: String,
+    /// Сколько дней осталось до конца дня срока. 0 — срок сегодня.
+    pub days_left: i64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserProfile {
     pub avatar_initials: String,

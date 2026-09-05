@@ -54,3 +54,14 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # Already in the dependency tree via Tauri; declared here because we use it
 # directly to hand the picture to the WebView as a `data:` URL.
 base64 = "0.22"
+# Письма-напоминания за неделю до срока — единственное место, откуда
+# приложение выходит в сеть, и делает это только когда человек сам включил
+# отправку и сам вписал сервер.
+#
+# Взяты три функции из семи: сборка письма, синхронный SMTP и TLS. Остальные
+# — асинхронные транспорты — тянут за собой tokio, который приложению не нужен:
+# письма уходят из того же фонового потока, что и проверка сроков.
+# `native-tls` на Windows — это schannel, системный TLS: ни второго OpenSSL в
+# бинарнике, ни своего набора корневых сертификатов, который пришлось бы
+# обновлять руками.
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }

@@ -171,12 +171,12 @@
     border-top: 1px solid var(--border-subtle);
     margin-top: var(--space-xs);
     padding-top: var(--space-sm);
-    color: var(--accent-300);
+    color: var(--accent-text);
 }
 
 .workspace-option--create .workspace-option__icon {
     background: transparent;
-    color: var(--accent-300);
+    color: var(--accent-text);
 }
 
 .workspace-option--create .workspace-option__icon svg {
@@ -245,7 +245,7 @@
 }
 
 .about-link {
-    color: var(--accent-300);
+    color: var(--accent-text);
     transition: color var(--transition-fast);
 }
 
@@ -272,7 +272,16 @@
     color: var(--text-muted);
     background: transparent;
     border: none;
+    cursor: pointer;
+    white-space: nowrap;
     transition: background var(--transition-normal), color var(--transition-fast);
+}
+
+/* Кнопки стали рабочими (раньше здесь стояла одна неактивная заглушка), и
+   отклик на наведение нужен всем, кроме уже выбранной: её и так видно. */
+.theme-toggle__option:hover:not(.theme-toggle__option--active) {
+    color: var(--text-primary);
+    background: var(--bg-card-hover);
 }
 
 .theme-toggle__option--active {
@@ -326,7 +335,7 @@
     padding: 7px;
     border-radius: var(--radius-md);
     background: var(--accent-soft);
-    color: var(--accent-300);
+    color: var(--accent-text);
     transition: transform var(--transition-spring), background var(--transition-fast);
 }
 
@@ -902,3 +911,82 @@
 }
 
 .mistake-row__retry svg { width: 14px; height: 14px; }
+
+/* ─── Настройки → Email-напоминания ─── */
+
+/* Сервер и порт — одна мысль, разорванная на две строки она читается хуже.
+   Порт узкий: в нём три-четыре цифры, а поле во всю ширину обещало бы, что
+   туда влезет что-то большее. */
+.settings-email__grid {
+    display: grid;
+    grid-template-columns: 1fr 140px;
+    gap: var(--space-md);
+    align-items: start;
+}
+
+.settings-email__password {
+    display: flex;
+    gap: var(--space-sm);
+    align-items: center;
+}
+
+.settings-email__password .form-input {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Кнопка удаления показывается, только когда есть что удалять: иначе это
+   ровно тот случай из §5 заметок — элемент, обещающий действие, которого не
+   будет. */
+.settings-email__password-clear {
+    flex-shrink: 0;
+    padding: 8px 10px;
+    color: var(--color-danger);
+}
+
+.settings-email__password-clear:hover {
+    background: var(--danger-soft);
+}
+
+.settings-email__password-state {
+    margin-top: var(--space-sm);
+}
+
+.settings-email__password-state--set {
+    color: var(--color-success);
+}
+
+.settings-email__actions {
+    display: flex;
+    gap: var(--space-sm);
+    flex-wrap: wrap;
+    margin-top: var(--space-lg);
+}
+
+/* Результат проверки остаётся на экране, в отличие от всплывающей подсказки:
+   причину отказа сервера читают, перечитывают и переписывают в поиск. */
+.settings-email__result {
+    margin-top: var(--space-md);
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+    /* Ответ сервера — длинная строка без пробелов; без переноса она
+       растянула бы карточку настроек за край окна. */
+    overflow-wrap: anywhere;
+}
+
+.settings-email__result--pending {
+    background: var(--bg-input);
+    color: var(--text-secondary);
+}
+
+.settings-email__result--ok {
+    background: var(--success-soft);
+    color: var(--color-success);
+}
+
+.settings-email__result--error {
+    background: var(--danger-soft);
+    color: var(--color-danger);
+}

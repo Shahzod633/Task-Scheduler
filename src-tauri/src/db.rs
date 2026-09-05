@@ -257,7 +257,12 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             display_name TEXT DEFAULT 'Пользователь',
             theme TEXT DEFAULT 'dark',
             due_reminders_enabled INTEGER DEFAULT 1,
-            due_reminder_hours INTEGER DEFAULT 24
+            due_reminder_hours INTEGER DEFAULT 24,
+            email_reminders_enabled INTEGER DEFAULT 0,
+            email_smtp_host TEXT,
+            email_smtp_port INTEGER,
+            email_username TEXT,
+            email_recipient TEXT
         )",
         (),
     )?;
@@ -370,6 +375,39 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
             "ALTER TABLE user_profile ADD COLUMN due_reminder_hours INTEGER DEFAULT 24",
             (),
         )?;
+    }
+
+    // Настройки писем — там же, где и настройки всплывающих уведомлений: это
+    // два канала одного напоминания, а не две разные функции.
+    //
+    // Выключено по умолчанию, в отличие от уведомлений Windows: те ничего не
+    // требуют, а письма без сервера, логина и пароля отправить всё равно
+    // нельзя, и включённый переключатель обещал бы работу, которой нет.
+    if !table_has_column(conn, "user_profile", "email_reminders_enabled") {
+        conn.execute(
+            "ALTER TABLE user_profile ADD COLUMN email_reminders_enabled INTEGER DEFAULT 0",
+            (),
+        )?;
+    }
+    // Три поля ниже намеренно без `DEFAULT`: значения по умолчанию заданы
+    // константами в `models.rs` и подставляются при чтении. В схеме они
+    // оказались бы сразу в двух местах — здесь и в `CREATE TABLE` выше — и
+    // рано или поздно разошлись бы. Пустое поле в базе означает «человек ещё
+    // не настраивал», и это состояние надо уметь отличать от «стёр нарочно».
+    if !table_has_column(conn, "user_profile", "email_smtp_host") {
+        conn.execute("ALTER TABLE user_profile ADD COLUMN email_smtp_host TEXT", ())?;
+    }
+    if !table_has_column(conn, "user_profile", "email_smtp_port") {
+        conn.execute("ALTER TABLE user_profile ADD COLUMN email_smtp_port INTEGER", ())?;
+    }
+    if !table_has_column(conn, "user_profile", "email_username") {
+        conn.execute("ALTER TABLE user_profile ADD COLUMN email_username TEXT", ())?;
+    }
+    // Пароль приложения сюда не попадает — он в Диспетчере учётных данных
+    // Windows (`email.rs`). База шифруется ключом оттуда же, и второй секрет
+    // внутри неё означал бы, что один унесённый файл выдаёт оба.
+    if !table_has_column(conn, "user_profile", "email_recipient") {
+        conn.execute("ALTER TABLE user_profile ADD COLUMN email_recipient TEXT", ())?;
     }
 
     // Ensure the singleton user profile row exists

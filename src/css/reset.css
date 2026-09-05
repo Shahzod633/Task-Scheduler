@@ -22,12 +22,11 @@ html, body {
     line-height: 1.5;
 }
 
-/* Мягкое «атмосферное» свечение фона — даёт глубину плоскому тёмному UI */
+/* Мягкое «атмосферное» свечение фона — даёт глубину плоскому UI.
+   Само свечение живёт в токене: в светлой теме те же пятна вдвое слабее,
+   иначе они читаются как грязь на белом, а не как глубина. */
 body {
-    background-image:
-        radial-gradient(1100px 620px at 8% -12%, rgba(108, 92, 255, 0.13), transparent 62%),
-        radial-gradient(900px 520px at 102% -6%, rgba(180, 92, 255, 0.09), transparent 58%),
-        radial-gradient(760px 480px at 50% 118%, rgba(69, 200, 232, 0.05), transparent 60%);
+    background-image: var(--bg-body-glow);
     background-attachment: fixed;
 }
 
@@ -83,7 +82,7 @@ img, svg {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.10);
+    background: var(--scrollbar-thumb);
     border: 3px solid transparent;
     background-clip: content-box;
     border-radius: var(--radius-pill);
@@ -91,7 +90,7 @@ img, svg {
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.22);
+    background: var(--scrollbar-thumb-hover);
     background-clip: content-box;
 }
 

@@ -9,6 +9,7 @@ use crate::models::{
     CommentExport, MemberExport, DatabaseExport,
     Member, ChecklistItem, CardComment, CardRow, BoardColumns, WorkspaceCardList, MEMBER_COLORS, PRIORITIES,
     EXPORT_FORMAT_VERSION, ReminderSettings, DueReminder,
+    EmailSettings, EmailReminder, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, DEFAULT_EMAIL_RECIPIENT,
 };
 
 #[cfg(test)]
@@ -786,10 +787,14 @@ fn update_card_in(
     description: &str,
     due_date: Option<&str>,
 ) -> CmdResult<()> {
-    // Срок появился впервые — отметка «напоминание показано» снимается.
-    // Практически она и так пуста (напоминать было не о чем), но у базы,
+    // Срок появился впервые — отметки «напоминание отправлено» снимаются.
+    // Практически они и так пусты (напоминать было не о чем), но у базы,
     // пережившей версии до этого правила, срок могли снять уже после
     // напоминания — и тогда старая отметка заглушила бы новый срок навсегда.
+    //
+    // Обе сразу, как и при продлении ретрая (§23.4): канала два, и снятая
+    // наполовину отметка означала бы, что по новому сроку придёт уведомление,
+    // но не письмо.
     conn.execute(
         "UPDATE cards
             SET title = ?1,
@@ -797,6 +802,10 @@ fn update_card_in(
                 due_reminder_sent_at = CASE
                     WHEN due_date IS NULL AND ?3 IS NOT NULL THEN NULL
                     ELSE due_reminder_sent_at
+                END,
+                email_reminder_sent_at = CASE
+                    WHEN due_date IS NULL AND ?3 IS NOT NULL THEN NULL
+                    ELSE email_reminder_sent_at
                 END,
                 due_date = COALESCE(due_date, ?3)
           WHERE id = ?4",
@@ -1840,17 +1849,48 @@ pub fn get_user_profile(state: State<'_, DbState>) -> CmdResult<UserProfile> {
 }
 
 #[tauri::command]
-pub fn update_user_profile(display_name: String, avatar_initials: String, theme: String, state: State<'_, DbState>) -> CmdResult<()> {
+pub fn update_user_profile(display_name: String, avatar_initials: String, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
-
-    conn.execute("UPDATE user_profile SET theme = ?1 WHERE id = 1", params![theme])
-        .map_err(to_string_err)?;
-
     conn.execute(
         "UPDATE members SET name = ?1, initials = ?2 WHERE is_self = 1",
         params![display_name, avatar_initials],
     ).map_err(to_string_err)?;
     Ok(())
+}
+
+// ─── Тема оформления ───
+//
+// Тему сохраняет отдельная команда, а не форма профиля, хотя лежит она в той
+// же строке `user_profile`. Причина конкретная: переключатель применяет тему
+// сразу по щелчку, а форма профиля сохраняется кнопкой — и пока тема ехала
+// вместе с формой, кнопка «Сохранить» затирала выбранную тему тем значением,
+// которое форма подставила при открытии. Ровно так и жил захардкоженный
+// `'dark'` в `header.js`.
+
+/// Что может стоять в `user_profile.theme`.
+///
+/// `system` — не третья палитра, а «спроси Windows»: какая из двух рисуется,
+/// решает `matchMedia` во фронтенде и может передумать без перезапуска.
+pub const THEME_MODES: [&str; 3] = ["dark", "light", "system"];
+
+pub const ERR_UNKNOWN_THEME: &str = "Неизвестная тема оформления";
+
+#[tauri::command]
+pub fn update_theme(theme: String, state: State<'_, DbState>) -> CmdResult<String> {
+    let conn = state.conn.lock().unwrap();
+    write_theme(&conn, &theme)
+}
+
+/// Проверка здесь, а не только в интерфейсе: значение читается при каждом
+/// запуске и подставляется в атрибут на `<html>`. Мусор в этой колонке — это
+/// приложение, которое открывается без темы вообще.
+fn write_theme(conn: &rusqlite::Connection, theme: &str) -> CmdResult<String> {
+    if !THEME_MODES.contains(&theme) {
+        return Err(ERR_UNKNOWN_THEME.to_string());
+    }
+    conn.execute("UPDATE user_profile SET theme = ?1 WHERE id = 1", params![theme])
+        .map_err(to_string_err)?;
+    Ok(theme.to_string())
 }
 
 // ─── Recently viewed boards ───
@@ -2860,15 +2900,20 @@ fn format_due_date_ru(due_date: &str) -> String {
     }
 }
 
-/// Одна проверка сроков целиком: и напоминания о приближающихся, и разбор уже
-/// просроченных.
+/// Одна проверка сроков целиком: напоминания о приближающихся, разбор уже
+/// просроченных и письма за неделю до срока.
 ///
-/// Точка входа одна намеренно: обе половины ходят в одну и ту же базу по
+/// Точка входа одна намеренно: все три половины ходят в одну и ту же базу по
 /// одному и тому же поводу, и вторая фоновая петля рядом означала бы два
 /// расписания вместо одного.
+///
+/// Письма — последними: это единственная часть, которая выходит в сеть и
+/// может задержаться на таймауте. Пока она ждёт сервер, всё, что делается по
+/// базе, уже сделано.
 pub fn run_deadline_checks(app: &tauri::AppHandle) {
     run_due_reminder_check(app);
     run_overdue_check(app);
+    run_email_reminder_check(app);
 }
 
 /// Разбор просроченных задач: пока попытки есть — в «Требуют внимания», когда
@@ -3332,4 +3377,470 @@ pub fn delete_card_comment(id: i64, state: State<'_, DbState>) -> CmdResult<()> 
     conn.execute("DELETE FROM card_comments WHERE id = ?1", params![id])
         .map_err(to_string_err)?;
     Ok(())
+}
+
+// ─── Email-напоминания ───
+//
+// Второй канал того же напоминания: всплывающее окно Windows видно, только
+// пока человек за этим компьютером, а письмо догонит его где угодно. Отсюда и
+// другой срок: окно предупреждает за сутки, письмо — за неделю, когда ещё
+// можно что-то успеть.
+//
+// Здесь — только «что сказать» и «кому»: карточки, сроки, отметки в базе.
+// «Как отправить» (SMTP, TLS, пароль в Диспетчере учётных данных) живёт в
+// `email.rs`, и ни одна функция отсюда не открывает сетевого соединения сама.
+
+/// За сколько дней до срока уходит письмо.
+pub const EMAIL_LEAD_DAYS: i64 = 7;
+
+/// Как часто одна и та же жалоба на неудачную отправку попадает в колокольчик.
+///
+/// Без этого ограничения выключенный интернет давал бы запись каждые
+/// пятнадцать минут — 96 одинаковых строк за сутки, среди которых настоящие
+/// уведомления просто утонут.
+const EMAIL_FAILURE_QUIET_HOURS: i64 = 6;
+
+#[tauri::command]
+pub fn get_email_settings(state: State<'_, DbState>) -> CmdResult<EmailSettings> {
+    let conn = state.conn.lock().unwrap();
+    let mut settings = read_email_settings(&conn)?;
+    // Единственное поле, которое приходит не из базы: сам пароль наружу не
+    // отдаётся никогда, только признак того, что он сохранён.
+    settings.has_password = crate::email::has_password();
+    Ok(settings)
+}
+
+/// Настройки писем из базы. `has_password` здесь всегда `false` — Диспетчер
+/// учётных данных к базе отношения не имеет, и функция о нём не знает.
+///
+/// NULL в базе означает «человек ещё не настраивал»: вместо него
+/// подставляется значение по умолчанию из `models.rs`. Пустая строка — это
+/// уже другое, «стёр нарочно», и она остаётся пустой: иначе убрать
+/// подставленный адрес получателя было бы невозможно, он возвращался бы
+/// после каждого сохранения.
+fn read_email_settings(conn: &rusqlite::Connection) -> CmdResult<EmailSettings> {
+    conn.query_row(
+        "SELECT email_reminders_enabled, email_smtp_host, email_smtp_port,
+                email_username, email_recipient
+           FROM user_profile WHERE id = 1",
+        [],
+        |row| {
+            let enabled: Option<i64> = row.get(0)?;
+            let host: Option<String> = row.get(1)?;
+            let port: Option<i64> = row.get(2)?;
+            let username: Option<String> = row.get(3)?;
+            let recipient: Option<String> = row.get(4)?;
+            Ok(EmailSettings {
+                enabled: enabled.unwrap_or(0) != 0,
+                smtp_host: host.unwrap_or_else(|| DEFAULT_SMTP_HOST.to_string()),
+                smtp_port: port.unwrap_or(DEFAULT_SMTP_PORT),
+                // Логин подставить неоткуда — угадывать чужой адрес почты
+                // приложению нечем.
+                username: username.unwrap_or_default(),
+                recipient: recipient.unwrap_or_else(|| DEFAULT_EMAIL_RECIPIENT.to_string()),
+                has_password: false,
+            })
+        },
+    )
+    .map_err(to_string_err)
+}
+
+#[tauri::command]
+pub fn update_email_settings(
+    enabled: bool,
+    smtp_host: String,
+    smtp_port: i64,
+    username: String,
+    recipient: String,
+    state: State<'_, DbState>,
+) -> CmdResult<EmailSettings> {
+    let conn = state.conn.lock().unwrap();
+    let saved = write_email_settings(
+        &conn,
+        &EmailSettings {
+            enabled,
+            smtp_host,
+            smtp_port,
+            username,
+            recipient,
+            has_password: false,
+        },
+    )?;
+    Ok(EmailSettings {
+        has_password: crate::email::has_password(),
+        ..saved
+    })
+}
+
+/// Сохраняет настройки и возвращает то, что действительно легло в базу.
+///
+/// Пробелы по краям срезаются здесь, а не в интерфейсе: адрес, скопированный
+/// из письма, почти всегда приезжает с пробелом, и SMTP-сервер отвечает на
+/// него невнятной ошибкой разбора.
+fn write_email_settings(
+    conn: &rusqlite::Connection,
+    settings: &EmailSettings,
+) -> CmdResult<EmailSettings> {
+    // Порт зажимается, а не отвергается: поле ввода в интерфейсе числовое, и
+    // отказ сохранить всю форму из-за лишнего нуля в порту раздражал бы
+    // сильнее, чем исправленное значение.
+    let port = settings.smtp_port.clamp(1, 65535);
+
+    conn.execute(
+        "UPDATE user_profile
+            SET email_reminders_enabled = ?1,
+                email_smtp_host = ?2,
+                email_smtp_port = ?3,
+                email_username = ?4,
+                email_recipient = ?5
+          WHERE id = 1",
+        params![
+            settings.enabled as i64,
+            settings.smtp_host.trim(),
+            port,
+            settings.username.trim(),
+            settings.recipient.trim(),
+        ],
+    )
+    .map_err(to_string_err)?;
+
+    read_email_settings(conn)
+}
+
+/// Кладёт пароль приложения в Диспетчер учётных данных Windows.
+///
+/// Команда не трогает базу вовсе — и в этом весь смысл: пароль не должен
+/// оказаться ни в SQLite, ни в резервных копиях, ни в файле экспорта.
+#[tauri::command]
+pub fn set_email_password(password: String) -> CmdResult<bool> {
+    crate::email::store_password(password.trim())?;
+    Ok(crate::email::has_password())
+}
+
+#[tauri::command]
+pub fn clear_email_password() -> CmdResult<bool> {
+    crate::email::clear_password()?;
+    Ok(crate::email::has_password())
+}
+
+/// Отправляет проверочное письмо прямо сейчас и возвращает, что из этого
+/// вышло.
+///
+/// Работает независимо от переключателя «Присылать письма»: связку проверяют
+/// **до** того, как на неё полагаются, а не после.
+///
+/// `(async)` не украшение: отправка занимает от секунды до двадцати, а
+/// обычная команда выполняется в главном потоке — окно на это время
+/// перестало бы отвечать и выглядело бы зависшим.
+#[tauri::command(async)]
+pub fn send_test_email(app: tauri::AppHandle) -> CmdResult<String> {
+    use tauri::Manager;
+
+    // Замок отпускается до соединения: всё приложение ходит в базу через тот
+    // же мьютекс, и держать его на время разговора с почтовым сервером
+    // значило бы подвесить интерфейс ровно на то же время.
+    let settings = {
+        let state = app.state::<DbState>();
+        let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        read_email_settings(&conn)?
+    };
+
+    let password = crate::email::load_password()?
+        .ok_or_else(|| crate::email::ERR_NO_PASSWORD.to_string())?;
+
+    crate::email::send(&settings, &password, &test_email_text())?;
+    Ok(format!("Письмо отправлено на {}", settings.recipient))
+}
+
+fn test_email_text() -> crate::email::Outgoing {
+    crate::email::Outgoing {
+        subject: "TaskFlow: проверка связи".to_string(),
+        body: "Если вы читаете это письмо, значит настройки почты в TaskFlow верны \
+               и напоминания о сроках будут приходить сюда же.\n\n\
+               Письмо отправлено вручную кнопкой «Отправить тестовое письмо» \
+               в настройках приложения."
+            .to_string(),
+    }
+}
+
+/// Карточки, по которым пора отправить письмо: срок наступает не позже чем
+/// через `lead_days`, письмо ещё не отправляли, и ничто на пути к карточке не
+/// в архиве.
+///
+/// **Это и есть догоняющая проверка.** Приложение не служба и сутками не
+/// работает, поэтому окно задано не «за семь дней до срока сегодня», а «срок
+/// в ближайшие семь дней». Карточка, у которой окно открылось, пока
+/// приложение было закрыто, остаётся в выборке до самого срока: единственная
+/// отметка «уже сделано» — это `email_reminder_sent_at`.
+///
+/// Просроченные исключены намеренно: письмо «срок через −2 дня» ничего не
+/// даёт, а сам факт просрочки разбирает `run_overdue_check` — он и пометит
+/// карточку, и покажет уведомление.
+///
+/// Карточки в финальной колонке тоже не в счёт: задача закрыта, напоминать не
+/// о чем. (Уведомления Windows этого пока не проверяют — они писались до
+/// появления `is_final`.)
+fn email_cards_needing_reminder(
+    conn: &rusqlite::Connection,
+    lead_days: i64,
+) -> rusqlite::Result<Vec<EmailReminder>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.title, c.due_date, b.name,
+                CAST(julianday(c.due_date) - julianday(date('now', 'localtime')) AS INTEGER)
+         FROM cards c
+         INNER JOIN columns col ON col.id = c.column_id
+         INNER JOIN boards b ON b.id = col.board_id
+         INNER JOIN workspaces w ON w.id = b.workspace_id
+         WHERE c.due_date IS NOT NULL
+           AND c.email_reminder_sent_at IS NULL
+           AND c.archived = 0
+           AND col.archived = 0
+           AND col.is_final = 0
+           AND b.archived = 0
+           AND w.archived = 0
+           -- Срок — местная календарная дата (§12), поэтому и «сегодня»
+           -- берётся местное: на UTC-сравнении карточка «на сегодня»
+           -- выпадала бы из выборки посреди дня.
+           AND c.due_date >= date('now', 'localtime')
+           AND c.due_date <= date('now', 'localtime', ?1)
+         ORDER BY c.due_date ASC, c.id ASC",
+    )?;
+
+    let rows = stmt.query_map(params![format!("+{} days", lead_days)], |row| {
+        Ok(EmailReminder {
+            card_id: row.get(0)?,
+            title: row.get(1)?,
+            due_date: row.get(2)?,
+            board_name: row.get(3)?,
+            // `julianday` от неразобранной даты вернул бы NULL, и один
+            // испорченный срок уронил бы весь запрос — то есть отменил бы
+            // письма и по всем остальным карточкам.
+            days_left: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+        })
+    })?;
+
+    rows.collect()
+}
+
+/// Отметка «письмо ушло». Ставится только после успешной отправки и только по
+/// одной карточке: упавшая на середине пачка не должна прикрывать собой те,
+/// до которых дело не дошло.
+///
+/// Время в UTC, как и все остальные отметки в базе: это флаг «сделано», а не
+/// то, что читает человек.
+fn mark_email_sent(conn: &rusqlite::Connection, card_id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE cards SET email_reminder_sent_at = datetime('now') WHERE id = ?1",
+        params![card_id],
+    )?;
+    Ok(())
+}
+
+/// Письмо по одной карточке.
+///
+/// Одна карточка — одно письмо, в отличие от уведомлений Windows, где пять
+/// окон подряд человек закрывает не читая. В почтовом ящике письмо про
+/// конкретную задачу можно отложить, переслать и найти поиском, а сводка
+/// «приближается 4 дедлайна» бесполезна ровно тем, что её нельзя разобрать по
+/// частям.
+fn email_reminder_text(card: &EmailReminder) -> crate::email::Outgoing {
+    let due = format_due_date_ru(&card.due_date);
+    let when = match card.days_left {
+        d if d <= 0 => "сегодня".to_string(),
+        1 => "завтра".to_string(),
+        d => format!("через {} {}", d, days_word(d)),
+    };
+
+    crate::email::Outgoing {
+        subject: format!("Срок задачи «{}» — {}", card.title, due),
+        body: format!(
+            "Задача: {}\nДоска: {}\nСрок: {} ({})\n\n\
+             Срок задаётся один раз и не переносится. Если задача не будет \
+             закрыта вовремя, она попадёт в раздел «Требуют внимания», и уже \
+             там можно будет запросить ещё одну попытку — срок сдвинется на \
+             неделю.\n\n\
+             Письмо отправлено приложением TaskFlow.",
+            card.title, card.board_name, due, when
+        ),
+    }
+}
+
+/// «1 день», «2 дня», «5 дней» — как и `pluralize` во фронтенде.
+fn days_word(n: i64) -> &'static str {
+    let n = n.abs();
+    match (n % 10, n % 100) {
+        (_, 11..=14) => "дней",
+        (1, _) => "день",
+        (2..=4, _) => "дня",
+        _ => "дней",
+    }
+}
+
+/// Текст записи в колокольчик о неудачной отправке.
+///
+/// Название задачи в записи обязательно: «не удалось отправить письмо» без
+/// указания, по какой именно задаче, не даёт ни понять масштаб, ни проверить
+/// потом, ушло ли оно в конце концов.
+fn email_failure_notification(card_title: &str, reason: &str) -> (String, String) {
+    (
+        "Письмо не отправлено".to_string(),
+        format!(
+            "Не удалось отправить email-напоминание по задаче «{}»: {}",
+            card_title, reason
+        ),
+    )
+}
+
+/// Пишет запись в колокольчик, если такой же там ещё нет за последние
+/// `quiet_hours` часов. Возвращает `true`, если запись действительно
+/// добавлена.
+///
+/// Повтор отсекается по самому тексту, а не по отдельному полю в базе:
+/// причина отказа — часть текста, поэтому «нет сети» и «сервер не принял
+/// пароль» считаются разными новостями и покажутся обе, а одно и то же
+/// сообщение каждые пятнадцать минут — нет.
+///
+/// `created_at` в таблице — UTC (§12), поэтому и порог берётся от
+/// `datetime('now')` без `localtime`.
+fn record_failure_once(
+    conn: &rusqlite::Connection,
+    title: &str,
+    body: &str,
+    quiet_hours: i64,
+) -> rusqlite::Result<bool> {
+    let already: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM notifications
+              WHERE title = ?1 AND body = ?2
+                AND created_at > datetime('now', ?3)
+              LIMIT 1",
+            params![title, body, format!("-{} hours", quiet_hours)],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if already.is_some() {
+        return Ok(false);
+    }
+
+    conn.execute(
+        "INSERT INTO notifications (title, body) VALUES (?1, ?2)",
+        params![title, body],
+    )?;
+    Ok(true)
+}
+
+/// Записывает отказ в колокольчик. Вызывается только когда замок базы
+/// отпущен — внутри берёт его сам.
+fn report_email_failure(app: &tauri::AppHandle, card_title: &str, reason: &str) {
+    use tauri::Manager;
+
+    log::warn!("email: не отправлено «{}»: {}", card_title, reason);
+
+    let (title, body) = email_failure_notification(card_title, reason);
+    let state = app.state::<DbState>();
+    let conn = match state.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if let Err(e) = record_failure_once(&conn, &title, &body, EMAIL_FAILURE_QUIET_HOURS) {
+        log::warn!("email: не удалось записать уведомление об отказе: {}", e);
+    }
+}
+
+/// Проход отправки писем: собрать карточки, отправить, отметить.
+///
+/// База отпускается на время разговора с почтовым сервером — иначе интерфейс
+/// вставал бы на все двадцать секунд таймаута при каждой проверке. Отсюда три
+/// коротких захода в базу вместо одного длинного: настройки и список,
+/// отметка после каждого письма, запись об отказе.
+pub fn run_email_reminder_check(app: &tauri::AppHandle) {
+    use tauri::Manager;
+
+    let state = app.state::<DbState>();
+
+    let (settings, cards) = {
+        let conn = match state.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let settings = match read_email_settings(&conn) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("email: не удалось прочитать настройки: {}", e);
+                return;
+            }
+        };
+        if !settings.enabled {
+            return;
+        }
+        let cards = match email_cards_needing_reminder(&conn, EMAIL_LEAD_DAYS) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("email: не удалось выбрать карточки: {}", e);
+                return;
+            }
+        };
+        (settings, cards)
+    };
+
+    // Молчание, когда отправлять нечего: жаловаться на ненастроенную почту
+    // при пустом списке значило бы напоминать о ней каждые пятнадцать минут
+    // на ровном месте.
+    let Some(first) = cards.first() else {
+        return;
+    };
+
+    // Настройки и пароль проверяются один раз на проход. Причина отказа
+    // попадает в колокольчик под именем первой ожидающей задачи: она
+    // одинакова для всех, и повторять её по разу на карточку незачем.
+    if let Err(e) = crate::email::check_settings(&settings) {
+        report_email_failure(app, &first.title, &e);
+        return;
+    }
+    let password = match crate::email::load_password() {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            report_email_failure(app, &first.title, crate::email::ERR_NO_PASSWORD);
+            return;
+        }
+        Err(e) => {
+            report_email_failure(app, &first.title, &e);
+            return;
+        }
+    };
+
+    let mut sent = 0usize;
+    for card in &cards {
+        match crate::email::send(&settings, &password, &email_reminder_text(card)) {
+            Ok(()) => {
+                match state.conn.lock() {
+                    Ok(conn) => {
+                        if let Err(e) = mark_email_sent(&conn, card.card_id) {
+                            // Письмо ушло, отметка не легла — следующий проход
+                            // отправит его повторно. Неприятно, но честно:
+                            // потерять напоминание хуже, чем повторить.
+                            log::warn!("email: отправлено, но не отмечено: {}", e);
+                        }
+                    }
+                    Err(_) => return,
+                }
+                sent += 1;
+            }
+            Err(reason) => {
+                // Отказ почти всегда общий — нет сети, не принят пароль,
+                // сервер недоступен, — а не свойство одной карточки.
+                // Продолжать значит получить столько же одинаковых отказов,
+                // сколько карточек в списке, и столько же попыток соединения.
+                // Оставшиеся письма уйдут при следующей проверке: отметка у
+                // них не проставлена.
+                report_email_failure(app, &card.title, &reason);
+                break;
+            }
+        }
+    }
+
+    if sent > 0 {
+        log::info!("email: отправлено писем: {}", sent);
+    }
 }

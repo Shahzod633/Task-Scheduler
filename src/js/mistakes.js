@@ -11,7 +11,7 @@ import * as api from './api.js';
 import Icons from './icons.js';
 import { showCardEditModal } from './board.js';
 import { confirmDialog } from './dialog.js';
-import { renderBarChart, renderLineChart, chartColors } from './charts.js';
+import { renderBarChart, renderLineChart } from './charts.js';
 import { createElement, $, showToast, formatDate, lastNDays, parseTimestamp, toDateKey } from './utils.js';
 
 /// Столько раз можно попросить ещё одну попытку. То же число — в
@@ -106,7 +106,7 @@ function renderCharts(barCanvas, lineCanvas, cards) {
     const countOn = (day, field) => cards.filter(c => c[field] && dayOf(c[field]) === day).length;
 
     const newCounts = days.map(day => countOn(day, 'mistake_marked_at'));
-    renderBarChart(barCanvas, labels, newCounts, { color: chartColors.danger, label: 'Новые ошибки' });
+    renderBarChart(barCanvas, labels, newCounts, { color: 'danger', label: 'Новые ошибки' });
 
     let openedSoFar = 0;
     let closedSoFar = 0;
@@ -119,8 +119,8 @@ function renderCharts(barCanvas, lineCanvas, cards) {
         closedSeries.push(closedSoFar);
     }
     renderLineChart(lineCanvas, labels, [
-        { label: 'Открыто (всего)', data: openedSeries, color: chartColors.danger },
-        { label: 'Исправлено (всего)', data: closedSeries, color: chartColors.success },
+        { label: 'Открыто (всего)', data: openedSeries, color: 'danger' },
+        { label: 'Исправлено (всего)', data: closedSeries, color: 'success' },
     ]);
 }
 

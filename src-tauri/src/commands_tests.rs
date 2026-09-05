@@ -3146,3 +3146,341 @@ fn retries_and_the_archive_reason_survive_an_export_round_trip() {
         Some(crate::models::ARCHIVE_REASON_MAX_RETRIES)
     );
 }
+
+// ─── Email-напоминания ───
+//
+// Здесь проверяется всё, что можно проверить без почтового сервера: кого
+// приложение считает нуждающимся в письме, что оно пишет и что запоминает.
+// Сам SMTP — в `email_tests.rs`.
+
+fn some_email_settings() -> EmailSettings {
+    EmailSettings {
+        enabled: true,
+        smtp_host: "smtp.gmail.com".into(),
+        smtp_port: 465,
+        username: "me@gmail.com".into(),
+        recipient: "you@example.com".into(),
+        has_password: false,
+    }
+}
+
+#[test]
+fn a_deadline_within_the_week_gets_a_letter_and_a_later_one_waits() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    add_card(&conn, col, "Сегодня", 0);
+    add_card(&conn, col, "Через неделю", 7);
+    add_card(&conn, col, "Через восемь дней", 8);
+    add_card(&conn, col, "Вчера", -1);
+
+    // Дальняя граница включена: срок ровно через неделю — это и есть повод.
+    // Просроченная не в счёт — письмо «срок был позавчера» ничего не даёт, а
+    // сам факт просрочки разбирает `run_overdue_check`.
+    let cards = email_cards_needing_reminder(&conn, EMAIL_LEAD_DAYS).unwrap();
+    let titles: Vec<&str> = cards.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, vec!["Сегодня", "Через неделю"]);
+}
+
+#[test]
+fn the_catch_up_does_not_require_the_day_the_window_opened() {
+    // Приложение — не служба и сутками не работает. Окно открылось шесть дней
+    // назад, программа всё это время была закрыта; письмо обязано уйти при
+    // первом же запуске. Отметка «уже сделано» одна — `email_reminder_sent_at`,
+    // и совпадение с сегодняшней датой ни при чём.
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    let card = add_card(&conn, col, "Завтра", 1);
+
+    let cards = email_cards_needing_reminder(&conn, EMAIL_LEAD_DAYS).unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].card_id, card);
+    assert_eq!(cards[0].days_left, 1);
+    assert_eq!(cards[0].board_name, "Доска сроков");
+}
+
+#[test]
+fn a_letter_already_sent_is_not_sent_again() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+    let card = add_card(&conn, col, "Через три дня", 3);
+
+    assert_eq!(email_cards_needing_reminder(&conn, EMAIL_LEAD_DAYS).unwrap().len(), 1);
+    mark_email_sent(&conn, card).unwrap();
+    assert!(
+        email_cards_needing_reminder(&conn, EMAIL_LEAD_DAYS).unwrap().is_empty(),
+        "перезапуск в тот же день не должен слать письмо повторно"
+    );
+}
+
+#[test]
+fn nothing_archived_or_closed_earns_a_letter() {
+    let mut conn = test_db();
+
+    let archived_card_col = board_with_column(&conn);
+    let archived_card = add_card(&conn, archived_card_col, "Убранная карточка", 2);
+    conn.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![archived_card]).unwrap();
+
+    let archived_col = board_with_column(&conn);
+    add_card(&conn, archived_col, "В убранной колонке", 2);
+    conn.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![archived_col]).unwrap();
+
+    let archived_board_col = board_with_column(&conn);
+    add_card(&conn, archived_board_col, "На убранной доске", 2);
+    conn.execute(
+        "UPDATE boards SET archived = 1 WHERE id = (SELECT board_id FROM columns WHERE id = ?1)",
+        params![archived_board_col],
+    ).unwrap();
+
+    // Карточка в «Закрыто»: задача сделана, напоминать не о чем.
+    let board = create_board_in(&mut conn, 1, "С костяком", "").unwrap();
+    let closed = column_id_by_name(&conn, board.id, "Закрыто");
+    add_card(&conn, closed, "Уже закрыта", 2);
+
+    // И одна живая — иначе тест прошёл бы и на запросе, который не находит
+    // вообще ничего.
+    let alive = column_id_by_name(&conn, board.id, "В работе");
+    add_card(&conn, alive, "Живая", 2);
+
+    let cards = email_cards_needing_reminder(&conn, EMAIL_LEAD_DAYS).unwrap();
+    let titles: Vec<&str> = cards.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, vec!["Живая"]);
+}
+
+#[test]
+fn a_renewed_deadline_earns_a_new_letter() {
+    let mut conn = test_db();
+    let board = create_board_in(&mut conn, 1, "Доска", "").unwrap();
+    let first = column_id_by_name(&conn, board.id, "Новые");
+    let card = add_card(&conn, first, "Провалена", -1);
+    conn.execute("UPDATE cards SET is_mistake = 1 WHERE id = ?1", params![card]).unwrap();
+    mark_email_sent(&conn, card).unwrap();
+
+    assert!(email_cards_needing_reminder(&conn, EMAIL_LEAD_DAYS).unwrap().is_empty());
+
+    request_card_retry_in(&conn, card).unwrap();
+
+    // Продление сдвигает срок ровно на неделю — это дальняя граница окна, и
+    // она включена. Отметку письма ретрай снимает (§23.4), иначе по
+    // продлённому сроку не пришло бы ничего.
+    let cards = email_cards_needing_reminder(&conn, EMAIL_LEAD_DAYS).unwrap();
+    assert_eq!(cards.len(), 1, "после продления письмо должно уйти заново");
+    assert_eq!(cards[0].days_left, RETRY_EXTENSION_DAYS);
+}
+
+#[test]
+fn email_settings_start_from_the_defaults_and_keep_what_was_saved() {
+    let conn = test_db();
+
+    let fresh = read_email_settings(&conn).unwrap();
+    assert!(
+        !fresh.enabled,
+        "письма выключены по умолчанию: без сервера и пароля отправить всё равно нечем"
+    );
+    assert_eq!(fresh.smtp_host, DEFAULT_SMTP_HOST);
+    assert_eq!(fresh.smtp_port, DEFAULT_SMTP_PORT);
+    assert_eq!(fresh.recipient, DEFAULT_EMAIL_RECIPIENT);
+    assert_eq!(fresh.username, "", "чужой адрес почты угадывать нечем");
+
+    let saved = write_email_settings(
+        &conn,
+        &EmailSettings {
+            enabled: true,
+            smtp_host: "  smtp.yandex.ru ".into(),
+            smtp_port: 587,
+            username: " me@yandex.ru ".into(),
+            recipient: " you@example.com ".into(),
+            has_password: true,
+        },
+    ).unwrap();
+
+    // Пробелы срезаются на бэкенде: адрес, скопированный из письма, почти
+    // всегда приезжает с пробелом.
+    assert_eq!(saved.smtp_host, "smtp.yandex.ru");
+    assert_eq!(saved.username, "me@yandex.ru");
+    assert_eq!(saved.recipient, "you@example.com");
+    assert_eq!(saved.smtp_port, 587);
+    assert!(saved.enabled);
+    assert!(
+        !saved.has_password,
+        "признак пароля приходит из Диспетчера учётных данных, а не из базы"
+    );
+
+    assert_eq!(read_email_settings(&conn).unwrap(), saved);
+}
+
+#[test]
+fn an_impossible_port_is_pulled_back_into_range() {
+    let conn = test_db();
+
+    // Отказать в сохранении всей формы из-за лишнего нуля в порту значило бы
+    // потерять и остальные поля, которые человек только что вписал.
+    let saved = write_email_settings(
+        &conn,
+        &EmailSettings { smtp_port: 0, ..some_email_settings() },
+    ).unwrap();
+    assert_eq!(saved.smtp_port, 1);
+
+    let saved = write_email_settings(
+        &conn,
+        &EmailSettings { smtp_port: 999_999, ..some_email_settings() },
+    ).unwrap();
+    assert_eq!(saved.smtp_port, 65535);
+}
+
+#[test]
+fn a_field_cleared_on_purpose_stays_cleared() {
+    // Пустое поле в базе — это «стёр нарочно», а значение по умолчанию
+    // подставляется только вместо NULL, то есть «ещё не настраивал». Иначе
+    // убрать подставленный адрес получателя было бы невозможно: он
+    // возвращался бы после каждого сохранения.
+    let conn = test_db();
+    write_email_settings(
+        &conn,
+        &EmailSettings { recipient: String::new(), ..some_email_settings() },
+    ).unwrap();
+    assert_eq!(read_email_settings(&conn).unwrap().recipient, "");
+}
+
+#[test]
+fn the_letter_names_the_task_the_board_and_the_deadline() {
+    let msg = email_reminder_text(&EmailReminder {
+        card_id: 1,
+        title: "Сдать отчёт".into(),
+        due_date: "2026-09-11".into(),
+        board_name: "Работа".into(),
+        days_left: 3,
+    });
+
+    assert_eq!(msg.subject, "Срок задачи «Сдать отчёт» — 11 сентября");
+    assert!(msg.body.contains("Задача: Сдать отчёт"), "получено: {}", msg.body);
+    assert!(msg.body.contains("Доска: Работа"), "получено: {}", msg.body);
+    assert!(msg.body.contains("Срок: 11 сентября (через 3 дня)"), "получено: {}", msg.body);
+}
+
+#[test]
+fn the_last_days_are_named_rather_than_counted() {
+    let card = |days_left| EmailReminder {
+        card_id: 1,
+        title: "Задача".into(),
+        due_date: "2026-09-11".into(),
+        board_name: "Доска".into(),
+        days_left,
+    };
+
+    // «через 0 дней» и «через 1 день» человек читает медленнее, чем
+    // «сегодня» и «завтра», — а это те два случая, когда читать надо быстро.
+    assert!(email_reminder_text(&card(0)).body.contains("(сегодня)"));
+    assert!(email_reminder_text(&card(1)).body.contains("(завтра)"));
+    assert!(email_reminder_text(&card(5)).body.contains("(через 5 дней)"));
+}
+
+#[test]
+fn days_are_counted_in_russian() {
+    assert_eq!(days_word(1), "день");
+    assert_eq!(days_word(2), "дня");
+    assert_eq!(days_word(5), "дней");
+    // Вторая десятка — исключение целиком.
+    assert_eq!(days_word(11), "дней");
+    assert_eq!(days_word(12), "дней");
+    assert_eq!(days_word(14), "дней");
+    assert_eq!(days_word(21), "день");
+    assert_eq!(days_word(22), "дня");
+}
+
+#[test]
+fn a_failed_letter_lands_in_the_bell_by_name() {
+    let conn = test_db();
+    let (title, body) = email_failure_notification("Сдать отчёт", "нет сети");
+
+    assert_eq!(title, "Письмо не отправлено");
+    assert_eq!(
+        body,
+        "Не удалось отправить email-напоминание по задаче «Сдать отчёт»: нет сети"
+    );
+
+    assert!(record_failure_once(&conn, &title, &body, EMAIL_FAILURE_QUIET_HOURS).unwrap());
+
+    // То же самое через пятнадцать минут — не новость, а мусор: за сутки
+    // выключенного интернета таких записей набралось бы девяносто шесть.
+    assert!(!record_failure_once(&conn, &title, &body, EMAIL_FAILURE_QUIET_HOURS).unwrap());
+
+    // А другая причина — новость: «нет сети» и «сервер не принял пароль»
+    // требуют разных действий.
+    let (other_title, other_body) =
+        email_failure_notification("Сдать отчёт", "сервер не принял пароль");
+    assert!(record_failure_once(&conn, &other_title, &other_body, EMAIL_FAILURE_QUIET_HOURS).unwrap());
+
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM notifications", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn a_failure_from_yesterday_is_reported_again() {
+    // Порог — часы, а не «однажды и навсегда»: если почта не работает вторые
+    // сутки, человек должен узнать об этом снова, а не решить, что всё
+    // наладилось.
+    let conn = test_db();
+    let (title, body) = email_failure_notification("Задача", "нет сети");
+    conn.execute(
+        "INSERT INTO notifications (title, body, created_at)
+         VALUES (?1, ?2, datetime('now', '-7 hours'))",
+        params![&title, &body],
+    ).unwrap();
+
+    assert!(record_failure_once(&conn, &title, &body, EMAIL_FAILURE_QUIET_HOURS).unwrap());
+}
+
+#[test]
+fn a_first_deadline_clears_the_letter_mark_too() {
+    let conn = test_db();
+    let col = board_with_column(&conn);
+
+    // Карточка без срока, но с обеими отметками: так выглядит строка из базы,
+    // где срок сняли ещё до того, как он стал неизменяемым.
+    conn.execute(
+        "INSERT INTO cards (column_id, title, description, position,
+                            due_reminder_sent_at, email_reminder_sent_at)
+         VALUES (?1, 'Наследство', '', 0, '2026-01-01 10:00:00', '2026-01-01 10:00:00')",
+        params![col],
+    ).unwrap();
+    let card_id = conn.last_insert_rowid();
+
+    let due = local_day(&conn, 3);
+    update_card_in(&conn, card_id, "Наследство", "", Some(&due)).unwrap();
+
+    // Снимаются обе сразу: канала два, и отметка, снятая наполовину, означала
+    // бы, что по новому сроку придёт уведомление, но не письмо.
+    let mark: Option<String> = conn
+        .query_row("SELECT email_reminder_sent_at FROM cards WHERE id = ?1", params![card_id], |r| r.get(0))
+        .unwrap();
+    assert!(mark.is_none(), "старая отметка заглушила бы письмо о новом сроке");
+    assert_eq!(email_cards_needing_reminder(&conn, EMAIL_LEAD_DAYS).unwrap().len(), 1);
+}
+
+// ─── Тема оформления ───
+
+fn stored_theme(conn: &Connection) -> String {
+    conn.query_row("SELECT theme FROM user_profile WHERE id = 1", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn only_the_three_known_themes_are_stored() {
+    let conn = test_db();
+
+    // По умолчанию тёмная — та, что и была единственной.
+    assert_eq!(stored_theme(&conn), "dark");
+
+    assert_eq!(write_theme(&conn, "light").unwrap(), "light");
+    assert_eq!(stored_theme(&conn), "light");
+
+    assert_eq!(write_theme(&conn, "system").unwrap(), "system");
+    assert_eq!(stored_theme(&conn), "system");
+
+    // Значение читается при каждом запуске и подставляется в атрибут на
+    // <html>; мусор здесь — это приложение, открывшееся без темы вовсе.
+    assert_eq!(write_theme(&conn, "solarized").unwrap_err(), ERR_UNKNOWN_THEME);
+    assert_eq!(stored_theme(&conn), "system", "отказ не должен затирать выбранное");
+}

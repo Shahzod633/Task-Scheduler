@@ -8,6 +8,7 @@ import Icons from './icons.js';
 import { openPopover, closePopovers } from './popover.js';
 import { invalidateMembers } from './members.js';
 import { createElement, $, $$, showToast, formatDate } from './utils.js';
+import { THEME_MODES, THEME_LABELS, getThemeMode, setThemeMode } from './theme.js';
 
 // The version is no longer hardcoded here — it had already drifted from the two
 // other places it lived (package.json, tauri.conf.json). It is now read from
@@ -243,24 +244,14 @@ export async function renderProfileFields(container, opts = {}) {
     nameGroup.appendChild(nameInput);
     container.appendChild(nameGroup);
 
-    const themeGroup = createElement('div', { className: 'form-group' });
-    themeGroup.appendChild(createElement('label', { className: 'form-label' }, 'Тема оформления'));
-    const themeToggle = createElement('div', { className: 'theme-toggle' });
-    themeToggle.appendChild(createElement('button', {
-        className: 'theme-toggle__option theme-toggle__option--active',
-        type: 'button',
-        disabled: 'true'
-    }, 'Тёмная'));
-    themeGroup.appendChild(themeToggle);
-    themeGroup.appendChild(createElement('div', { className: 'form-hint' }, 'Светлая тема появится в следующих версиях'));
-    container.appendChild(themeGroup);
+    container.appendChild(renderThemeSwitch());
 
     const saveBtn = createElement('button', { className: 'btn btn--primary' }, 'Сохранить');
     saveBtn.addEventListener('click', async () => {
         const initials = (initialsInput.value.trim() || 'TF').slice(0, 2).toUpperCase();
         const displayName = nameInput.value.trim() || 'Пользователь';
         try {
-            await api.updateUserProfile(displayName, initials, 'dark');
+            await api.updateUserProfile(displayName, initials);
             updateHeaderAvatar(initials);
             // The profile *is* the `is_self` member now, so every avatar drawn
             // from the cached directory is stale until it is reloaded.
@@ -272,6 +263,56 @@ export async function renderProfileFields(container, opts = {}) {
         }
     });
     container.appendChild(saveBtn);
+}
+
+/**
+ * Переключатель темы: «Тёмная» / «Светлая» / «Как в системе».
+ *
+ * Применяется и сохраняется сразу по щелчку, а не по кнопке «Сохранить» рядом.
+ * Тема — единственная настройка в этой форме, результат которой виден
+ * мгновенно: нажать «Светлая» и не увидеть светлого до нажатия другой кнопки
+ * человек воспримет как поломку. Поэтому и команда у неё своя
+ * (`update_theme`), не общая с профилем.
+ */
+function renderThemeSwitch() {
+    const group = createElement('div', { className: 'form-group' });
+    group.appendChild(createElement('label', { className: 'form-label' }, 'Тема оформления'));
+
+    const toggle = createElement('div', { className: 'theme-toggle' });
+    const buttons = new Map();
+
+    const markActive = () => {
+        const mode = getThemeMode();
+        for (const [value, btn] of buttons) {
+            btn.classList.toggle('theme-toggle__option--active', value === mode);
+        }
+    };
+
+    for (const mode of THEME_MODES) {
+        const btn = createElement('button', {
+            className: 'theme-toggle__option',
+            type: 'button',
+        }, THEME_LABELS[mode]);
+        btn.addEventListener('click', async () => {
+            if (getThemeMode() === mode) return;
+            try {
+                await setThemeMode(mode);
+            } catch (e) {
+                showToast('Не удалось сохранить тему', 'error');
+            }
+            // Разметка приводится к тому, что действительно выбрано: при
+            // неудачной записи `setThemeMode` откатывает режим обратно.
+            markActive();
+        });
+        buttons.set(mode, btn);
+        toggle.appendChild(btn);
+    }
+
+    markActive();
+    group.appendChild(toggle);
+    group.appendChild(createElement('div', { className: 'form-hint' },
+        'В режиме «Как в системе» тема следует за настройкой Windows и меняется на ходу.'));
+    return group;
 }
 
 // ─── Workspaces switcher ───

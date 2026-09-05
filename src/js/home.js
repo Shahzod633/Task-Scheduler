@@ -4,7 +4,7 @@
 
 import * as api from './api.js';
 import { createBoardCard } from './hub.js';
-import { renderBarChart, chartColors } from './charts.js';
+import { renderBarChart } from './charts.js';
 import { createElement, $, showToast, lastNDays } from './utils.js';
 
 export async function renderHomePage(workspaceId) {
@@ -57,7 +57,7 @@ export async function renderHomePage(workspaceId) {
         const labels = days.map(d => d.slice(5));
         const openCount = cards.filter(c => !c.mistake_resolved_at).length;
         mistakeHint.textContent = `Открытых ошибок: ${openCount}`;
-        renderBarChart(chartCanvas, labels, counts, { color: chartColors.danger, label: 'Новые ошибки' });
+        renderBarChart(chartCanvas, labels, counts, { color: 'danger', label: 'Новые ошибки' });
     } catch (e) {
         mistakeHint.textContent = 'Ошибка загрузки графика';
     }
