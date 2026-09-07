@@ -14,9 +14,14 @@ import {
     createFilterState, createFilterToolbar, matchesFilter, isFilterActive,
     groupKeyFor, priorityLabel, priorityModifier, PRIORITIES,
 } from './filters.js';
-import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate, isOverdue, staggerIn, pluralize } from './utils.js';
+import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate, isOverdue, staggerIn, pluralize, debounce, formatDate } from './utils.js';
+import { renderMarkdown } from './markdown.js';
+import { renderDependencies, confirmFinalColumnMove } from './dependencies.js';
 
 let currentBoardId = null;
+// Пространство открытой доски. Нужно выбору карточки для зависимости: тот
+// ищет по всему пространству, а `get_cards` про него ничего не знает.
+let currentWorkspaceId = null;
 let columnsData = [];
 let columnSortable = null;
 let cardSortables = [];
@@ -27,17 +32,41 @@ let isDraggingCard = false;
 // board is opened: another board has other columns, and a stale status filter
 // would hide everything for no visible reason.
 let boardFilter = createFilterState();
+// Какой из двух видов доски открыт: канбан или заметки. Живёт здесь, а не в
+// маршруте, потому что это не отдельный экран — шапка, название и адрес те же,
+// меняется только то, что под шапкой. Сбрасывается вместе с фильтром при
+// переходе на другую доску: заметки чужой доски на месте канбана выглядели бы
+// как потерянные колонки.
+let boardView = 'board';
 
 /**
  * Initialize board view for a given board
  */
 export async function renderBoard(boardId) {
-    if (boardId !== currentBoardId) boardFilter = createFilterState();
+    if (boardId !== currentBoardId) {
+        boardFilter = createFilterState();
+        boardView = 'board';
+    }
     currentBoardId = boardId;
     const content = $('#content');
 
     try {
         const board = await api.getBoard(boardId);
+        currentWorkspaceId = board.workspace_id;
+
+        // Заметкам не нужны ни колонки, ни карточки, ни справочник участников.
+        // Выходим до их загрузки, а не прячем готовый канбан: переключение вида
+        // не повод обойти базу по разу на колонку.
+        if (boardView === 'notes') {
+            const notes = await api.getBoardNotes(boardId);
+            content.innerHTML = '';
+            content.classList.add('view-enter');
+            content.appendChild(createBoardHeader(board));
+            content.appendChild(createNotesPane(boardId, notes));
+            setTimeout(() => content.classList.remove('view-enter'), 420);
+            return;
+        }
+
         const columns = await api.getColumns(boardId);
 
         // The member directory backs the avatars on cards and the quick filter
@@ -241,6 +270,38 @@ function createSoonButton(label, icon) {
     return btn;
 }
 
+/**
+ * Переключатель «Доска / Заметки» у названия доски.
+ *
+ * На этом месте раньше стояла заглушка `createSoonButton('', Icons.grid)` —
+ * серая кнопка с иконкой сетки, которая на щелчок отвечала «появится в
+ * следующих версиях». Теперь она стала рабочей.
+ */
+function createViewSwitch() {
+    const wrap = createElement('div', { className: 'board-view-switch' });
+
+    const views = [
+        { id: 'board', label: 'Доска', icon: Icons.grid },
+        { id: 'notes', label: 'Заметки', icon: Icons.description },
+    ];
+
+    for (const view of views) {
+        const btn = createElement('button', {
+            className: 'board-view-switch__option'
+                + (boardView === view.id ? ' board-view-switch__option--active' : ''),
+            innerHTML: `${view.icon} <span>${view.label}</span>`,
+        });
+        btn.addEventListener('click', () => {
+            if (boardView === view.id) return;
+            boardView = view.id;
+            renderBoard(currentBoardId);
+        });
+        wrap.appendChild(btn);
+    }
+
+    return wrap;
+}
+
 function createBoardHeader(board) {
     const header = createElement('div', { className: 'board-header' });
 
@@ -252,7 +313,7 @@ function createBoardHeader(board) {
     title.addEventListener('click', () => editBoardTitle(board));
     left.appendChild(title);
 
-    left.appendChild(createSoonButton('', Icons.grid));
+    left.appendChild(createViewSwitch());
 
     const right = createElement('div', { className: 'board-header__right' });
 
@@ -304,6 +365,134 @@ function createBoardHeader(board) {
     header.appendChild(left);
     header.appendChild(right);
     return header;
+}
+
+// ─── Заметки доски ───
+//
+// Одна markdown-страница на доску: место для контекста, который никуда не
+// помещается на карточке, — договорённости, ссылки, план. Сознательно не вики:
+// ни списка страниц, ни истории версий.
+
+/** Через сколько после последнего нажатия клавиши уходит сохранение. */
+const NOTES_SAVE_DELAY = 1000;
+
+/**
+ * Панель заметок: текстовое поле, предпросмотр и строка состояния.
+ *
+ * @param {number} boardId
+ * @param {{content: string, updated_at: string|null}} notes уже прочитанные заметки
+ */
+function createNotesPane(boardId, notes) {
+    const pane = createElement('div', { className: 'board-notes' });
+
+    // Текущий текст держим здесь, а не читаем из textarea по месту: предпросмотр
+    // должен показывать то, что человек набрал секунду назад, даже если
+    // сохранение ещё не ушло.
+    let current = notes.content || '';
+    let savedAt = notes.updated_at;
+    // Открываем на просмотре, если есть что читать: на «Заметки» нажимают,
+    // чтобы прочитать их, а не чтобы увидеть разметку. Пустую заметку читать
+    // нечего — там сразу поле ввода.
+    let mode = current.trim() ? 'view' : 'edit';
+
+    const status = createElement('div', { className: 'board-notes__status' });
+    const body = createElement('div', { className: 'board-notes__body' });
+
+    const textarea = createElement('textarea', {
+        className: 'board-notes__editor',
+        placeholder: 'Заметки доски. Поддерживается markdown: # заголовок, **жирный**, - список, > цитата, ```код```',
+        spellcheck: 'false',
+    });
+    textarea.value = current;
+
+    const preview = createElement('div', { className: 'board-notes__preview markdown-body' });
+
+    const setStatus = (text, modifier = '') => {
+        status.textContent = text;
+        status.className = 'board-notes__status' + (modifier ? ` board-notes__status--${modifier}` : '');
+    };
+
+    const showSaved = () => {
+        // `formatDate` — тот же относительный формат, что у комментариев
+        // («только что», «5 мин. назад»), и он же разбирает время из базы как UTC.
+        setStatus(savedAt ? `Сохранено · ${formatDate(savedAt)}` : 'Пока пусто');
+    };
+
+    const save = async (value) => {
+        setStatus('Сохранение…');
+        try {
+            const saved = await api.saveBoardNotes(boardId, value);
+            savedAt = saved.updated_at;
+            showSaved();
+        } catch (error) {
+            console.error('Не удалось сохранить заметки:', error);
+            // Тост здесь был бы навязчив — печать продолжается, и он всплывал бы
+            // на каждую неудачную попытку. Строка состояния держит ошибку перед
+            // глазами ровно столько, сколько она длится.
+            setStatus('Не удалось сохранить', 'error');
+        }
+    };
+
+    const saveSoon = debounce(save, NOTES_SAVE_DELAY);
+
+    textarea.addEventListener('input', () => {
+        current = textarea.value;
+        setStatus('Черновик…');
+        saveSoon(current);
+    });
+
+    // ─── Переключатель «Редактировать» / «Просмотр» ───
+    const modeSwitch = createElement('div', { className: 'board-notes__modes' });
+    const modes = [
+        { id: 'edit', label: 'Редактировать' },
+        { id: 'view', label: 'Просмотр' },
+    ];
+
+    // `focus` просят только при щелчке по переключателю: на первой отрисовке
+    // панель ещё не в документе, и `focus()` на открепленном элементе молча
+    // ничего не делает.
+    const applyMode = (focus = false) => {
+        textarea.classList.toggle('hidden', mode !== 'edit');
+        preview.classList.toggle('hidden', mode !== 'view');
+        if (mode === 'view') {
+            // Предпросмотр рисуется из `current`, а не из сохранённого текста:
+            // между последним нажатием клавиши и записью в базу проходит секунда,
+            // и всё это время они расходятся.
+            preview.innerHTML = current.trim()
+                ? renderMarkdown(current)
+                : '<p class="board-notes__empty">Заметок пока нет.</p>';
+        }
+        for (const btn of modeSwitch.children) {
+            btn.classList.toggle('board-notes__mode--active', btn.dataset.mode === mode);
+        }
+        if (focus && mode === 'edit') textarea.focus();
+    };
+
+    for (const item of modes) {
+        const btn = createElement('button', {
+            className: 'board-notes__mode',
+            'data-mode': item.id,
+        }, item.label);
+        btn.addEventListener('click', () => {
+            if (mode === item.id) return;
+            mode = item.id;
+            applyMode(true);
+        });
+        modeSwitch.appendChild(btn);
+    }
+
+    const toolbar = createElement('div', { className: 'board-notes__toolbar' });
+    toolbar.appendChild(modeSwitch);
+    toolbar.appendChild(status);
+
+    body.appendChild(textarea);
+    body.appendChild(preview);
+    pane.appendChild(toolbar);
+    pane.appendChild(body);
+
+    showSaved();
+    applyMode();
+    return pane;
 }
 
 /**
@@ -565,7 +754,9 @@ function createCardElement(cardData) {
     // Metadata
     const assignee = findMember(cardData.assignee_id);
     const checklistTotal = cardData.checklist_total || 0;
-    const hasMeta = cardData.description || cardData.due_date || assignee || checklistTotal > 0;
+    const blockedOpen = cardData.blocked_open || 0;
+    const hasMeta = cardData.description || cardData.due_date || assignee
+        || checklistTotal > 0 || blockedOpen > 0;
     if (hasMeta) {
         const meta = createElement('div', { className: 'card__meta' });
 
@@ -577,6 +768,17 @@ function createCardElement(cardData) {
                 className: `card__meta-item card__checklist ${done === checklistTotal ? 'card__checklist--complete' : ''}`,
                 innerHTML: `${Icons.checkSquare} <span>${done} из ${checklistTotal}</span>`,
                 'data-tooltip': 'Выполнено пунктов чек-листа'
+            }));
+        }
+
+        // Значок звена — только когда блокировки ещё не сняты. Доведённая до
+        // конца блокирующая задача уже ничего не держит, и напоминать о ней на
+        // лицевой стороне значит держать в поле зрения решённый вопрос.
+        if (blockedOpen > 0) {
+            meta.appendChild(createElement('div', {
+                className: 'card__meta-item card__blocked',
+                innerHTML: `${Icons.link} <span>${blockedOpen}</span>`,
+                'data-tooltip': `Ждёт ${blockedOpen} ${pluralize(blockedOpen, ['задачу', 'задачи', 'задач'])}`,
             }));
         }
 
@@ -694,6 +896,10 @@ function showCardMenu(event, cardData) {
  */
 export function showCardEditModal(cardData, options = {}) {
     const onChange = options.onChange || (() => renderBoard(currentBoardId));
+    // Пространство нужно выбору карточки для зависимости. Экраны, открывающие
+    // это окно не с доски («Список», палитра, планировщик, «Требуют внимания»),
+    // знают его сами и передают явно; для доски оно взято при её отрисовке.
+    const workspaceId = options.workspaceId || currentWorkspaceId;
     const existing = $('.modal-overlay');
     if (existing) existing.remove();
 
@@ -833,6 +1039,16 @@ export function showCardEditModal(cardData, options = {}) {
 
     // Loads asynchronously; the modal is already on screen by then.
     renderChecklist(body, cardData.id, () => { checklistDirty = true; });
+    // Зависимости, как и чек-лист, пишутся сразу и видны на лицевой стороне
+    // карточки значком звена — значит, доску после правок надо обновить.
+    renderDependencies(body, cardData, {
+        workspaceId,
+        onChange: () => { checklistDirty = true; },
+        // Открытие связанной карточки приходит отсюда, а не изнутри модуля
+        // зависимостей: тот не импортирует `board.js`, иначе вышло бы кольцо.
+        // Карточку он передаёт уже прочитанной целиком.
+        onOpenCard: (linked) => showCardEditModal(linked, { onChange: () => {}, workspaceId }),
+    });
     // Комментарии сохраняются сразу, поэтому окно про них ничего не помнит и
     // обновлять доску из-за них не нужно: на лицевой стороне карточки их нет.
     renderComments(body, cardData.id);
@@ -1184,11 +1400,12 @@ function initSortable() {
                 // карточку на прежнее место в DOM — в базу при этом не уходит
                 // ничего, откатывать нечего.
                 if (evt.to !== evt.from && evt.to.dataset.final === '1') {
-                    const ok = await confirmDialog({
-                        title: 'Перенести в финальную колонку?',
-                        message: 'Перемещение в финальную колонку необратимо — карточку нельзя будет вернуть обратно.',
-                        confirmText: 'Подтвердить',
-                        danger: true,
+                    // Общий вопрос на все три двери (доска, «Список», Inbox) —
+                    // он же дописывает строку про незавершённые блокировки.
+                    const target = columnsData.find(c => c.id === newColumnId);
+                    const ok = await confirmFinalColumnMove({
+                        cardId,
+                        columnName: target ? target.name : '',
                     });
                     if (!ok) {
                         returnCardToItsPlace(evt);

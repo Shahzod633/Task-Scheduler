@@ -128,6 +128,15 @@ pub fn run() {
             commands::record_board_view,
             commands::get_recent_boards,
 
+            commands::get_board_notes,
+            commands::save_board_notes,
+
+            commands::get_workload_summary,
+
+            commands::list_card_dependencies,
+            commands::add_card_dependency,
+            commands::remove_card_dependency,
+
             commands::get_inbox_column,
             commands::get_cards_with_due_dates,
 

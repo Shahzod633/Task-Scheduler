@@ -113,7 +113,7 @@ function buildGrid(grid, cards, workspaceId) {
                 chip.appendChild(createElement('span', { className: 'planner-card-chip__board' }, card.board_name));
             }
             chip.addEventListener('click', () => {
-                showCardEditModal(card, { onChange: () => renderPlannerPage(workspaceId) });
+                showCardEditModal(card, { onChange: () => renderPlannerPage(workspaceId), workspaceId });
             });
             cell.appendChild(chip);
         }

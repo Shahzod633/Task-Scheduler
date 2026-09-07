@@ -3484,3 +3484,449 @@ fn only_the_three_known_themes_are_stored() {
     assert_eq!(write_theme(&conn, "solarized").unwrap_err(), ERR_UNKNOWN_THEME);
     assert_eq!(stored_theme(&conn), "system", "отказ не должен затирать выбранное");
 }
+
+// ─── Заметки доски ───
+
+/// Доска в свежей базе — минимум, нужный заметкам (внешний ключ на `boards`).
+fn board_for_notes(conn: &Connection) -> i64 {
+    conn.execute(
+        "INSERT INTO boards (workspace_id, name, gradient) VALUES (1, 'Доска с заметками', 'g')",
+        (),
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+#[test]
+fn notes_of_a_board_that_never_had_any_are_empty_not_an_error() {
+    let conn = test_db();
+    let board_id = board_for_notes(&conn);
+
+    let notes = read_notes(&conn, board_id).unwrap();
+    assert_eq!(notes.content, "");
+    // Времени нет: выдуманная отметка «сейчас» показалась бы в интерфейсе
+    // как «только что сохранено», хотя человек ничего не писал.
+    assert!(notes.updated_at.is_none());
+
+    // И само чтение строку не завело — иначе открытие вкладки писало бы в базу.
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM board_notes", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn saving_twice_updates_the_single_row_instead_of_adding_one() {
+    let conn = test_db();
+    let board_id = board_for_notes(&conn);
+
+    write_notes(&conn, board_id, "# Первая версия".to_string()).unwrap();
+    write_notes(&conn, board_id, "# Вторая версия".to_string()).unwrap();
+
+    let rows: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM board_notes WHERE board_id = ?1",
+        params![board_id], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(rows, 1, "UPSERT обязан держать одну строку на доску");
+
+    let notes = read_notes(&conn, board_id).unwrap();
+    assert_eq!(notes.content, "# Вторая версия");
+    assert!(notes.updated_at.is_some());
+}
+
+#[test]
+fn notes_are_kept_apart_per_board() {
+    let conn = test_db();
+    let first = board_for_notes(&conn);
+    let second = board_for_notes(&conn);
+
+    write_notes(&conn, first, "заметка первой доски".to_string()).unwrap();
+    write_notes(&conn, second, "заметка второй доски".to_string()).unwrap();
+
+    assert_eq!(read_notes(&conn, first).unwrap().content, "заметка первой доски");
+    assert_eq!(read_notes(&conn, second).unwrap().content, "заметка второй доски");
+}
+
+#[test]
+fn empty_content_is_stored_rather_than_leaving_the_previous_text() {
+    let conn = test_db();
+    let board_id = board_for_notes(&conn);
+
+    write_notes(&conn, board_id, "было что-то".to_string()).unwrap();
+    // Человек стёр всё в поле: автосохранение обязано записать пустоту, а не
+    // счесть её «нечего сохранять» и оставить старый текст в базе.
+    write_notes(&conn, board_id, String::new()).unwrap();
+
+    assert_eq!(read_notes(&conn, board_id).unwrap().content, "");
+}
+
+// ─── Нагрузка по исполнителям ───
+
+/// Доска с обычной и финальной колонкой; возвращает id обеих.
+fn workload_board(conn: &Connection, workspace_id: i64, name: &str) -> (i64, i64) {
+    conn.execute(
+        "INSERT INTO boards (workspace_id, name, gradient) VALUES (?1, ?2, 'g')",
+        params![workspace_id, name],
+    ).unwrap();
+    let board_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO columns (board_id, name, position, is_final) VALUES (?1, 'В работе', 0, 0)",
+        params![board_id],
+    ).unwrap();
+    let open_col = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO columns (board_id, name, position, is_final) VALUES (?1, 'Закрыто', 1, 1)",
+        params![board_id],
+    ).unwrap();
+    let final_col = conn.last_insert_rowid();
+
+    (open_col, final_col)
+}
+
+fn add_member(conn: &Connection, name: &str) -> i64 {
+    conn.execute(
+        "INSERT INTO members (name, initials, color) VALUES (?1, 'XX', '#123456')",
+        params![name],
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+fn assigned_card(conn: &Connection, column_id: i64, title: &str, assignee: Option<i64>, priority: &str) -> i64 {
+    conn.execute(
+        "INSERT INTO cards (column_id, title, position, assignee_id, priority) VALUES (?1, ?2, 0, ?3, ?4)",
+        params![column_id, title, assignee, priority],
+    ).unwrap();
+    conn.last_insert_rowid()
+}
+
+/// Строка виджета по имени участника — справочник общий, и в свежей базе в нём
+/// уже лежит запись «себя», перенесённая из `user_profile`.
+fn workload_of<'a>(rows: &'a [WorkloadRow], name: &str) -> &'a WorkloadRow {
+    rows.iter().find(|r| r.member.name == name)
+        .unwrap_or_else(|| panic!("нет строки для участника «{}»", name))
+}
+
+#[test]
+fn workload_counts_open_cards_per_member_and_priority() {
+    let conn = test_db();
+    let (open_col, _final_col) = workload_board(&conn, 1, "Доска");
+    let petr = add_member(&conn, "Пётр");
+    let anna = add_member(&conn, "Анна");
+
+    assigned_card(&conn, open_col, "П-1", Some(petr), "High");
+    assigned_card(&conn, open_col, "П-2", Some(petr), "High");
+    assigned_card(&conn, open_col, "П-3", Some(petr), "Low");
+    assigned_card(&conn, open_col, "А-1", Some(anna), "Medium");
+
+    let rows = build_workload_summary(&conn, 1).unwrap();
+
+    let p = workload_of(&rows, "Пётр");
+    assert_eq!((p.total, p.high, p.medium, p.low), (3, 2, 0, 1));
+
+    let a = workload_of(&rows, "Анна");
+    assert_eq!((a.total, a.high, a.medium, a.low), (1, 0, 1, 0));
+}
+
+#[test]
+fn a_card_moved_to_the_final_column_stops_counting() {
+    let conn = test_db();
+    let (open_col, final_col) = workload_board(&conn, 1, "Доска");
+    let petr = add_member(&conn, "Пётр");
+
+    let card = assigned_card(&conn, open_col, "Задача", Some(petr), "High");
+    assert_eq!(workload_of(&build_workload_summary(&conn, 1).unwrap(), "Пётр").total, 1);
+
+    // Ровно проверка из задания: довели до «Закрыто» — ушла из нагрузки.
+    conn.execute("UPDATE cards SET column_id = ?1 WHERE id = ?2", params![final_col, card]).unwrap();
+
+    let rows = build_workload_summary(&conn, 1).unwrap();
+    let p = workload_of(&rows, "Пётр");
+    assert_eq!((p.total, p.high), (0, 0));
+}
+
+#[test]
+fn archived_cards_and_archived_containers_are_left_out() {
+    let conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Живая");
+    let petr = add_member(&conn, "Пётр");
+
+    assigned_card(&conn, open_col, "Живая задача", Some(petr), "Medium");
+
+    let archived_card = assigned_card(&conn, open_col, "Убранная", Some(petr), "High");
+    conn.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![archived_card]).unwrap();
+
+    // Карточка в архивной колонке и карточка на архивной доске тоже не в счёт:
+    // «Список» их не показывает, и нагрузкой они быть не могут.
+    let (hidden_col, _) = workload_board(&conn, 1, "Убранная доска");
+    assigned_card(&conn, hidden_col, "На архивной доске", Some(petr), "High");
+    conn.execute(
+        "UPDATE boards SET archived = 1 WHERE name = 'Убранная доска'", (),
+    ).unwrap();
+
+    let rows = build_workload_summary(&conn, 1).unwrap();
+    let p = workload_of(&rows, "Пётр");
+    assert_eq!((p.total, p.medium, p.high), (1, 1, 0));
+}
+
+#[test]
+fn a_member_without_open_cards_still_has_a_row() {
+    let conn = test_db();
+    workload_board(&conn, 1, "Доска");
+    add_member(&conn, "Свободный");
+
+    // LEFT JOIN обязан оставить строку: «у кого сейчас пусто» — такой же
+    // ответ виджета, как и «у кого завал».
+    let rows = build_workload_summary(&conn, 1).unwrap();
+    let free = workload_of(&rows, "Свободный");
+    assert_eq!((free.total, free.low, free.medium, free.high), (0, 0, 0, 0));
+}
+
+#[test]
+fn workload_stays_inside_its_workspace() {
+    let conn = test_db();
+    conn.execute("INSERT INTO workspaces (name) VALUES ('Второе')", ()).unwrap();
+    let other_ws = conn.last_insert_rowid();
+
+    let (here, _) = workload_board(&conn, 1, "Здесь");
+    let (there, _) = workload_board(&conn, other_ws, "Там");
+    let petr = add_member(&conn, "Пётр");
+
+    assigned_card(&conn, here, "Тут", Some(petr), "High");
+    assigned_card(&conn, there, "Там", Some(petr), "High");
+    assigned_card(&conn, there, "И там", Some(petr), "Low");
+
+    // Участник один на всё приложение, а нагрузка у него в каждом пространстве
+    // своя — `members` не знает про пространства вовсе.
+    assert_eq!(workload_of(&build_workload_summary(&conn, 1).unwrap(), "Пётр").total, 1);
+    assert_eq!(workload_of(&build_workload_summary(&conn, other_ws).unwrap(), "Пётр").total, 2);
+}
+
+#[test]
+fn a_card_without_a_priority_is_counted_as_medium() {
+    let conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Доска");
+    let petr = add_member(&conn, "Пётр");
+
+    // NULL в `priority` проходит CHECK-ограничение и у старых карточек
+    // встречается. Без COALESCE такая карточка попала бы в `total`, но ни в
+    // одну из трёх колонок, и разбивка перестала бы сходиться с суммой.
+    conn.execute(
+        "INSERT INTO cards (column_id, title, position, assignee_id, priority) VALUES (?1, 'Без приоритета', 0, ?2, NULL)",
+        params![open_col, petr],
+    ).unwrap();
+
+    let rows = build_workload_summary(&conn, 1).unwrap();
+    let p = workload_of(&rows, "Пётр");
+    assert_eq!((p.total, p.medium), (1, 1));
+    assert_eq!(p.low + p.medium + p.high, p.total, "разбивка обязана сходиться с итогом");
+}
+
+#[test]
+fn unassigned_cards_belong_to_nobody() {
+    let conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Доска");
+    let petr = add_member(&conn, "Пётр");
+
+    assigned_card(&conn, open_col, "Ничья", None, "High");
+    assigned_card(&conn, open_col, "Петина", Some(petr), "High");
+
+    let rows = build_workload_summary(&conn, 1).unwrap();
+    assert_eq!(workload_of(&rows, "Пётр").total, 1);
+    // Ничейная карточка не должна осесть ни на ком: виджет про людей, а
+    // «не назначено» — это не человек.
+    let assigned: i64 = rows.iter().map(|r| r.total).sum();
+    assert_eq!(assigned, 1);
+}
+
+// ─── Зависимости между карточками ───
+
+/// Две карточки в одной рабочей колонке — минимум для связи.
+fn dep_pair(conn: &Connection) -> (i64, i64) {
+    let (open_col, _final_col) = workload_board(conn, 1, "Доска зависимостей");
+    let a = assigned_card(conn, open_col, "A", None, "Medium");
+    let b = assigned_card(conn, open_col, "B", None, "Medium");
+    (a, b)
+}
+
+#[test]
+fn a_card_cannot_block_itself() {
+    let conn = test_db();
+    let (a, _b) = dep_pair(&conn);
+    assert_eq!(create_dependency(&conn, a, a).unwrap_err(), ERR_DEPENDENCY_SELF);
+}
+
+#[test]
+fn the_same_dependency_is_not_stored_twice() {
+    let conn = test_db();
+    let (a, b) = dep_pair(&conn);
+
+    create_dependency(&conn, a, b).unwrap();
+    assert_eq!(create_dependency(&conn, a, b).unwrap_err(), ERR_DEPENDENCY_EXISTS);
+
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM card_dependencies", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn a_dependency_closing_the_circle_is_refused() {
+    let conn = test_db();
+    let (a, b) = dep_pair(&conn);
+
+    // Ровно проверка из задания: A блокирует B, потом B пытается блокировать A.
+    create_dependency(&conn, a, b).unwrap();
+    assert_eq!(create_dependency(&conn, b, a).unwrap_err(), ERR_DEPENDENCY_CYCLE);
+}
+
+#[test]
+fn a_longer_circle_is_refused_too() {
+    let conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Цепочка");
+    let a = assigned_card(&conn, open_col, "A", None, "Medium");
+    let b = assigned_card(&conn, open_col, "B", None, "Medium");
+    let c = assigned_card(&conn, open_col, "C", None, "Medium");
+
+    // A → B → C, и попытка замкнуть C → A. Проверки на дубль здесь мало:
+    // ребро C→A ни одну из существующих связей не повторяет.
+    create_dependency(&conn, a, b).unwrap();
+    create_dependency(&conn, b, c).unwrap();
+    assert_eq!(create_dependency(&conn, c, a).unwrap_err(), ERR_DEPENDENCY_CYCLE);
+
+    // Ветка в сторону кругом не является, и мешать ей нечему.
+    let d = assigned_card(&conn, open_col, "D", None, "Medium");
+    create_dependency(&conn, c, d).unwrap();
+}
+
+#[test]
+fn both_sides_are_listed_separately() {
+    let conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Доска");
+    let a = assigned_card(&conn, open_col, "A", None, "Medium");
+    let b = assigned_card(&conn, open_col, "B", None, "Medium");
+    let c = assigned_card(&conn, open_col, "C", None, "Medium");
+
+    create_dependency(&conn, a, b).unwrap();
+    create_dependency(&conn, c, b).unwrap();
+
+    let deps = read_dependencies(&conn, b).unwrap();
+    assert_eq!(deps.blocking.len(), 0, "B никого не блокирует");
+    assert_eq!(deps.blocked_by.len(), 2, "B заблокирована двумя");
+
+    let a_deps = read_dependencies(&conn, a).unwrap();
+    assert_eq!(a_deps.blocking.len(), 1);
+    assert_eq!(a_deps.blocking[0].title, "B");
+    assert_eq!(a_deps.blocked_by.len(), 0);
+}
+
+#[test]
+fn a_blocker_in_the_final_column_reads_as_done() {
+    let conn = test_db();
+    let (open_col, final_col) = workload_board(&conn, 1, "Доска");
+    let blocker = assigned_card(&conn, open_col, "Блокирующая", None, "Medium");
+    let blocked = assigned_card(&conn, open_col, "Заблокированная", None, "Medium");
+    create_dependency(&conn, blocker, blocked).unwrap();
+
+    let before = read_dependencies(&conn, blocked).unwrap();
+    assert!(!before.blocked_by[0].is_done, "пока не в финальной — не завершена");
+
+    conn.execute("UPDATE cards SET column_id = ?1 WHERE id = ?2", params![final_col, blocker]).unwrap();
+
+    let after = read_dependencies(&conn, blocked).unwrap();
+    assert!(after.blocked_by[0].is_done, "в финальной колонке — завершена");
+    // Связь при этом никуда не делась: доведённая до конца блокировка остаётся
+    // видна в окне карточки, просто гашёной.
+    assert_eq!(after.blocked_by.len(), 1);
+}
+
+/// Сколько незавершённых карточек блокирует эту — то самое число, что рисует
+/// значок звена. Выражение то же, что в `BLOCKED_OPEN_COUNT`.
+fn blocked_open_of(conn: &Connection, card_id: i64) -> i64 {
+    conn.query_row(
+        "SELECT COUNT(*) FROM card_dependencies d
+            INNER JOIN cards bc ON bc.id = d.blocker_card_id
+            INNER JOIN columns bcol ON bcol.id = bc.column_id
+          WHERE d.blocked_card_id = ?1 AND bcol.is_final = 0",
+        params![card_id], |r| r.get(0),
+    ).unwrap()
+}
+
+#[test]
+fn the_card_face_counts_only_unfinished_blockers() {
+    let conn = test_db();
+    let (open_col, final_col) = workload_board(&conn, 1, "Доска");
+    let blocked = assigned_card(&conn, open_col, "Ждёт", None, "Medium");
+    let first = assigned_card(&conn, open_col, "Первая", None, "Medium");
+    let second = assigned_card(&conn, open_col, "Вторая", None, "Medium");
+
+    create_dependency(&conn, first, blocked).unwrap();
+    create_dependency(&conn, second, blocked).unwrap();
+    assert_eq!(blocked_open_of(&conn, blocked), 2);
+
+    conn.execute("UPDATE cards SET column_id = ?1 WHERE id = ?2", params![final_col, first]).unwrap();
+    assert_eq!(blocked_open_of(&conn, blocked), 1, "закрытая блокировка больше не в счёт");
+
+    conn.execute("UPDATE cards SET column_id = ?1 WHERE id = ?2", params![final_col, second]).unwrap();
+    assert_eq!(blocked_open_of(&conn, blocked), 0, "значок должен исчезнуть");
+}
+
+#[test]
+fn dropping_a_cards_dependencies_clears_both_directions() {
+    let conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Доска");
+    let middle = assigned_card(&conn, open_col, "Середина", None, "Medium");
+    let earlier = assigned_card(&conn, open_col, "До", None, "Medium");
+    let later = assigned_card(&conn, open_col, "После", None, "Medium");
+
+    create_dependency(&conn, earlier, middle).unwrap();
+    create_dependency(&conn, middle, later).unwrap();
+
+    drop_dependencies_of(&conn, middle).unwrap();
+
+    // Обе стороны, а не только та, где карточка блокирующая: иначе в чужом
+    // списке осталась бы ссылка на исчезнувшую задачу.
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM card_dependencies", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn wiping_a_boards_dependencies_reaches_links_to_other_boards() {
+    let conn = test_db();
+    let (col_a, _) = workload_board(&conn, 1, "Первая доска");
+    let (col_b, _) = workload_board(&conn, 1, "Вторая доска");
+    let here = assigned_card(&conn, col_a, "Тут", None, "Medium");
+    let there = assigned_card(&conn, col_b, "Там", None, "Medium");
+
+    // Связь через границу досок: чистка по доске обязана снять и её, иначе
+    // удаление доски упрётся во внешний ключ.
+    create_dependency(&conn, here, there).unwrap();
+
+    let board_a: i64 = conn.query_row(
+        "SELECT board_id FROM columns WHERE id = ?1", params![col_a], |r| r.get(0),
+    ).unwrap();
+
+    drop_dependencies_where(
+        &conn,
+        "SELECT c.id FROM cards c INNER JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1",
+        board_a,
+    ).unwrap();
+
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM card_dependencies", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn a_pre_existing_circle_does_not_hang_the_check() {
+    let conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Доска");
+    let a = assigned_card(&conn, open_col, "A", None, "Medium");
+    let b = assigned_card(&conn, open_col, "B", None, "Medium");
+    let c = assigned_card(&conn, open_col, "C", None, "Medium");
+
+    // Круг заводится в обход проверки — так он мог бы приехать из
+    // восстановленной базы или из будущего импорта.
+    conn.execute("INSERT INTO card_dependencies (blocker_card_id, blocked_card_id) VALUES (?1, ?2)", params![a, b]).unwrap();
+    conn.execute("INSERT INTO card_dependencies (blocker_card_id, blocked_card_id) VALUES (?1, ?2)", params![b, a]).unwrap();
+
+    // Без списка посещённых обход ушёл бы по кругу навсегда. Здесь он обязан
+    // завершиться — с любым ответом.
+    let _ = create_dependency(&conn, c, a);
+    let _ = dependency_path_exists(&conn, a, c).unwrap();
+}

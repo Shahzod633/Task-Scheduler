@@ -1,13 +1,13 @@
 use base64::Engine as _;
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::State;
 use crate::db::DbState;
 use crate::models::{
-    Workspace, Board, Column, Card, Notification, UserProfile, BackupInfo,
+    Workspace, Board, Column, Card, Notification, UserProfile, BoardNotes, BackupInfo,
     BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, ChecklistItemExport,
     CommentExport, MemberExport, DatabaseExport,
-    Member, ChecklistItem, CardComment, CardRow, BoardColumns, WorkspaceCardList, MEMBER_COLORS, PRIORITIES,
+    Member, ChecklistItem, CardComment, CardRow, CardDependencies, DependencyCard, BoardColumns, WorkspaceCardList, WorkloadRow, MEMBER_COLORS, PRIORITIES,
     EXPORT_FORMAT_VERSION, ReminderSettings, DueReminder,
     EmailSettings, EmailReminder, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, DEFAULT_EMAIL_RECIPIENT,
 };
@@ -682,6 +682,7 @@ fn row_to_card(row: &rusqlite::Row) -> rusqlite::Result<Card> {
         retry_count: row.get::<_, Option<i64>>(14)?.unwrap_or(0),
         checklist_total: 0,
         checklist_done: 0,
+        blocked_open: 0,
         labels: Vec::new(),
         board_id: None,
         board_name: None,
@@ -695,12 +696,27 @@ const CHECKLIST_COUNTS: &str = "
     (SELECT COUNT(*) FROM checklist_items ci WHERE ci.card_id = cards.id),
     (SELECT COUNT(*) FROM checklist_items ci WHERE ci.card_id = cards.id AND ci.is_done = 1)";
 
-/// `row_to_card` plus the two checklist aggregates, which follow
-/// `CARD_COLUMNS` — отсюда индексы 15 и 16.
+/// Сколько незавершённых карточек блокирует эту — значок звена на лицевой
+/// стороне. Считается тем же запросом, что и остальная доска: отдельный поход
+/// в базу на карточку вернул бы N+1, от которого счётчики чек-листа как раз
+/// и ушли.
+///
+/// «Незавершённая» = лежит не в финальной колонке. Заблокированность снимает
+/// именно доведение блокирующей задачи до конца, а не её архивация — архив
+/// зависимости просто удаляет.
+const BLOCKED_OPEN_COUNT: &str = "
+    (SELECT COUNT(*) FROM card_dependencies d
+        INNER JOIN cards bc ON bc.id = d.blocker_card_id
+        INNER JOIN columns bcol ON bcol.id = bc.column_id
+      WHERE d.blocked_card_id = cards.id AND bcol.is_final = 0)";
+
+/// `row_to_card` plus the three card-face aggregates, which follow
+/// `CARD_COLUMNS` — отсюда индексы 15, 16 и 17.
 fn row_to_card_with_checklist(row: &rusqlite::Row) -> rusqlite::Result<Card> {
     let mut card = row_to_card(row)?;
     card.checklist_total = row.get(15)?;
     card.checklist_done = row.get(16)?;
+    card.blocked_open = row.get(17)?;
     Ok(card)
 }
 
@@ -719,8 +735,8 @@ fn row_to_card_with_board(row: &rusqlite::Row) -> rusqlite::Result<Card> {
 pub fn get_cards(column_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Card>> {
     let conn = state.conn.lock().unwrap();
     let sql = format!(
-        "SELECT {}, {} FROM cards WHERE column_id = ?1 AND archived = 0 ORDER BY position ASC",
-        CARD_COLUMNS, CHECKLIST_COUNTS
+        "SELECT {}, {}, {} FROM cards WHERE column_id = ?1 AND archived = 0 ORDER BY position ASC",
+        CARD_COLUMNS, CHECKLIST_COUNTS, BLOCKED_OPEN_COUNT
     );
     let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
 
@@ -758,7 +774,7 @@ pub fn create_card(column_id: i64, title: String, description: String, state: St
         id, column_id, title, description, position: pos, due_date: None, created_at: "".into(), archived: 0,
         is_mistake: false, mistake_marked_at: None, mistake_resolved_at: None, retry_count: 0,
         assignee_id: None, author_id, priority: "Medium".into(),
-        checklist_total: 0, checklist_done: 0,
+        checklist_total: 0, checklist_done: 0, blocked_open: 0,
         labels: vec![], board_id: None, board_name: None, column_name: None,
     })
 }
@@ -818,6 +834,10 @@ fn update_card_in(
 pub fn archive_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
     conn.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![id]).map_err(to_string_err)?;
+    // Ушедшая в архив карточка никого не блокирует и заблокированной не
+    // считается: её не видно, и «жду задачу, которой нет на доске» — тупик.
+    // Возврат из архива связи НЕ восстанавливает, они удалены насовсем.
+    drop_dependencies_of(&conn, id).map_err(to_string_err)?;
     Ok(())
 }
 
@@ -1930,6 +1950,308 @@ pub fn get_recent_boards(workspace_id: i64, limit: i64, state: State<'_, DbState
     Ok(res)
 }
 
+// ─── Зависимости между карточками ───
+//
+// Ребро `blocker → blocked` читается как «пока не сделана blocker, не сделать
+// blocked». Заблокированность в этом приложении — предупреждение, а не запрет:
+// закрыть заблокированную задачу можно, но не молча (см. `list.js`/`board.js`).
+
+pub const ERR_DEPENDENCY_SELF: &str = "Задача не может блокировать сама себя";
+pub const ERR_DEPENDENCY_EXISTS: &str = "Такая зависимость уже есть";
+pub const ERR_DEPENDENCY_CYCLE: &str = "Это создаст цикл зависимостей";
+
+/// Строки одной стороны зависимостей.
+///
+/// `mine` — колонка, по которой ищем (`blocker_card_id` для «кого блокирую»),
+/// `other` — колонка карточки на том конце. Запрос один на оба направления:
+/// переписанный дважды, он разошёлся бы при первой же правке.
+fn dependency_side(
+    conn: &rusqlite::Connection,
+    card_id: i64,
+    mine: &str,
+    other: &str,
+) -> CmdResult<Vec<DependencyCard>> {
+    let sql = format!(
+        "SELECT d.id, c.id, c.title, b.id, b.name, col.name, col.is_final
+         FROM card_dependencies d
+         INNER JOIN cards c ON c.id = d.{other}
+         INNER JOIN columns col ON col.id = c.column_id
+         INNER JOIN boards b ON b.id = col.board_id
+         WHERE d.{mine} = ?1
+         ORDER BY col.is_final ASC, b.name ASC, c.title ASC",
+        mine = mine, other = other,
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
+
+    let iter = stmt.query_map(params![card_id], |row| {
+        Ok(DependencyCard {
+            link_id: row.get(0)?,
+            card_id: row.get(1)?,
+            title: row.get(2)?,
+            board_id: row.get(3)?,
+            board_name: row.get(4)?,
+            column_name: row.get(5)?,
+            is_done: { let f: i64 = row.get(6)?; f != 0 },
+        })
+    }).map_err(to_string_err)?;
+
+    let mut res = Vec::new();
+    for r in iter { res.push(r.map_err(to_string_err)?); }
+    Ok(res)
+}
+
+/// Обе стороны зависимостей карточки, раздельно.
+#[tauri::command]
+pub fn list_card_dependencies(card_id: i64, state: State<'_, DbState>) -> CmdResult<CardDependencies> {
+    let conn = state.conn.lock().unwrap();
+    read_dependencies(&conn, card_id)
+}
+
+fn read_dependencies(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<CardDependencies> {
+    Ok(CardDependencies {
+        blocking: dependency_side(conn, card_id, "blocker_card_id", "blocked_card_id")?,
+        blocked_by: dependency_side(conn, card_id, "blocked_card_id", "blocker_card_id")?,
+    })
+}
+
+/// Существует ли путь `from → … → target` по рёбрам «блокирует».
+///
+/// Обход в глубину со списком посещённых: без него уже имеющийся цикл (а он
+/// мог появиться до появления этой проверки, например через восстановление
+/// базы) увёл бы поиск в бесконечность прямо в момент добавления связи.
+fn dependency_path_exists(conn: &rusqlite::Connection, from: i64, target: i64) -> CmdResult<bool> {
+    let mut stmt = conn.prepare(
+        "SELECT blocked_card_id FROM card_dependencies WHERE blocker_card_id = ?1",
+    ).map_err(to_string_err)?;
+
+    let mut seen: HashSet<i64> = HashSet::new();
+    let mut stack = vec![from];
+    seen.insert(from);
+
+    while let Some(node) = stack.pop() {
+        if node == target { return Ok(true); }
+
+        let next: Vec<i64> = stmt
+            .query_map(params![node], |row| row.get(0))
+            .map_err(to_string_err)?
+            .collect::<rusqlite::Result<Vec<i64>>>()
+            .map_err(to_string_err)?;
+
+        for n in next {
+            if seen.insert(n) { stack.push(n); }
+        }
+    }
+    Ok(false)
+}
+
+/// Заводит связь «blocker блокирует blocked».
+///
+/// Три отказа, и каждый со своим текстом: «не вышло» без причины заставляет
+/// гадать, что именно не так с выбранной задачей.
+#[tauri::command]
+pub fn add_card_dependency(
+    blocker_card_id: i64,
+    blocked_card_id: i64,
+    state: State<'_, DbState>,
+) -> CmdResult<CardDependencies> {
+    let conn = state.conn.lock().unwrap();
+    create_dependency(&conn, blocker_card_id, blocked_card_id)?;
+    // Возвращаем обе стороны заблокированной карточки — окно, из которого
+    // связь заводили, тут же перерисовывается без второго запроса.
+    read_dependencies(&conn, blocked_card_id)
+}
+
+fn create_dependency(conn: &rusqlite::Connection, blocker: i64, blocked: i64) -> CmdResult<i64> {
+    if blocker == blocked {
+        return Err(ERR_DEPENDENCY_SELF.to_string());
+    }
+
+    let exists: Option<i64> = conn.query_row(
+        "SELECT id FROM card_dependencies WHERE blocker_card_id = ?1 AND blocked_card_id = ?2",
+        params![blocker, blocked],
+        |row| row.get(0),
+    ).optional().map_err(to_string_err)?;
+    if exists.is_some() {
+        return Err(ERR_DEPENDENCY_EXISTS.to_string());
+    }
+
+    // Ребро `blocker → blocked` замкнёт круг ровно тогда, когда путь
+    // `blocked → … → blocker` уже есть.
+    if dependency_path_exists(conn, blocked, blocker)? {
+        return Err(ERR_DEPENDENCY_CYCLE.to_string());
+    }
+
+    conn.execute(
+        "INSERT INTO card_dependencies (blocker_card_id, blocked_card_id) VALUES (?1, ?2)",
+        params![blocker, blocked],
+    ).map_err(to_string_err)?;
+
+    Ok(conn.last_insert_rowid())
+}
+
+#[tauri::command]
+pub fn remove_card_dependency(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    conn.execute("DELETE FROM card_dependencies WHERE id = ?1", params![id])
+        .map_err(to_string_err)?;
+    Ok(())
+}
+
+/// Снимает все зависимости карточки — обе стороны сразу.
+///
+/// Вызывается отовсюду, где карточка исчезает с глаз: удаление, архивация,
+/// удаление колонки и доски. Внешние ключи в `card_dependencies` настоящие,
+/// поэтому пропущенный путь не оставит мусор молча, а упрётся в ошибку.
+fn drop_dependencies_of(conn: &rusqlite::Connection, card_id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM card_dependencies WHERE blocker_card_id = ?1 OR blocked_card_id = ?1",
+        params![card_id],
+    )?;
+    Ok(())
+}
+
+/// То же для целой пачки карточек, отобранной подзапросом (колонка, доска).
+fn drop_dependencies_where(conn: &rusqlite::Connection, card_filter: &str, id: i64) -> rusqlite::Result<()> {
+    let sql = format!(
+        "DELETE FROM card_dependencies
+          WHERE blocker_card_id IN ({filter}) OR blocked_card_id IN ({filter})",
+        filter = card_filter,
+    );
+    // `?1` стоит в тексте дважды, но параметр это один и тот же — привязка
+    // идёт по номеру, а не по вхождению, и второе значение здесь было бы
+    // лишним («wrong number of parameters»).
+    conn.execute(&sql, params![id])?;
+    Ok(())
+}
+
+// ─── Нагрузка по исполнителям ───
+//
+// Считает то, что уже лежит в базе: своих таблиц у виджета нет.
+
+/// Открытые задачи каждого участника в пространстве, с разбивкой по приоритету.
+///
+/// «Открытая» здесь — тот же набор условий, которым «Список» решает, показывать
+/// карточку или нет (`c.archived = 0 AND col.archived = 0 AND b.archived = 0`),
+/// плюс `col.is_final = 0`: карточка в «Закрыто» доведена до конца и нагрузкой
+/// уже не является. Служебная доска Inbox не исключается — её карточки такие же
+/// задачи, и «Список» их тоже показывает.
+#[tauri::command]
+pub fn get_workload_summary(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<WorkloadRow>> {
+    let conn = state.conn.lock().unwrap();
+    build_workload_summary(&conn, workspace_id)
+}
+
+fn build_workload_summary(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<Vec<WorkloadRow>> {
+    // Условия отбора карточек живут в подзапросе, а не в WHERE внешнего:
+    // при LEFT JOIN любое условие на правую таблицу, вынесенное в WHERE,
+    // превращает его во внутреннее соединение и выбрасывает участников без
+    // задач — а «у кого сейчас пусто» виджету знать так же нужно.
+    let mut stmt = conn.prepare(
+        "SELECT m.id, m.name, m.initials, m.color, m.is_self, m.created_at,
+                COUNT(open.id) AS total,
+                SUM(CASE WHEN open.priority = 'Low' THEN 1 ELSE 0 END) AS low_count,
+                SUM(CASE WHEN open.priority = 'Medium' THEN 1 ELSE 0 END) AS medium_count,
+                SUM(CASE WHEN open.priority = 'High' THEN 1 ELSE 0 END) AS high_count
+         FROM members m
+         LEFT JOIN (
+             SELECT c.id AS id,
+                    c.assignee_id AS assignee_id,
+                    COALESCE(c.priority, 'Medium') AS priority
+             FROM cards c
+             INNER JOIN columns col ON col.id = c.column_id
+             INNER JOIN boards b ON b.id = col.board_id
+             WHERE b.workspace_id = ?1
+               AND c.archived = 0
+               AND col.archived = 0
+               AND b.archived = 0
+               AND col.is_final = 0
+         ) open ON open.assignee_id = m.id
+         GROUP BY m.id, m.name, m.initials, m.color, m.is_self, m.created_at
+         ORDER BY total DESC, m.name ASC",
+    ).map_err(to_string_err)?;
+
+    let iter = stmt.query_map(params![workspace_id], |row| {
+        Ok(WorkloadRow {
+            member: Member {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                initials: row.get(2)?,
+                color: row.get(3)?,
+                is_self: { let s: i64 = row.get(4)?; s != 0 },
+                created_at: row.get(5)?,
+            },
+            total: row.get(6)?,
+            low: row.get(7)?,
+            medium: row.get(8)?,
+            high: row.get(9)?,
+        })
+    }).map_err(to_string_err)?;
+
+    let mut res = Vec::new();
+    for r in iter { res.push(r.map_err(to_string_err)?); }
+    Ok(res)
+}
+
+// ─── Заметки доски ───
+//
+// Одна markdown-страница на доску. Сознательно не вики: ни списка страниц, ни
+// иерархии, ни истории версий — иначе это отдельный раздел приложения, а не
+// блокнот рядом с канбаном.
+
+/// Заметки доски; у доски без сохранённой заметки — пустой текст.
+///
+/// Отсутствие строки не ошибка и строку здесь не заводит: пока человек ничего
+/// не написал, писать в базу не за чем. Поэтому `updated_at` возвращается
+/// `None`, а не выдуманным «сейчас».
+#[tauri::command]
+pub fn get_board_notes(board_id: i64, state: State<'_, DbState>) -> CmdResult<BoardNotes> {
+    let conn = state.conn.lock().unwrap();
+    read_notes(&conn, board_id)
+}
+
+fn read_notes(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<BoardNotes> {
+    let found = conn.query_row(
+        "SELECT content, updated_at FROM board_notes WHERE board_id = ?1",
+        params![board_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+    ).optional().map_err(to_string_err)?;
+
+    let (content, updated_at) = found.unwrap_or_else(|| (String::new(), None));
+    Ok(BoardNotes { board_id, content, updated_at })
+}
+
+/// Сохраняет заметки доски, создавая строку при первом сохранении.
+///
+/// UPSERT, а не «прочитать и решить»: фронтенд сохраняет по таймеру после
+/// остановки печати, и две подряд идущие правки не должны спорить за то, кто
+/// вставляет строку. `updated_at` проставляется здесь же — время берётся с
+/// машины через `datetime('now')` (UTC), а не приходит из JS, чтобы отметка
+/// не зависела от часов вкладки.
+#[tauri::command]
+pub fn save_board_notes(board_id: i64, content: String, state: State<'_, DbState>) -> CmdResult<BoardNotes> {
+    let conn = state.conn.lock().unwrap();
+    write_notes(&conn, board_id, content)
+}
+
+fn write_notes(conn: &rusqlite::Connection, board_id: i64, content: String) -> CmdResult<BoardNotes> {
+    conn.execute(
+        "INSERT INTO board_notes (board_id, content, updated_at)
+         VALUES (?1, ?2, datetime('now'))
+         ON CONFLICT(board_id) DO UPDATE SET
+             content = excluded.content,
+             updated_at = excluded.updated_at",
+        params![board_id, content],
+    ).map_err(to_string_err)?;
+
+    let updated_at: Option<String> = conn.query_row(
+        "SELECT updated_at FROM board_notes WHERE board_id = ?1",
+        params![board_id],
+        |row| row.get(0),
+    ).map_err(to_string_err)?;
+
+    Ok(BoardNotes { board_id, content, updated_at })
+}
+
 // ─── Inbox (hidden system board) ───
 
 #[tauri::command]
@@ -2101,6 +2423,7 @@ pub fn delete_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     tx.execute("DELETE FROM card_labels WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM checklist_items WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM card_comments WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
+    drop_dependencies_of(&tx, id).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE id = ?1", params![id]).map_err(to_string_err)?;
     tx.commit().map_err(to_string_err)?;
     Ok(())
@@ -2131,6 +2454,7 @@ fn delete_column_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
         "DELETE FROM card_comments WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
         params![id],
     ).map_err(to_string_err)?;
+    drop_dependencies_where(&tx, "SELECT id FROM cards WHERE column_id = ?1", id).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE column_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM columns WHERE id = ?1", params![id]).map_err(to_string_err)?;
     tx.commit().map_err(to_string_err)?;
@@ -2179,6 +2503,11 @@ pub fn delete_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
         )",
         params![id],
     ).map_err(to_string_err)?;
+    drop_dependencies_where(
+        &tx,
+        "SELECT c.id FROM cards c INNER JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1",
+        id,
+    ).map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM cards WHERE column_id IN (SELECT id FROM columns WHERE board_id = ?1)",
         params![id],
@@ -2186,6 +2515,10 @@ pub fn delete_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     tx.execute("DELETE FROM columns WHERE board_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM labels WHERE board_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM board_recent_views WHERE board_id = ?1", params![id]).map_err(to_string_err)?;
+    // Без этой строки удаление доски с заметкой падало бы на внешнем ключе:
+    // `PRAGMA foreign_keys` здесь включён, а каскада у `board_notes` нет —
+    // зависимые таблицы в этой транзакции чистятся вручную, по одной.
+    tx.execute("DELETE FROM board_notes WHERE board_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM boards WHERE id = ?1", params![id]).map_err(to_string_err)?;
     tx.commit().map_err(to_string_err)?;
     Ok(())
@@ -3118,6 +3451,9 @@ pub fn process_overdue_cards(conn: &rusqlite::Connection) -> rusqlite::Result<Ov
                 "UPDATE cards SET archived = 1, archive_reason = ?1 WHERE id = ?2",
                 params![crate::models::ARCHIVE_REASON_MAX_RETRIES, card_id],
             )?;
+            // Тот же довод, что и в `archive_card`: карточки больше не видно,
+            // и держать её в чужих списках блокировок незачем.
+            drop_dependencies_of(&tx, card_id)?;
             outcome.archived.push(title);
         }
     }

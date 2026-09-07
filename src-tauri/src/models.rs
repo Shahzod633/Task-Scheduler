@@ -72,6 +72,10 @@ pub struct Card {
     /// stay 0 and the counter simply is not drawn.
     pub checklist_total: i64,
     pub checklist_done: i64,
+    /// Сколько незавершённых карточек блокирует эту — значок звена на лицевой
+    /// стороне. Как и счётчик чек-листа, заполняется только `get_cards`;
+    /// в остальных местах остаётся 0 и значок просто не рисуется.
+    pub blocked_open: i64,
     pub labels: Vec<Label>,
     /// Populated only by queries that join across boards/columns (e.g. planner, mistake dashboard).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,6 +201,22 @@ pub struct UserProfile {
     pub theme: String,
 }
 
+// ─── Board notes ───
+
+/// Markdown-заметки доски.
+///
+/// `updated_at` необязателен намеренно: у доски, которой ещё ни разу не
+/// сохраняли заметку, строки в `board_notes` нет, и `get_board_notes`
+/// возвращает пустой текст без времени. Иначе пришлось бы либо выдумывать
+/// отметку, либо создавать строку на чтении — а чтение писать в базу не
+/// должно.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BoardNotes {
+    pub board_id: i64,
+    pub content: String,
+    pub updated_at: Option<String>,
+}
+
 // ─── Members ───
 //
 // A local directory of people used purely as a label on cards. There are no
@@ -226,6 +246,54 @@ pub struct Member {
     /// True for the single row representing the user of this installation.
     pub is_self: bool,
     pub created_at: String,
+}
+
+// ─── Зависимости между карточками ───
+
+/// Карточка на другом конце зависимости — ровно столько, сколько нужно, чтобы
+/// нарисовать строку и дойти до неё кликом.
+///
+/// Полной `Card` здесь быть не должно: список зависимостей рисует название,
+/// место и состояние, а описание, чек-лист и метки к нему не относятся.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DependencyCard {
+    /// Id строки в `card_dependencies` — им же связь и снимают.
+    pub link_id: i64,
+    pub card_id: i64,
+    pub title: String,
+    pub board_id: i64,
+    pub board_name: String,
+    pub column_name: String,
+    /// Карточка лежит в финальной колонке, то есть доведена до конца.
+    pub is_done: bool,
+}
+
+/// Обе стороны зависимостей одной карточки.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CardDependencies {
+    /// Кого блокирует эта карточка.
+    pub blocking: Vec<DependencyCard>,
+    /// Кто блокирует эту карточку.
+    pub blocked_by: Vec<DependencyCard>,
+}
+
+// ─── Нагрузка по исполнителям ───
+
+/// Строка виджета «Нагрузка»: участник и его открытые задачи в пространстве.
+///
+/// Справочник участников общий на всё приложение (у `members` нет
+/// `workspace_id`), поэтому пространством ограничены **карточки**, а не люди:
+/// один и тот же человек в разных пространствах имеет разную нагрузку.
+///
+/// `low + medium + high` всегда равно `total`: у карточки со снятым
+/// приоритетом он читается как `Medium`, ровно как в «Списке».
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WorkloadRow {
+    pub member: Member,
+    pub total: i64,
+    pub low: i64,
+    pub medium: i64,
+    pub high: i64,
 }
 
 /// Причина автоматической архивации: попытки исчерпаны, а срок опять прошёл.

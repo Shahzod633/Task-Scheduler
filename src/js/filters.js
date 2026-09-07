@@ -12,7 +12,7 @@
 import Icons from './icons.js';
 import { openPopover, closePopovers } from './popover.js';
 import { createAvatar, getMembers } from './members.js';
-import { createElement, debounce } from './utils.js';
+import { createElement, debounce, escapeHtml } from './utils.js';
 
 /** Sentinel used in the assignee filter for "не назначен". Real ids start at 1. */
 export const UNASSIGNED = 0;
@@ -311,4 +311,86 @@ function openGroupPanel(anchor, state, onChange) {
 export function createCountLabel(shown, total) {
     return createElement('div', { className: 'filter-count' },
         `${shown} из ${total}`);
+}
+
+// ─── Поиск по карточкам ──────────────────────────────────────────────────
+//
+// Ранжирование жило внутри `palette.js` и было ему приватным. Переехало сюда,
+// когда второму месту (выбор карточки для зависимости) понадобился тот же
+// поиск: `palette.js` импортирует `board.js`, и обратный импорт замкнул бы
+// модули в кольцо. Этот файл не импортирует ни того, ни другого.
+
+/** Сколько карточек показывать по умолчанию. */
+export const MAX_CARD_HITS = 20;
+
+/**
+ * Насколько строка отвечает запросу. 0 — не отвечает вовсе.
+ *
+ * Ранжирование грубое и намеренно понятное: совпадение с начала строки выше
+ * совпадения с начала слова, а то — выше совпадения в середине. Нечёткий поиск
+ * (когда «упрвлн» находит «Управление») здесь был бы лишним: в личном
+ * пространстве десятки досок, а не тысячи, и точный ввод не мучителен.
+ *
+ * `needle` ожидается уже в нижнем регистре.
+ */
+export function scoreMatch(haystack, needle) {
+    const text = haystack.toLowerCase();
+    const at = text.indexOf(needle);
+    if (at < 0) return 0;
+    if (at === 0) return 3;
+    // Начало слова: пробел, дефис или скобка перед совпадением.
+    if (/[\s\-—(«"]/.test(text[at - 1])) return 2;
+    return 1;
+}
+
+/**
+ * Карточки, отвечающие запросу, по убыванию совпадения.
+ *
+ * Пустой запрос даёт пустой список: «ещё не искали» и «ничего не нашлось» —
+ * разные состояния, и решать, что показать вместо результатов, должен
+ * вызывающий.
+ *
+ * @param {Array} cards       карточки пространства
+ * @param {string} query      что ввёл человек
+ * @param {number} [limit]
+ * @returns {Array<{card: object, score: number}>}
+ */
+export function searchCards(cards, query, limit = MAX_CARD_HITS) {
+    const needle = String(query || '').trim().toLowerCase();
+    if (!needle) return [];
+
+    return cards
+        .map(card => {
+            // Название весит больше описания: человек помнит, как назвал
+            // задачу, а совпадение в длинном описании чаще случайное.
+            const titleScore = scoreMatch(card.title, needle);
+            const descScore = scoreMatch(card.description || '', needle) * 0.4;
+            return { card, score: Math.max(titleScore, descScore) };
+        })
+        .filter(hit => hit.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit);
+}
+
+/**
+ * Подсвечивает совпадение в тексте, возвращая готовый HTML.
+ *
+ * Совпадение ищется в **исходном** тексте, а экранируются уже три готовых
+ * куска. Наоборот — искать в экранированном — нельзя: у карточки с названием
+ * `a < b` экранированный вид это `a &lt; b`, и запрос «l» попал бы внутрь
+ * `&lt;`, разрезав сущность пополам и превратив строку в мусор.
+ *
+ * Экранирование при этом обязательно: название пишет человек, и
+ * `<img onerror=…>` в нём — обычный текст, а не разметка.
+ */
+export function markMatch(text, query) {
+    const needle = String(query || '').trim();
+    if (!needle) return escapeHtml(text);
+
+    const at = text.toLowerCase().indexOf(needle.toLowerCase());
+    if (at < 0) return escapeHtml(text);
+
+    return escapeHtml(text.slice(0, at))
+        + '<mark class="palette__mark">' + escapeHtml(text.slice(at, at + needle.length)) + '</mark>'
+        + escapeHtml(text.slice(at + needle.length));
 }

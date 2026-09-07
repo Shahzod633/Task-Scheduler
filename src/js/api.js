@@ -378,6 +378,73 @@ export async function getRecentBoards(workspaceId, limit) {
     return await invoke('get_recent_boards', { workspaceId, limit });
 }
 
+// ─── Зависимости между карточками ───
+
+/**
+ * Обе стороны зависимостей карточки.
+ *
+ * @returns {Promise<{blocking: Array, blocked_by: Array}>}
+ *          `blocking` — кого блокирует эта карточка, `blocked_by` — кто
+ *          блокирует её. У каждой записи есть `link_id` (им снимают связь) и
+ *          `is_done` (карточка на том конце лежит в финальной колонке).
+ */
+export async function listCardDependencies(cardId) {
+    return await invoke('list_card_dependencies', { cardId });
+}
+
+/**
+ * Заводит связь «blocker блокирует blocked».
+ *
+ * Отказывает с понятным текстом, если карточка ссылается на себя, такая связь
+ * уже есть или связь замкнула бы круг. Возвращает обновлённые зависимости
+ * **заблокированной** карточки.
+ */
+export async function addCardDependency(blockerCardId, blockedCardId) {
+    return await invoke('add_card_dependency', { blockerCardId, blockedCardId });
+}
+
+/** Снимает связь по её `link_id`. */
+export async function removeCardDependency(id) {
+    return await invoke('remove_card_dependency', { id });
+}
+
+// ─── Нагрузка по исполнителям ───
+
+/**
+ * Открытые задачи каждого участника в пространстве, с разбивкой по приоритету.
+ *
+ * Участники общие на всё приложение, пространством ограничены карточки:
+ * у одного человека в разных пространствах нагрузка разная. Участники без
+ * открытых задач приходят тоже — со всеми нулями.
+ *
+ * @returns {Promise<Array<{member: object, total: number, low: number, medium: number, high: number}>>}
+ *          отсортировано по убыванию `total`
+ */
+export async function getWorkloadSummary(workspaceId) {
+    return await invoke('get_workload_summary', { workspaceId });
+}
+
+// ─── Заметки доски ───
+
+/**
+ * Заметки доски. У доски, где их ни разу не сохраняли, приходит
+ * `{ content: '', updated_at: null }` — это не ошибка, а «ещё не писали».
+ *
+ * @returns {Promise<{board_id: number, content: string, updated_at: string|null}>}
+ */
+export async function getBoardNotes(boardId) {
+    return await invoke('get_board_notes', { boardId });
+}
+
+/**
+ * Сохраняет заметки доски. Время правки проставляет бэкенд, не JS.
+ *
+ * @returns {Promise<{board_id: number, content: string, updated_at: string|null}>}
+ */
+export async function saveBoardNotes(boardId, content) {
+    return await invoke('save_board_notes', { boardId, content });
+}
+
 // ─── Inbox ───
 
 export async function getInboxColumn(workspaceId) {

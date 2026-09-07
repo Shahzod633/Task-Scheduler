@@ -277,6 +277,56 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         (),
     )?;
 
+    // Заметки доски — одна страница на доску, не вики со списком страниц.
+    // Поэтому `board_id` сам себе первичный ключ: строка либо одна, либо её
+    // нет вовсе, и UPSERT в `save_board_notes` опирается именно на это.
+    //
+    // `updated_at` хранится как TEXT — в этой базе так лежат все отметки
+    // времени (`opened_at`, `created_at`), и `parseTimestamp()` во фронтенде
+    // разбирает их как UTC. Тип `DATETIME` в SQLite всё равно превратился бы
+    // в ту же строку, но выпал бы из общего правила.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS board_notes (
+            board_id INTEGER PRIMARY KEY,
+            content TEXT NOT NULL DEFAULT '',
+            updated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (board_id) REFERENCES boards(id)
+        )",
+        (),
+    )?;
+
+    // Зависимости между карточками: ребро `blocker → blocked` читается как
+    // «пока не сделана blocker, не сделать blocked».
+    //
+    // Внешние ключи настоящие, каскада `ON DELETE` нет намеренно: в этой базе
+    // зависимые строки удаляются вручную по одной (см. `delete_board`), и
+    // молчаливый каскад здесь выбивался бы из общего порядка. Обратная сторона —
+    // любой путь удаления карточки обязан сначала снять её зависимости, иначе
+    // упрётся во внешний ключ; все такие пути перечислены в §28 PROJECT_NOTES.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS card_dependencies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            blocker_card_id INTEGER NOT NULL,
+            blocked_card_id INTEGER NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (blocker_card_id) REFERENCES cards(id),
+            FOREIGN KEY (blocked_card_id) REFERENCES cards(id)
+        )",
+        (),
+    )?;
+
+    conn.execute_batch(
+        // Пара уникальна: одна и та же связь, заведённая дважды, дала бы две
+        // строки в окне карточки и два значка на её лицевой стороне.
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_card_dependencies_pair
+             ON card_dependencies(blocker_card_id, blocked_card_id);
+         -- Уникальный индекс покрывает поиск по `blocker_card_id`; обратное
+         -- направление («кто блокирует меня») читается не реже и нуждается
+         -- в своём.
+         CREATE INDEX IF NOT EXISTS idx_card_dependencies_blocked
+             ON card_dependencies(blocked_card_id);",
+    )?;
+
     // ─── Migrations for pre-existing databases ───
     // (CREATE TABLE IF NOT EXISTS above only creates columns on brand-new tables;
     // existing installs need ALTER TABLE for newly introduced columns.)

@@ -640,3 +640,49 @@
     background: transparent;
     color: var(--text-secondary);
 }
+
+/* ─── Переключатель вида доски (Доска / Заметки) ───
+   Сегментированный контрол у названия доски. На этом месте стояла заглушка
+   `.board-header__btn--soon` с иконкой сетки; форма взята от `.theme-toggle`
+   из формы профиля — второго рисунка для той же роли заводить незачем. */
+.board-view-switch {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-pill);
+    flex-shrink: 0;
+}
+
+.board-view-switch__option {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2xs);
+    padding: 5px 12px;
+    border: none;
+    background: transparent;
+    border-radius: var(--radius-pill);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    color: var(--text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--transition-normal), color var(--transition-fast);
+}
+
+.board-view-switch__option svg {
+    width: 15px;
+    height: 15px;
+}
+
+.board-view-switch__option:hover:not(.board-view-switch__option--active) {
+    color: var(--text-primary);
+    background: var(--bg-card-hover);
+}
+
+.board-view-switch__option--active {
+    background: var(--accent-gradient);
+    color: var(--text-on-accent);
+    box-shadow: var(--shadow-sm);
+}

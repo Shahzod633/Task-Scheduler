@@ -228,6 +228,10 @@
     color: var(--text-secondary);
     /* Card and column names go in here verbatim and can be long. */
     overflow-wrap: anywhere;
+    /* Предупреждение о незавершённой блокировке приходит отдельным абзацем,
+       через пустую строку (см. `confirmFinalColumnMove`). Обычные сообщения
+       переносов не содержат, поэтому на них правило не влияет. */
+    white-space: pre-line;
 }
 
 /* ─── Form Elements ─── */
@@ -927,4 +931,149 @@ select.form-input option {
 
 .comments__send {
     flex-shrink: 0;
+}
+
+/* ─── Зависимости в окне карточки ────────────────────────────────────────
+   Два блока подряд, «Блокирует» и «Заблокировано». Форма повторяет чек-лист
+   и комментарии в том же окне: заголовок со счётчиком, список, кнопка. */
+.card-deps {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    margin-top: var(--space-lg);
+}
+
+.card-deps__block {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.card-deps__head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+}
+
+.card-deps__label {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-primary);
+}
+
+.card-deps__count {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    background: var(--bg-input);
+    border-radius: var(--radius-pill);
+    padding: 1px 7px;
+}
+
+/* Кнопка прижата вправо и приглушена: добавление связи — не главное действие
+   окна, а «Сохранить» внизу должно оставаться заметнее. */
+.card-deps__add {
+    margin-left: auto;
+    background: none;
+    border: none;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-xs);
+    color: var(--accent-text);
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.card-deps__add:hover {
+    background: var(--accent-soft);
+}
+
+.card-deps__empty,
+.card-deps__error {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    margin: 0;
+}
+
+.card-deps__error { color: var(--color-danger); }
+
+.card-deps__list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.card-deps__row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: 6px var(--space-xs);
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+}
+
+.card-deps__row-icon {
+    display: flex;
+    flex: none;
+    color: var(--color-warning);
+}
+
+.card-deps__row-icon svg { width: 14px; height: 14px; }
+
+/* Завершённая задача больше ничего не держит — гасим строку целиком, чтобы
+   взгляд цеплялся за оставшиеся. */
+.card-deps__row--done { opacity: 0.6; }
+.card-deps__row--done .card-deps__row-icon { color: var(--color-success); }
+.card-deps__row--done .card-deps__row-title { text-decoration: line-through; }
+
+.card-deps__row-text {
+    flex: 1;
+    min-width: 0;
+}
+
+.card-deps__row-title {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.card-deps__row-title:hover {
+    color: var(--accent-text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.card-deps__row-where {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.card-deps__row-remove {
+    flex: none;
+    background: none;
+    border: none;
+    padding: 2px;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.card-deps__row-remove svg { width: 13px; height: 13px; }
+
+.card-deps__row-remove:hover {
+    background: var(--danger-soft);
+    color: var(--color-danger);
 }

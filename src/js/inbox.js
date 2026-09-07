@@ -5,7 +5,7 @@
 // ============================================
 
 import * as api from './api.js';
-import { confirmDialog } from './dialog.js';
+import { confirmFinalColumnMove } from './dependencies.js';
 import { createElement, $, showToast } from './utils.js';
 
 export async function renderInboxPage(workspaceId) {
@@ -70,11 +70,12 @@ export async function renderInboxPage(workspaceId) {
                 .flatMap(o => o.columns)
                 .find(c => c.id === targetColumnId);
             if (target && target.is_final) {
-                const ok = await confirmDialog({
+                // Общий вопрос на все три двери — он же дописывает строку про
+                // незавершённые блокирующие задачи (см. `dependencies.js`).
+                const ok = await confirmFinalColumnMove({
+                    cardId: card.id,
+                    columnName: target.name,
                     title: 'Назначить в финальную колонку?',
-                    message: `Перемещение в «${target.name}» необратимо — задачу нельзя будет вернуть обратно.`,
-                    confirmText: 'Подтвердить',
-                    danger: true,
                 });
                 if (!ok) { select.value = ''; return; }
             }

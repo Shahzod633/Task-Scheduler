@@ -197,7 +197,7 @@ function renderList(container, cards, workspaceId) {
         }
 
         row.addEventListener('click', () => {
-            showCardEditModal(card, { onChange: () => renderMistakesPage(workspaceId) });
+            showCardEditModal(card, { onChange: () => renderMistakesPage(workspaceId), workspaceId });
         });
 
         container.appendChild(row);

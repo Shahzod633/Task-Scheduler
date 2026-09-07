@@ -990,3 +990,80 @@
     background: var(--danger-soft);
     color: var(--color-danger);
 }
+
+/* ─── Виджет «Нагрузка» (Главная страница) ───────────────────────────────
+   Цвета приоритета не переопределяются: `--priority-low/medium/high` заданы
+   в `list.css` и уже красят полоски карточек и точки в «Списке». */
+.workload {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.workload-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+/* `min-width: 0` — чтобы длинное имя сжималось и обрезалось, а не растягивало
+   строку и не выдавливало счётчик за край виджета. */
+.workload-row__body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.workload-row__head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-sm);
+}
+
+.workload-row__name {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.workload-row__count {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.workload-bar {
+    display: flex;
+    gap: 2px;
+    height: 6px;
+    border-radius: var(--radius-pill);
+    overflow: hidden;
+}
+
+.workload-bar__seg {
+    /* Ширина приходит из JS через `flex-grow` — доля этого приоритета в
+       нагрузке. `min-width` не даёт единственной задаче на фоне двадцати
+       превратиться в невидимую полоску шириной меньше пикселя. */
+    flex-basis: 0;
+    min-width: 4px;
+    border-radius: var(--radius-pill);
+}
+
+.workload-bar__seg--high { background: var(--priority-high); }
+.workload-bar__seg--medium { background: var(--priority-medium); }
+.workload-bar__seg--low { background: var(--priority-low); }
+
+/* Пустая дорожка вместо полосы: строка участника без задач держит ту же
+   высоту, и список не превращается в лесенку. */
+.workload-bar--empty {
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    box-sizing: border-box;
+}

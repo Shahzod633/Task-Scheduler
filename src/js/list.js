@@ -18,7 +18,7 @@ import {
     priorityLabel, priorityModifier, PRIORITIES,
 } from './filters.js';
 import { showCardEditModal } from './board.js';
-import { confirmDialog } from './dialog.js';
+import { confirmFinalColumnMove } from './dependencies.js';
 import { createElement, $, showToast, formatDueDate, isOverdue, pluralize } from './utils.js';
 
 /// Значение `cards.archive_reason` для задач, у которых кончились попытки.
@@ -253,7 +253,7 @@ function createRow(card) {
     titleBtn.addEventListener('click', () => {
         // The card modal is the board's, reused as-is: one editor, one set of
         // rules about what a card is.
-        showCardEditModal(card, { onChange: refresh });
+        showCardEditModal(card, { onChange: refresh, workspaceId: currentWorkspaceId });
     });
     titleCell.appendChild(titleBtn);
     if (card.is_mistake) {
@@ -427,12 +427,9 @@ function openStatusPicker(anchor, card) {
             // здесь — это тот же перенос карточки, и запирает её так же
             // насовсем. Спрашиваем до записи, а не откатываем после.
             if (col.is_final) {
-                const ok = await confirmDialog({
-                    title: 'Перенести в финальную колонку?',
-                    message: `Перемещение в «${col.name}» необратимо — задачу нельзя будет вернуть обратно.`,
-                    confirmText: 'Подтвердить',
-                    danger: true,
-                });
+                // Общий вопрос на все три двери — он же дописывает строку про
+                // незавершённые блокирующие задачи (см. `dependencies.js`).
+                const ok = await confirmFinalColumnMove({ cardId: card.id, columnName: col.name });
                 if (!ok) return;
             }
 

@@ -5,7 +5,9 @@
 import * as api from './api.js';
 import { createBoardCard } from './hub.js';
 import { renderBarChart } from './charts.js';
-import { createElement, $, showToast, lastNDays } from './utils.js';
+import { createAvatar } from './members.js';
+import { priorityLabel } from './filters.js';
+import { createElement, $, showToast, lastNDays, pluralize } from './utils.js';
 
 export async function renderHomePage(workspaceId) {
     const content = $('#content');
@@ -20,6 +22,10 @@ export async function renderHomePage(workspaceId) {
     const recentWidget = createElement('div', { className: 'home-widget' });
     recentWidget.appendChild(createElement('h3', { className: 'home-widget__title' }, 'Недавние доски'));
     widgets.appendChild(recentWidget);
+
+    const workloadWidget = createElement('div', { className: 'home-widget' });
+    workloadWidget.appendChild(createElement('h3', { className: 'home-widget__title' }, 'Нагрузка'));
+    widgets.appendChild(workloadWidget);
 
     const mistakeWidget = createElement('div', { className: 'home-widget' });
     mistakeWidget.appendChild(createElement('h3', { className: 'home-widget__title' }, 'Мои задачи-ошибки за неделю'));
@@ -49,6 +55,15 @@ export async function renderHomePage(workspaceId) {
         recentWidget.appendChild(createElement('p', { className: 'page__empty' }, 'Ошибка загрузки'));
     }
 
+    // Нагрузка по исполнителям
+    try {
+        const rows = await api.getWorkloadSummary(workspaceId);
+        workloadWidget.appendChild(createWorkloadList(rows));
+    } catch (e) {
+        console.error('Не удалось посчитать нагрузку:', e);
+        workloadWidget.appendChild(createElement('p', { className: 'page__empty' }, 'Ошибка загрузки'));
+    }
+
     // Mistake-tracking mini chart
     try {
         const cards = await api.getMistakeCards(workspaceId);
@@ -61,4 +76,80 @@ export async function renderHomePage(workspaceId) {
     } catch (e) {
         mistakeHint.textContent = 'Ошибка загрузки графика';
     }
+}
+
+/**
+ * Виджет «Нагрузка»: кто сколько тянет прямо сейчас.
+ *
+ * Считается на бэкенде одним запросом (`get_workload_summary`); здесь только
+ * отрисовка. Участники приходят уже отсортированными по убыванию нагрузки, а
+ * те, у кого открытых задач нет, — в конце списка: «у кого сейчас пусто» такой
+ * же ответ, как «у кого завал», и прятать их незачем.
+ */
+function createWorkloadList(rows) {
+    if (!rows.length) {
+        return createElement('p', { className: 'page__empty' }, 'В справочнике пока нет участников');
+    }
+
+    const list = createElement('div', { className: 'workload' });
+
+    for (const row of rows) {
+        const item = createElement('div', { className: 'workload-row' });
+        item.appendChild(createAvatar(row.member, { size: 'md' }));
+
+        const body = createElement('div', { className: 'workload-row__body' });
+
+        const head = createElement('div', { className: 'workload-row__head' });
+        head.appendChild(createElement('span', { className: 'workload-row__name' }, row.member.name));
+        head.appendChild(createElement('span', { className: 'workload-row__count' },
+            row.total
+                ? `${row.total} ${pluralize(row.total, ['задача', 'задачи', 'задач'])}`
+                : 'свободен'));
+        body.appendChild(head);
+        body.appendChild(createWorkloadBar(row));
+
+        item.appendChild(body);
+        list.appendChild(item);
+    }
+
+    return list;
+}
+
+/**
+ * Полоса разбивки по приоритету.
+ *
+ * Цвета — те же `--priority-*`, которыми покрашены полоски на карточках и точки
+ * в «Списке» (`list.css`), поэтому второго словаря цветов здесь нет.
+ * Сначала «Высокий»: полосу читают слева направо, и срочное должно попадаться
+ * первым.
+ */
+function createWorkloadBar(row) {
+    const bar = createElement('div', { className: 'workload-bar' });
+
+    if (!row.total) {
+        bar.classList.add('workload-bar--empty');
+        return bar;
+    }
+
+    // `value` — то, что лежит в `cards.priority` (для подписи через
+    // `priorityLabel`), `key` — суффикс класса, он же строчный вариант из
+    // `priorityModifier`.
+    const segments = [
+        { key: 'high', value: 'High', count: row.high },
+        { key: 'medium', value: 'Medium', count: row.medium },
+        { key: 'low', value: 'Low', count: row.low },
+    ];
+
+    for (const seg of segments) {
+        if (!seg.count) continue;
+        // Доля от общего, а не фиксированная ширина: полоса показывает состав
+        // нагрузки, а не её объём — объём стоит числом рядом.
+        bar.appendChild(createElement('span', {
+            className: `workload-bar__seg workload-bar__seg--${seg.key}`,
+            style: { flexGrow: String(seg.count) },
+            'data-tooltip': `${priorityLabel(seg.value)}: ${seg.count}`,
+        }));
+    }
+
+    return bar;
 }
