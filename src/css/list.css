@@ -479,6 +479,26 @@
 .task-table__due--overdue { color: var(--color-danger); }
 .task-table__empty { color: var(--text-muted); }
 
+/* Столбцы из пользовательских полей (§31.4). Длинный текст обрезается
+   многоточием: таблица и так широкая, а целиком значение — в подсказке. */
+.task-table__td--field { max-width: 200px; }
+
+.task-table__field {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+}
+
+/* Со скольких досок собран слитый столбец — справа в строке выбора. */
+.filter-panel__meta {
+    margin-left: auto;
+    flex: none;
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+}
+
 .board-badge {
     display: inline-block;
     max-width: 180px;

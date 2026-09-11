@@ -468,6 +468,11 @@ export async function listOrphanedTimers() {
     return await invoke('list_orphaned_timers');
 }
 
+/** Удаляет законченную сессию. Идущий таймер так не удалить — сначала остановить. */
+export async function deleteTimeEntry(id) {
+    return await invoke('delete_time_entry', { id });
+}
+
 // ─── Пользовательские поля ───
 
 /**
@@ -493,6 +498,24 @@ export async function createCustomField(boardId, name, fieldType, selectOptions 
 /** Удаляет поле вместе со всеми его значениями на карточках. */
 export async function deleteCustomField(id) {
     return await invoke('delete_custom_field', { id });
+}
+
+/** Переименовывает поле; значения на карточках не трогаются. */
+export async function renameCustomField(id, name) {
+    return await invoke('rename_custom_field', { id, name });
+}
+
+/** Новый порядок полей доски — полный список их id. */
+export async function reorderCustomFields(boardId, fieldIds) {
+    return await invoke('reorder_custom_fields', { boardId, fieldIds });
+}
+
+/**
+ * Заменяет варианты у поля выбора. Уже выбранные на карточках значения
+ * остаются как есть, даже если такого варианта больше нет.
+ */
+export async function updateCustomFieldOptions(id, selectOptions) {
+    return await invoke('update_custom_field_options', { id, selectOptions });
 }
 
 /**

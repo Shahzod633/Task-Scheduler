@@ -3837,13 +3837,12 @@ fn a_blocker_in_the_final_column_reads_as_done() {
 }
 
 /// Сколько незавершённых карточек блокирует эту — то самое число, что рисует
-/// значок звена. Выражение то же, что в `BLOCKED_OPEN_COUNT`.
+/// значок звена. Считает само `BLOCKED_OPEN_COUNT`, а не его копия: копия
+/// разошлась бы с оригиналом при первой же правке (так и случилось бы, когда
+/// в счёт перестали попадать архивные).
 fn blocked_open_of(conn: &Connection, card_id: i64) -> i64 {
     conn.query_row(
-        "SELECT COUNT(*) FROM card_dependencies d
-            INNER JOIN cards bc ON bc.id = d.blocker_card_id
-            INNER JOIN columns bcol ON bcol.id = bc.column_id
-          WHERE d.blocked_card_id = ?1 AND bcol.is_final = 0",
+        &format!("SELECT {} FROM cards WHERE cards.id = ?1", BLOCKED_OPEN_COUNT),
         params![card_id], |r| r.get(0),
     ).unwrap()
 }
@@ -4507,4 +4506,227 @@ fn archiving_a_card_keeps_its_field_values() {
     archive_card_in(&conn, card).unwrap();
     // Архив обратимый — вернувшаяся карточка должна прийти со своими данными.
     assert_eq!(value_of(&conn, board, field, card).as_deref(), Some("8"));
+}
+
+// ─── Решения по отложенным вопросам (§31) ───
+
+fn dependency_rows(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM card_dependencies", [], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn archiving_keeps_dependencies_and_restoring_brings_them_back() {
+    let mut conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Доска");
+    let blocker = assigned_card(&conn, open_col, "Блокирующая", None, "Medium");
+    let blocked = assigned_card(&conn, open_col, "Ждущая", None, "Medium");
+    create_dependency(&conn, blocker, blocked).unwrap();
+    assert_eq!(blocked_open_of(&conn, blocked), 1);
+
+    archive_card_in(&conn, blocker).unwrap();
+    assert_eq!(dependency_rows(&conn), 1, "архивация связь не удаляет");
+    // Пока блокирующая в архиве, она ничего не держит: ждать задачу, которой
+    // нет на доске, — тупик.
+    assert_eq!(blocked_open_of(&conn, blocked), 0, "архивная блокировка не в счёте значка");
+    let deps = read_dependencies(&conn, blocked).unwrap();
+    assert!(deps.blocked_by[0].is_archived, "окно карточки видит, что та в архиве");
+
+    restore_card_in(&mut conn, blocker).unwrap();
+    assert_eq!(blocked_open_of(&conn, blocked), 1, "вернулась из архива — вернулась и блокировка");
+    assert!(!read_dependencies(&conn, blocked).unwrap().blocked_by[0].is_archived);
+}
+
+#[test]
+fn an_archived_blocked_card_stays_in_its_blockers_list() {
+    let conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Доска");
+    let blocker = assigned_card(&conn, open_col, "Блокирующая", None, "Medium");
+    let blocked = assigned_card(&conn, open_col, "Ждущая", None, "Medium");
+    let other = assigned_card(&conn, open_col, "Живая", None, "Medium");
+    create_dependency(&conn, blocker, blocked).unwrap();
+    create_dependency(&conn, blocker, other).unwrap();
+
+    archive_card_in(&conn, blocked).unwrap();
+    let blocking = read_dependencies(&conn, blocker).unwrap().blocking;
+    let seen: Vec<(String, bool)> = blocking.iter().map(|d| (d.title.clone(), d.is_archived)).collect();
+    assert_eq!(seen, vec![("Живая".to_string(), false), ("Ждущая".to_string(), true)],
+        "архивная — в конце списка и с пометкой");
+}
+
+#[test]
+fn a_blocker_hidden_with_its_column_or_board_is_not_counted() {
+    let mut conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Доска");
+    let blocked = assigned_card(&conn, open_col, "Ждущая", None, "Medium");
+
+    let board = board_of(&conn, open_col);
+    let extra = create_column_in(&mut conn, board, "Лишняя").unwrap();
+    let in_extra = assigned_card(&conn, extra.id, "В лишней", None, "Medium");
+    create_dependency(&conn, in_extra, blocked).unwrap();
+    let (far_col, _) = workload_board(&conn, 1, "Дальняя доска");
+    let far = assigned_card(&conn, far_col, "На дальней", None, "Medium");
+    create_dependency(&conn, far, blocked).unwrap();
+    assert_eq!(blocked_open_of(&conn, blocked), 2);
+
+    archive_column_in(&conn, extra.id).unwrap();
+    conn.execute("UPDATE boards SET archived = 1 WHERE id = ?1", params![board_of(&conn, far_col)]).unwrap();
+    assert_eq!(blocked_open_of(&conn, blocked), 0, "колонка и доска в архиве — блокировки не видно");
+    assert!(read_dependencies(&conn, blocked).unwrap().blocked_by.iter().all(|d| d.is_archived));
+}
+
+#[test]
+fn archiving_a_card_stops_its_running_timer() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+    started_ago(&conn, entry, 600);
+
+    archive_card_in(&conn, card).unwrap();
+
+    assert!(read_active_timer(&conn, me).unwrap().is_none(), "таймер архивной карточки не идёт");
+    let stopped = read_time_entry(&conn, entry).unwrap();
+    assert!(stopped.ended_at.is_some());
+    assert!((600..=605).contains(&stopped.duration_seconds.unwrap()), "сессия записана, а не потеряна");
+}
+
+#[test]
+fn the_automatic_archive_keeps_dependencies_and_stops_the_timer() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Безнадёжная", 1);
+    conn.execute("UPDATE cards SET retry_count = ?1 WHERE id = ?2", params![RETRY_LIMIT, card]).unwrap();
+    let waiting = assigned_card(&conn, first, "Ждущая", None, "Medium");
+    create_dependency(&conn, card, waiting).unwrap();
+    let me = self_member_id(&conn);
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+
+    let outcome = process_overdue_cards(&conn).unwrap();
+    assert_eq!(outcome.archived, vec!["Безнадёжная"]);
+
+    assert_eq!(dependency_rows(&conn), 1, "автоархив связь тоже не удаляет");
+    assert_eq!(blocked_open_of(&conn, waiting), 0);
+    assert!(read_time_entry(&conn, entry).unwrap().ended_at.is_some(), "таймер остановлен");
+}
+
+#[test]
+fn deleting_a_card_still_takes_its_dependencies() {
+    let mut conn = test_db();
+    let (open_col, _) = workload_board(&conn, 1, "Доска");
+    let blocker = assigned_card(&conn, open_col, "Блокирующая", None, "Medium");
+    let blocked = assigned_card(&conn, open_col, "Ждущая", None, "Medium");
+    create_dependency(&conn, blocker, blocked).unwrap();
+    archive_card_in(&conn, blocker).unwrap();
+
+    // Настоящее удаление — единственный путь, где связи пропадают.
+    delete_card_in(&mut conn, blocker).unwrap();
+    assert_eq!(dependency_rows(&conn), 0);
+}
+
+#[test]
+fn a_finished_session_can_be_deleted_but_a_running_one_cannot() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+    let wrong = add_time_entry_in(&conn, card, me, "2026-09-01 09:00:00", 36000, None).unwrap().id;
+    let right = add_time_entry_in(&conn, card, me, "2026-09-02 09:00:00", 1800, None).unwrap().id;
+    let running = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+
+    delete_time_entry_in(&conn, wrong).unwrap();
+    assert_eq!(total_time_in(&conn, card).unwrap(), 1800, "сумма уменьшилась на удалённую сессию");
+    let ids: Vec<i64> = list_time_entries_in(&conn, card).unwrap().iter().map(|e| e.id).collect();
+    assert_eq!(ids, vec![running, right]);
+
+    assert_eq!(delete_time_entry_in(&conn, running).unwrap_err(), ERR_TIMER_STILL_RUNNING);
+    assert!(read_active_timer(&conn, me).unwrap().is_some(), "идущий таймер на месте");
+    assert_eq!(delete_time_entry_in(&conn, wrong).unwrap_err(), ERR_TIMER_NOT_FOUND);
+}
+
+#[test]
+fn a_field_can_be_renamed_but_not_onto_a_taken_name() {
+    let conn = test_db();
+    let col = fields_column(&conn, "Доска полей");
+    let board = board_of(&conn, col);
+    let card = assigned_card(&conn, col, "Карточка", None, "Medium");
+    let field = create_custom_field_in(&conn, board, "Оценка", "number", vec![]).unwrap().id;
+    create_custom_field_in(&conn, board, "Статус", "text", vec![]).unwrap();
+    set_custom_field_value_in(&conn, card, field, Some("5".into())).unwrap();
+
+    assert_eq!(rename_custom_field_in(&conn, field, "  Баллы ").unwrap().name, "Баллы");
+    assert_eq!(value_of(&conn, board, field, card).as_deref(), Some("5"), "значение привязано к полю, а не к имени");
+    assert_eq!(rename_custom_field_in(&conn, field, "баллы").unwrap().name, "баллы",
+        "своё же название в другом регистре занятым не считается");
+    assert_eq!(rename_custom_field_in(&conn, field, "СТАТУС").unwrap_err(), ERR_FIELD_NAME_TAKEN);
+    assert_eq!(rename_custom_field_in(&conn, field, " ").unwrap_err(), ERR_FIELD_NAME_EMPTY);
+    assert_eq!(rename_custom_field_in(&conn, 9999, "Что-то").unwrap_err(), ERR_FIELD_NOT_FOUND);
+}
+
+#[test]
+fn fields_are_reordered_only_by_the_full_current_list() {
+    let mut conn = test_db();
+    let board = board_of(&conn, fields_column(&conn, "Доска полей"));
+    let a = create_custom_field_in(&conn, board, "А", "text", vec![]).unwrap().id;
+    let b = create_custom_field_in(&conn, board, "Б", "text", vec![]).unwrap().id;
+    let c = create_custom_field_in(&conn, board, "В", "text", vec![]).unwrap().id;
+    let names = |conn: &Connection| -> Vec<String> {
+        custom_fields_in(conn, board).unwrap().into_iter().map(|f| f.name).collect()
+    };
+
+    reorder_custom_fields_in(&mut conn, board, &[c, a, b]).unwrap();
+    assert_eq!(names(&conn), vec!["В", "А", "Б"]);
+
+    // Список без одного поля или с чужим — это устаревший порядок, а не новый.
+    assert_eq!(reorder_custom_fields_in(&mut conn, board, &[a, b]).unwrap_err(), ERR_FIELD_ORDER_STALE);
+    assert_eq!(reorder_custom_fields_in(&mut conn, board, &[a, b, c, 9999]).unwrap_err(), ERR_FIELD_ORDER_STALE);
+    assert_eq!(reorder_custom_fields_in(&mut conn, board, &[a, a, b]).unwrap_err(), ERR_FIELD_ORDER_STALE);
+    assert_eq!(names(&conn), vec!["В", "А", "Б"], "отклонённый порядок ничего не поменял");
+}
+
+#[test]
+fn select_options_can_be_edited_and_old_values_stay_as_they_were() {
+    let conn = test_db();
+    let col = fields_column(&conn, "Доска полей");
+    let board = board_of(&conn, col);
+    let card = assigned_card(&conn, col, "Карточка", None, "Medium");
+    let field = create_custom_field_in(&conn, board, "Срочность", "select",
+        options(&["Низкая", "Средняя", "Высокая"])).unwrap().id;
+    set_custom_field_value_in(&conn, card, field, Some("Высокая".into())).unwrap();
+
+    let updated = update_custom_field_options_in(&conn, field, options(&["Низкая", " Средняя ", "Горит", "низкая"])).unwrap();
+    assert_eq!(updated.select_options, options(&["Низкая", "Средняя", "Горит"]));
+    // Значение хранится текстом независимо от списка: убранный вариант у
+    // карточки остаётся, чинить ничего не нужно.
+    assert_eq!(value_of(&conn, board, field, card).as_deref(), Some("Высокая"));
+    assert!(set_custom_field_value_in(&conn, card, field, Some("Горит".into())).is_ok(), "новый вариант выбирается");
+
+    assert_eq!(update_custom_field_options_in(&conn, field, options(&[" "])).unwrap_err(), ERR_SELECT_WITHOUT_OPTIONS);
+    let text = create_custom_field_in(&conn, board, "Заметка", "text", vec![]).unwrap().id;
+    assert_eq!(update_custom_field_options_in(&conn, text, options(&["А"])).unwrap_err(), ERR_FIELD_NOT_SELECT);
+}
+
+#[test]
+fn the_workspace_list_brings_the_fields_of_its_visible_boards() {
+    let conn = test_db();
+    let col = fields_column(&conn, "Видимая доска");
+    let board = board_of(&conn, col);
+    let card = assigned_card(&conn, col, "Карточка", None, "Medium");
+    let field = create_custom_field_in(&conn, board, "Оценка", "number", vec![]).unwrap().id;
+    set_custom_field_value_in(&conn, card, field, Some("7".into())).unwrap();
+
+    let hidden = board_of(&conn, fields_column(&conn, "Убранная доска"));
+    create_custom_field_in(&conn, hidden, "Скрытое", "text", vec![]).unwrap();
+    conn.execute("UPDATE boards SET archived = 1 WHERE id = ?1", params![hidden]).unwrap();
+
+    conn.execute("INSERT INTO workspaces (name) VALUES ('Чужое')", ()).unwrap();
+    let foreign_ws = conn.last_insert_rowid();
+    let foreign = board_of(&conn, workload_board(&conn, foreign_ws, "Чужая доска").0);
+    create_custom_field_in(&conn, foreign, "Чужое поле", "text", vec![]).unwrap();
+
+    let list = build_workspace_card_list(&conn, 1, false).unwrap();
+    let names: Vec<&str> = list.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["Оценка"], "поля убранных досок и чужих пространств не приезжают");
+    assert_eq!(list.fields[0].values.len(), 1);
+    assert_eq!((list.fields[0].values[0].card_id, list.fields[0].values[0].value.as_str()), (card, "7"));
 }

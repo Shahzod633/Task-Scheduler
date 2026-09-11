@@ -17,7 +17,7 @@ import {
 import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate, isOverdue, staggerIn, pluralize, debounce, formatDate } from './utils.js';
 import { renderMarkdown } from './markdown.js';
 import { renderDependencies, confirmFinalColumnMove } from './dependencies.js';
-import { attachTimerButton, renderTimeLog } from './timer.js';
+import { attachTimerButton, renderTimeLog, refreshTimer } from './timer.js';
 import { renderFieldSettings, renderCardFields } from './fields.js';
 
 let currentBoardId = null;
@@ -1131,6 +1131,9 @@ export function showCardEditModal(cardData, options = {}) {
 
         try {
             await api.archiveCard(cardData.id);
+            // Архивация останавливает таймер карточки на бэкенде — шапка должна
+            // узнать об этом сейчас, а не через полминуты сверки.
+            refreshTimer();
             overlay.remove();
             onChange();
             showToast('Карточка архивирована');

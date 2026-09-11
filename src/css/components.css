@@ -1026,6 +1026,12 @@ select.form-input option {
 .card-deps__row--done .card-deps__row-icon { color: var(--color-success); }
 .card-deps__row--done .card-deps__row-title { text-decoration: line-through; }
 
+/* Архивная задача: связь жива и вернётся с карточкой (§31.1), но пока задача
+   в архиве, она ничего не держит — строка гасится, как и завершённая, только
+   без зачёркивания: задача не сделана, а убрана. */
+.card-deps__row--archived { opacity: 0.55; }
+.card-deps__row--archived .card-deps__row-icon { color: var(--text-muted); }
+
 .card-deps__row-text {
     flex: 1;
     min-width: 0;
@@ -1173,6 +1179,41 @@ select.form-input option {
 .time-log__date--running {
     color: var(--accent-text);
     font-weight: var(--font-weight-semibold);
+}
+
+/* Корзина проявляется по наведению на строку, как у комментариев: ряд корзин
+   у каждой сессии перетягивал бы внимание с чисел. У идущей сессии на её месте
+   пустая ячейка той же ширины — иначе столбцы чисел разъехались бы. */
+.time-log__delete,
+.time-log__delete-slot {
+    flex: none;
+    width: 26px;
+    height: 26px;
+}
+
+.time-log__delete {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    opacity: 0;
+    transition: opacity var(--transition-fast), color var(--transition-fast), background var(--transition-fast);
+}
+
+.time-log__delete svg {
+    width: 14px;
+    height: 14px;
+}
+
+.time-log__row:hover .time-log__delete,
+.time-log__delete:focus-visible {
+    opacity: 1;
+}
+
+.time-log__delete:hover {
+    color: var(--color-danger);
+    background: var(--danger-soft);
 }
 
 .time-log__add {
@@ -1347,11 +1388,86 @@ select.form-input option {
     gap: 2px;
 }
 
+/* Название — кнопка: щелчок переименовывает (§31.4). Выглядит как текст,
+   подчёркивание по наведению подсказывает, что его можно тронуть. */
 .field-settings__name {
+    align-self: flex-start;
+    max-width: 100%;
+    padding: 0;
+    background: none;
+    border: none;
+    text-align: left;
     font-size: var(--font-size-sm);
     font-weight: var(--font-weight-medium);
     color: var(--text-primary);
     overflow-wrap: anywhere;
+    cursor: text;
+}
+
+.field-settings__name:hover {
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+}
+
+.field-settings__rename {
+    padding: 4px var(--space-sm);
+    font-size: var(--font-size-sm);
+}
+
+/* Ручка перетаскивания: единственное место строки, за которое её тянут, —
+   иначе щелчок по названию начинал бы перетаскивание вместо переименования. */
+.field-settings__handle {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 26px;
+    color: var(--text-muted);
+    cursor: grab;
+}
+
+.field-settings__handle svg {
+    width: 14px;
+    height: 14px;
+}
+
+.field-settings__handle:active {
+    cursor: grabbing;
+}
+
+.field-settings__row--ghost {
+    opacity: 0.4;
+}
+
+/* Клон под курсором перенесён в <body> — ему нужен свой непрозрачный фон. */
+.field-settings__row--dragging {
+    background: var(--bg-elevated);
+    border-color: var(--accent-border);
+    box-shadow: var(--shadow-drag);
+}
+
+.field-settings__options-btn {
+    flex: none;
+}
+
+/* Пока под названием открыта правка вариантов, строка выше обычной — кнопки
+   прижимаются к её верху, а не повисают посередине. */
+.field-settings__row:has(.field-settings__options-editor) {
+    align-items: flex-start;
+}
+
+.field-settings__options-editor {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    margin-top: var(--space-xs);
+}
+
+.field-settings__note {
+    margin: 0;
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
 }
 
 /* Варианты выбора перечислены прямо в строке: иначе, чтобы вспомнить их,

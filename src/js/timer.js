@@ -19,6 +19,7 @@ import * as api from './api.js';
 import Icons from './icons.js';
 import { loadMembers, createAvatar } from './members.js';
 import { refreshTooltip } from './popover.js';
+import { confirmDialog } from './dialog.js';
 import {
     createElement, $, $$, showToast, pluralize, parseTimestamp, toDateKey, todayKey,
     toTimestamp, formatDueDate, formatDuration, formatClock, manualSessionStart,
@@ -82,6 +83,15 @@ async function syncActiveTimer() {
 
 function resync() {
     syncActiveTimer().catch(e => console.error('Не удалось сверить таймер с базой:', e));
+}
+
+/**
+ * Перечитать идущий таймер сейчас, не дожидаясь сверки раз в полминуты. Для
+ * тех, кто только что изменил его в обход этого модуля: архивация карточки
+ * останавливает её таймер на бэкенде (§31.2).
+ */
+export function refreshTimer() {
+    resync();
 }
 
 function setActive(timer) {
@@ -301,7 +311,7 @@ export async function renderTimeLog(container, cardId) {
                 'Время по задаче ещё не записывалось'));
             return;
         }
-        for (const entry of entries) list.appendChild(createSessionRow(entry));
+        for (const entry of entries) list.appendChild(createSessionRow(entry, () => reload()));
         ensureTicker();
     };
 
@@ -339,7 +349,7 @@ export async function renderTimeLog(container, cardId) {
     await reload();
 }
 
-function createSessionRow(entry) {
+function createSessionRow(entry, onDeleted) {
     const running = !entry.ended_at;
     const row = createElement('div', {
         className: `time-log__row ${running ? 'time-log__row--running' : ''}`,
@@ -369,6 +379,39 @@ function createSessionRow(entry) {
             className: 'time-log__date',
             'data-tooltip': sessionHours(entry),
         }, sessionDay(entry)));
+    }
+
+    // Удалить можно только законченную сессию: у идущей строки не время, а
+    // счётчик, и бэкенд её не удалит — сначала остановить. Правки нет
+    // намеренно: неверную сессию удаляют и при нужде вписывают заново (§31.3).
+    if (running) {
+        row.appendChild(createElement('span', { className: 'time-log__delete-slot' }));
+    } else {
+        const del = createElement('button', {
+            className: 'time-log__delete',
+            type: 'button',
+            innerHTML: Icons.trash,
+            'data-tooltip': 'Удалить сессию',
+        });
+        del.addEventListener('click', async () => {
+            const who = entry.member ? entry.member.name : 'участник удалён';
+            const ok = await confirmDialog({
+                title: 'Удалить сессию?',
+                message: `${formatDuration(entry.duration_seconds)} · ${sessionDay(entry)} · ${who}. `
+                    + 'Это время уйдёт из суммы задачи, восстановить его будет нельзя.',
+                confirmText: 'Удалить',
+                danger: true,
+            });
+            if (!ok) return;
+            try {
+                await api.deleteTimeEntry(entry.id);
+                showToast('Сессия удалена');
+                onDeleted();
+            } catch (e) {
+                showToast(errorText(e, 'Не удалось удалить сессию'), 'error');
+            }
+        });
+        row.appendChild(del);
     }
     return row;
 }

@@ -19,6 +19,7 @@ import {
 } from './filters.js';
 import { showCardEditModal } from './board.js';
 import { confirmFinalColumnMove } from './dependencies.js';
+import { formatFieldValue } from './fields.js';
 import { createElement, $, showToast, formatDueDate, isOverdue, pluralize } from './utils.js';
 
 /// Значение `cards.archive_reason` для задач, у которых кончились попытки.
@@ -29,7 +30,12 @@ const ARCHIVE_REASON_MAX_RETRIES = 'incomplete_max_retries';
 // throw away the filter the user just set up.
 let state = createFilterState();
 let currentWorkspaceId = null;
-let data = { cards: [], boards: [] };
+let data = { cards: [], boards: [], fields: [] };
+// Какие пользовательские поля показаны столбцами (§31.4) — ключ столбца, то
+// есть название поля в нижнем регистре. Живёт, как и фильтр, до перезапуска
+// приложения: настройки интерфейса в хранилище браузера здесь не кладут (см.
+// `theme.js`), а заводить ради этого таблицу в базе — несоразмерно.
+let shownFields = new Set();
 // Архивные задачи с экрана скрыты по умолчанию: их убрали, и место в общем
 // списке они занимать не должны. Но видеть их надо где-то — после автоархива
 // по исчерпании попыток «Список» остался единственным местом, где убранная
@@ -41,6 +47,7 @@ export async function renderListPage(workspaceId) {
         // A different workspace has different boards and columns; carrying the
         // old filter over would silently hide everything.
         state = createFilterState();
+        shownFields = new Set();
         currentWorkspaceId = workspaceId;
     }
 
@@ -88,8 +95,113 @@ export async function renderListPage(workspaceId) {
         showGroup: true,
     }));
     toolbarSlot.appendChild(createArchivedToggle(draw));
+    const fieldsBtn = createFieldColumnsButton(draw);
+    if (fieldsBtn) toolbarSlot.appendChild(fieldsBtn);
 
     draw();
+}
+
+// ─── Необязательные столбцы: пользовательские поля (§31.4) ───
+
+/**
+ * Столбцы из пользовательских полей досок пространства.
+ *
+ * Поле объявляет доска, а «Список» показывает карточки всех досок сразу. Поэтому
+ * одноимённые поля разных досок — без учёта регистра — сливаются в один
+ * столбец: «Оценка» на двух досках даёт один столбец «Оценка», и у каждой
+ * карточки в нём значение поля её собственной доски. Название на доске
+ * уникально (§30.3), так что такое поле у карточки одно.
+ */
+function fieldColumns() {
+    const byKey = new Map();
+    for (const field of data.fields || []) {
+        const key = field.name.toLowerCase();
+        if (!byKey.has(key)) byKey.set(key, { key, name: field.name, byBoard: new Map() });
+        byKey.get(key).byBoard.set(field.board_id, {
+            type: field.field_type,
+            values: new Map(field.values.map(v => [v.card_id, v.value])),
+        });
+    }
+    return [...byKey.values()];
+}
+
+/**
+ * Кнопка «Поля» — выбор, какие поля показать столбцами. Если полей в
+ * пространстве нет, кнопки нет: выбирать не из чего.
+ */
+function createFieldColumnsButton(onChange) {
+    const columns = fieldColumns();
+    if (!columns.length) return null;
+
+    const btn = createElement('button', {
+        className: 'filter-bar__btn',
+        type: 'button',
+        'data-tooltip': 'Показать пользовательские поля досок столбцами',
+    });
+    const paint = () => {
+        const shown = columns.filter(c => shownFields.has(c.key)).length;
+        btn.innerHTML = `${Icons.grid} <span>${shown ? `Поля (${shown})` : 'Поля'}</span>`;
+        btn.classList.toggle('filter-bar__btn--on', shown > 0);
+    };
+    paint();
+
+    btn.addEventListener('click', () => {
+        const panel = createElement('div', { className: 'context-menu filter-panel' });
+        panel.appendChild(createElement('div', { className: 'filter-panel__title' }, 'Столбцы из полей досок'));
+        const group = createElement('div', { className: 'filter-panel__group' });
+        for (const column of columns) {
+            const row = createElement('label', { className: 'filter-panel__row' });
+            const box = createElement('input', { type: 'checkbox', className: 'filter-panel__check' });
+            box.checked = shownFields.has(column.key);
+            box.addEventListener('change', () => {
+                if (box.checked) shownFields.add(column.key);
+                else shownFields.delete(column.key);
+                paint();
+                onChange();
+            });
+            row.appendChild(box);
+            row.appendChild(createElement('span', { className: 'filter-panel__label' }, column.name));
+            // Слитый столбец говорит, со скольких досок он собран, — иначе не
+            // понять, почему у одних карточек поле есть, а у других нет.
+            if (column.byBoard.size > 1) {
+                const names = data.boards.filter(b => column.byBoard.has(b.id)).map(b => b.name);
+                row.appendChild(createElement('span', {
+                    className: 'filter-panel__meta',
+                    'data-tooltip': names.join(', '),
+                }, `${column.byBoard.size} ${pluralize(column.byBoard.size, ['доска', 'доски', 'досок'])}`));
+            }
+            group.appendChild(row);
+        }
+        panel.appendChild(group);
+        openPopover(panel, btn, { placement: 'bottom', align: 'end', gap: 6, width: 260 });
+    });
+    return btn;
+}
+
+/** Показанные столбцы полей, в порядке полей на досках. */
+function shownFieldColumns() {
+    return fieldColumns().filter(c => shownFields.has(c.key));
+}
+
+function createFieldCell(card, column) {
+    const cell = createElement('td', { className: 'task-table__td task-table__td--field' });
+    const field = column.byBoard.get(card.board_id);
+    // У доски этой карточки такого поля нет — клетка пустая, без прочерка:
+    // прочерк значит «поле есть, но не заполнено».
+    if (!field) return cell;
+
+    const value = field.values.get(card.id);
+    if (value === undefined) {
+        cell.appendChild(createElement('span', { className: 'task-table__empty' }, '—'));
+        return cell;
+    }
+    const text = formatFieldValue(field.type, value);
+    // Длинный текст обрезается многоточием; целиком он — в подсказке.
+    cell.appendChild(createElement('span', {
+        className: 'task-table__field',
+        ...(text.length > 24 ? { 'data-tooltip': text } : {}),
+    }, text));
+    return cell;
 }
 
 /** Column names across the whole workspace, de-duplicated, in board order. */
@@ -221,18 +333,25 @@ const HEADERS = ['Задача', 'Доска', 'Исполнитель', 'Авт
 
 function createTable(cards) {
     const table = createElement('table', { className: 'task-table' });
+    const fieldCols = shownFieldColumns();
 
     const thead = createElement('thead');
     const headRow = createElement('tr');
     for (const label of HEADERS) {
         headRow.appendChild(createElement('th', { className: 'task-table__th' }, label));
     }
+    // Поля — после стандартных столбцов: они необязательные и у каждой доски свои.
+    for (const column of fieldCols) {
+        headRow.appendChild(createElement('th', { className: 'task-table__th task-table__th--field' }, column.name));
+    }
     thead.appendChild(headRow);
     table.appendChild(thead);
 
     const tbody = createElement('tbody');
     for (const card of cards) {
-        tbody.appendChild(createRow(card));
+        const row = createRow(card);
+        for (const column of fieldCols) row.appendChild(createFieldCell(card, column));
+        tbody.appendChild(row);
     }
     table.appendChild(tbody);
 

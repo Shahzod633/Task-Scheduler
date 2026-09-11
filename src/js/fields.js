@@ -15,7 +15,7 @@
 import * as api from './api.js';
 import Icons from './icons.js';
 import { confirmDialog } from './dialog.js';
-import { createElement, showToast, pluralize } from './utils.js';
+import { createElement, showToast, pluralize, formatDueDate } from './utils.js';
 
 /** Подписи типов. В базе типы хранятся по-английски, как приоритет. */
 const FIELD_TYPE_LABELS = {
@@ -26,6 +26,20 @@ const FIELD_TYPE_LABELS = {
 };
 
 const errorText = (e, fallback) => (typeof e === 'string' ? e : fallback);
+
+/**
+ * Значение поля для чтения, а не для ввода: число — по-русски («3,5»,
+ * «1 200»), дата — словарём срока («Сегодня», «30 сент.»), остальное как есть.
+ * Нужна «Списку»: там значения только показываются.
+ */
+export function formatFieldValue(fieldType, value) {
+    if (fieldType === 'number') {
+        const number = Number(value);
+        return Number.isFinite(number) ? number.toLocaleString('ru-RU', { maximumFractionDigits: 10 }) : value;
+    }
+    if (fieldType === 'date') return formatDueDate(value) || value;
+    return value;
+}
 
 // ─── Настройки доски: список полей ───────────────────────────────────────
 
@@ -48,6 +62,31 @@ export function renderFieldSettings(container, boardId) {
     const addBtn = createElement('button', { className: 'field-settings__add', type: 'button' }, '+ Добавить поле');
     section.appendChild(addBtn);
     container.appendChild(section);
+
+    // Порядок — перетаскиванием за ручку, как колонки и карточки на доске.
+    // `forceFallback`: перетаскивание HTML5 окно Tauri перехватывает (см.
+    // `initSortable` в board.js). Клон уходит в <body>, иначе его обрезала бы
+    // прокрутка окна настроек.
+    new Sortable(list, {
+        handle: '.field-settings__handle',
+        draggable: '.field-settings__row',
+        animation: 150,
+        forceFallback: true,
+        fallbackOnBody: true,
+        fallbackClass: 'field-settings__row--dragging',
+        ghostClass: 'field-settings__row--ghost',
+        onEnd: async (evt) => {
+            if (evt.oldIndex === evt.newIndex) return;
+            const ids = [...list.querySelectorAll('.field-settings__row')].map(row => Number(row.dataset.fieldId));
+            try {
+                await api.reorderCustomFields(boardId, ids);
+            } catch (e) {
+                showToast(errorText(e, 'Не удалось переставить поля'), 'error');
+                // На экране порядок уже не тот, что в базе, — перечитываем.
+                await reload();
+            }
+        },
+    });
 
     const reload = async () => {
         let fields;
@@ -79,15 +118,42 @@ export function renderFieldSettings(container, boardId) {
 }
 
 function createFieldRow(field, reload) {
-    const row = createElement('div', { className: 'field-settings__row' });
+    const row = createElement('div', {
+        className: 'field-settings__row',
+        dataset: { fieldId: String(field.id) },
+    });
+
+    row.appendChild(createElement('span', {
+        className: 'field-settings__handle',
+        innerHTML: Icons.grip,
+        'data-tooltip': 'Перетащите, чтобы поменять порядок',
+    }));
 
     const main = createElement('div', { className: 'field-settings__main' });
-    main.appendChild(createElement('span', { className: 'field-settings__name' }, field.name));
+    // Название — кнопка: щелчок переименовывает, как название колонки на доске.
+    const nameBtn = createElement('button', {
+        className: 'field-settings__name',
+        type: 'button',
+        'data-tooltip': 'Щёлкните, чтобы переименовать',
+    }, field.name);
+    nameBtn.addEventListener('click', () => startRename(nameBtn, field, reload));
+    main.appendChild(nameBtn);
     const details = field.field_type === 'select'
         ? `${FIELD_TYPE_LABELS.select}: ${field.select_options.join(', ')}`
         : FIELD_TYPE_LABELS[field.field_type] || field.field_type;
     main.appendChild(createElement('span', { className: 'field-settings__type' }, details));
     row.appendChild(main);
+
+    if (field.field_type === 'select') {
+        const optionsBtn = createElement('button', {
+            className: 'icon-btn field-settings__options-btn',
+            type: 'button',
+            innerHTML: Icons.edit,
+            'data-tooltip': 'Изменить варианты',
+        });
+        optionsBtn.addEventListener('click', () => openOptionsEditor(main, field, reload));
+        row.appendChild(optionsBtn);
+    }
 
     const removeBtn = createElement('button', {
         className: 'icon-btn icon-btn--danger field-settings__remove',
@@ -121,6 +187,101 @@ function createFieldRow(field, reload) {
     row.appendChild(removeBtn);
 
     return row;
+}
+
+/**
+ * Переименование прямо в строке: Enter или уход из поля сохраняет, Esc
+ * отменяет — так же, как у названия колонки на доске.
+ */
+function startRename(nameBtn, field, reload) {
+    const input = createElement('input', {
+        className: 'form-input field-settings__rename',
+        maxlength: '60',
+    });
+    input.value = field.name;
+    nameBtn.replaceWith(input);
+    input.focus();
+    input.select();
+
+    let finished = false;
+    const finish = async (save) => {
+        if (finished) return;
+        finished = true;
+        const name = input.value.trim();
+        if (!save || !name || name === field.name) {
+            input.replaceWith(nameBtn);
+            return;
+        }
+        try {
+            await api.renameCustomField(field.id, name);
+            showToast(`Поле переименовано в «${name}»`);
+            await reload();
+        } catch (e) {
+            showToast(errorText(e, 'Не удалось переименовать поле'), 'error');
+            input.replaceWith(nameBtn);
+        }
+    };
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            finish(true);
+        } else if (e.key === 'Escape') {
+            // Esc отменяет переименование, а не закрывает окно настроек: общий
+            // обработчик (`initModalEscape`) слушает document и сюда не дойдёт.
+            e.preventDefault();
+            e.stopPropagation();
+            finish(false);
+        }
+    });
+    input.addEventListener('blur', () => finish(true));
+}
+
+/**
+ * Правка вариантов выбора — строкой через запятую, как при создании.
+ *
+ * Значения на карточках не проверяются и не чинятся (§31.4): убранный вариант
+ * у карточек, где он выбран, так и останется, и окно карточки покажет его
+ * отдельной строкой списка.
+ */
+function openOptionsEditor(container, field, reload) {
+    if (container.querySelector('.field-settings__options-editor')) return;
+
+    const editor = createElement('div', { className: 'field-settings__options-editor' });
+    const input = createElement('input', { className: 'form-input' });
+    input.value = field.select_options.join(', ');
+    editor.appendChild(input);
+    editor.appendChild(createElement('p', { className: 'field-settings__note' },
+        'Через запятую. Уже выбранное на карточках останется как есть, даже если такого варианта больше не будет.'));
+
+    const actions = createElement('div', { className: 'field-settings__actions' });
+    const cancelBtn = createElement('button', { className: 'btn btn--secondary btn--sm', type: 'button' }, 'Отмена');
+    const saveBtn = createElement('button', { className: 'btn btn--primary btn--sm', type: 'button' }, 'Сохранить');
+    actions.append(cancelBtn, saveBtn);
+    editor.appendChild(actions);
+
+    cancelBtn.addEventListener('click', () => editor.remove());
+    const submit = async () => {
+        saveBtn.disabled = true;
+        try {
+            await api.updateCustomFieldOptions(field.id, input.value.split(','));
+            showToast('Варианты сохранены');
+            await reload();
+        } catch (e) {
+            showToast(errorText(e, 'Не удалось сохранить варианты'), 'error');
+            saveBtn.disabled = false;
+        }
+    };
+    saveBtn.addEventListener('click', submit);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            submit();
+        }
+    });
+
+    container.appendChild(editor);
+    input.focus();
 }
 
 /**

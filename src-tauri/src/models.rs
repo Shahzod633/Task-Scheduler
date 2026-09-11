@@ -266,6 +266,10 @@ pub struct DependencyCard {
     pub column_name: String,
     /// Карточка лежит в финальной колонке, то есть доведена до конца.
     pub is_done: bool,
+    /// Карточка убрана в архив — сама, вместе с колонкой или с доской. Связь
+    /// при архивации не удаляется (§31.1), но пока карточка в архиве, она
+    /// ничего не блокирует.
+    pub is_archived: bool,
 }
 
 /// Обе стороны зависимостей одной карточки.
@@ -432,6 +436,9 @@ pub struct BoardColumns {
 pub struct WorkspaceCardList {
     pub cards: Vec<CardRow>,
     pub boards: Vec<BoardColumns>,
+    /// Пользовательские поля видимых досок пространства со значениями — из них
+    /// «Список» собирает необязательные столбцы.
+    pub fields: Vec<CustomField>,
 }
 
 // ─── Board export / import ───

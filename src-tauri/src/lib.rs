@@ -144,9 +144,13 @@ pub fn run() {
             commands::list_time_entries,
             commands::get_total_time,
             commands::add_time_entry,
+            commands::delete_time_entry,
             commands::list_orphaned_timers,
 
             commands::create_custom_field,
+            commands::rename_custom_field,
+            commands::reorder_custom_fields,
+            commands::update_custom_field_options,
             commands::delete_custom_field,
             commands::set_custom_field_value,
             commands::get_custom_fields_with_values,

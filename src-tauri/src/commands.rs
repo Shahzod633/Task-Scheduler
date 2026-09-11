@@ -703,14 +703,18 @@ const CHECKLIST_COUNTS: &str = "
 /// в базу на карточку вернул бы N+1, от которого счётчики чек-листа как раз
 /// и ушли.
 ///
-/// «Незавершённая» = лежит не в финальной колонке. Заблокированность снимает
-/// именно доведение блокирующей задачи до конца, а не её архивация — архив
-/// зависимости просто удаляет.
+/// «Незавершённая» = лежит не в финальной колонке **и видна**: не в архиве ни
+/// сама, ни её колонка, ни доска — те же условия, по которым её показывает
+/// «Список». Архивация связи больше не удаляет (§31.1), поэтому убранная в
+/// архив блокирующая задача отсеивается здесь: ждать задачу, которой нет на
+/// доске, — тупик. Вернётся из архива — снова будет в счёте.
 const BLOCKED_OPEN_COUNT: &str = "
     (SELECT COUNT(*) FROM card_dependencies d
         INNER JOIN cards bc ON bc.id = d.blocker_card_id
         INNER JOIN columns bcol ON bcol.id = bc.column_id
-      WHERE d.blocked_card_id = cards.id AND bcol.is_final = 0)";
+        INNER JOIN boards bb ON bb.id = bcol.board_id
+      WHERE d.blocked_card_id = cards.id AND bcol.is_final = 0
+        AND bc.archived = 0 AND bcol.archived = 0 AND bb.archived = 0)";
 
 /// `row_to_card` plus the three card-face aggregates, which follow
 /// `CARD_COLUMNS` — отсюда индексы 15, 16 и 17.
@@ -838,15 +842,22 @@ pub fn archive_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     archive_card_in(&conn, id)
 }
 
-/// Время (`time_entries`) и значения пользовательских полей архивация не
-/// трогает: архив обратимый, и вернувшаяся карточка должна прийти со своими
-/// данными. Удаляются только зависимости — см. комментарий ниже.
+/// Архив обратимый, поэтому архивация ничего у карточки не отнимает: время,
+/// значения пользовательских полей и **зависимости** остаются на месте, и
+/// возврат из архива приносит их обратно без отдельной логики восстановления.
+/// Решение пользователя от 2026-09-11 — до него зависимости здесь удалялись
+/// насовсем (§28.4, §31.1). Пока карточка в архиве, блокировкой она не
+/// считается — это решает `BLOCKED_OPEN_COUNT`, а не удаление связи.
+///
+/// Единственное, что архивация меняет, — останавливает идущий таймер: время на
+/// карточке, которой не видно на доске, сбивало бы с толку (§31.2). Остановка
+/// идёт в одной транзакции с архивацией, чтобы между ними не повис таймер на
+/// уже убранной карточке.
 fn archive_card_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<()> {
-    conn.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![id]).map_err(to_string_err)?;
-    // Ушедшая в архив карточка никого не блокирует и заблокированной не
-    // считается: её не видно, и «жду задачу, которой нет на доске» — тупик.
-    // Возврат из архива связи НЕ восстанавливает, они удалены насовсем.
-    drop_dependencies_of(&conn, id).map_err(to_string_err)?;
+    let tx = conn.unchecked_transaction().map_err(to_string_err)?;
+    tx.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![id]).map_err(to_string_err)?;
+    stop_running(&tx, "card_id = ?1", id).map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)?;
     Ok(())
 }
 
@@ -1777,7 +1788,16 @@ fn build_workspace_card_list(
         }
     }
 
-    Ok(WorkspaceCardList { cards, boards })
+    // Пользовательские поля всех видимых досок пространства со значениями — для
+    // необязательных столбцов «Списка» (§31.4). Третий запрос, но один на всё
+    // пространство, а не по запросу на доску.
+    let fields = read_custom_fields(
+        conn,
+        "d.board_id IN (SELECT id FROM boards WHERE workspace_id = ?1 AND archived = 0)",
+        workspace_id,
+    )?;
+
+    Ok(WorkspaceCardList { cards, boards, fields })
 }
 
 // ─── Labels ───
@@ -1987,14 +2007,17 @@ fn dependency_side(
     mine: &str,
     other: &str,
 ) -> CmdResult<Vec<DependencyCard>> {
+    // Архивные — в конец списка: они ничего сейчас не держат, но связь с ними
+    // жива и вернётся вместе с карточкой.
     let sql = format!(
-        "SELECT d.id, c.id, c.title, b.id, b.name, col.name, col.is_final
+        "SELECT d.id, c.id, c.title, b.id, b.name, col.name, col.is_final,
+                (c.archived = 1 OR col.archived = 1 OR b.archived = 1) AS is_archived
          FROM card_dependencies d
          INNER JOIN cards c ON c.id = d.{other}
          INNER JOIN columns col ON col.id = c.column_id
          INNER JOIN boards b ON b.id = col.board_id
          WHERE d.{mine} = ?1
-         ORDER BY col.is_final ASC, b.name ASC, c.title ASC",
+         ORDER BY is_archived ASC, col.is_final ASC, b.name ASC, c.title ASC",
         mine = mine, other = other,
     );
     let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
@@ -2008,6 +2031,7 @@ fn dependency_side(
             board_name: row.get(4)?,
             column_name: row.get(5)?,
             is_done: { let f: i64 = row.get(6)?; f != 0 },
+            is_archived: { let a: i64 = row.get(7)?; a != 0 },
         })
     }).map_err(to_string_err)?;
 
@@ -2115,9 +2139,10 @@ pub fn remove_card_dependency(id: i64, state: State<'_, DbState>) -> CmdResult<(
 
 /// Снимает все зависимости карточки — обе стороны сразу.
 ///
-/// Вызывается отовсюду, где карточка исчезает с глаз: удаление, архивация,
-/// удаление колонки и доски. Внешние ключи в `card_dependencies` настоящие,
-/// поэтому пропущенный путь не оставит мусор молча, а упрётся в ошибку.
+/// Вызывается только там, где карточка исчезает насовсем: удаление карточки,
+/// колонки и доски. Архивация связи не трогает (§31.1). Внешние ключи в
+/// `card_dependencies` настоящие, поэтому пропущенный путь удаления не оставит
+/// мусор молча, а упрётся в ошибку.
 fn drop_dependencies_of(conn: &rusqlite::Connection, card_id: i64) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM card_dependencies WHERE blocker_card_id = ?1 OR blocked_card_id = ?1",
@@ -2297,6 +2322,7 @@ const MAX_TIME_NOTE_LENGTH: usize = 500;
 
 pub const ERR_TIMER_NOT_FOUND: &str = "Запись времени не найдена";
 pub const ERR_TIMER_ALREADY_STOPPED: &str = "Таймер уже остановлен";
+pub const ERR_TIMER_STILL_RUNNING: &str = "Идущий таймер сначала остановите";
 pub const ERR_DURATION_NOT_POSITIVE: &str = "Длительность должна быть больше нуля";
 pub const ERR_DURATION_OVER_ELAPSED: &str = "Длительность больше, чем прошло с запуска таймера";
 pub const ERR_DURATION_TOO_LONG: &str = "Одна сессия не может длиться больше суток";
@@ -2638,6 +2664,26 @@ fn add_time_entry_in(
     read_time_entry(conn, conn.last_insert_rowid())
 }
 
+/// Удаляет законченную сессию — ошибочно вписанную или записанную по забытому
+/// таймеру. Правки нет намеренно (решение пользователя, §31.3): неверную
+/// сессию удаляют и при нужде вписывают заново.
+///
+/// Идущий таймер так не удаляется: его сессия ещё не записана, и строка в
+/// логе у него — не время, а счётчик. Сначала остановить, потом удалить.
+#[tauri::command]
+pub fn delete_time_entry(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    delete_time_entry_in(&conn, id)
+}
+
+fn delete_time_entry_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<()> {
+    if read_time_entry(conn, id)?.ended_at.is_none() {
+        return Err(ERR_TIMER_STILL_RUNNING.to_string());
+    }
+    conn.execute("DELETE FROM time_entries WHERE id = ?1", params![id]).map_err(to_string_err)?;
+    Ok(())
+}
+
 /// Переменная окружения, которой отладочная сборка подменяет порог забытого
 /// таймера — в минутах.
 ///
@@ -2753,6 +2799,43 @@ fn read_custom_field(conn: &rusqlite::Connection, id: i64) -> CmdResult<CustomFi
         .ok_or_else(|| ERR_FIELD_NOT_FOUND.to_string())
 }
 
+/// Название поля без пробелов по краям — или отказ: пустое, слишком длинное или
+/// уже занятое на этой доске. `except` — само переименовываемое поле: его
+/// нынешнее название занятым не считается.
+///
+/// Два поля с одним названием в окне карточки не различить. Регистр
+/// сравнивается здесь, а не в SQL: `lower()` SQLite знает только латиницу, и
+/// «Статус» со «статус» для него были бы разными.
+fn checked_field_name(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    name: &str,
+    except: Option<i64>,
+) -> CmdResult<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ERR_FIELD_NAME_EMPTY.to_string());
+    }
+    if name.chars().count() > MAX_FIELD_NAME_LENGTH {
+        return Err(format!("Название поля длиннее {} символов", MAX_FIELD_NAME_LENGTH));
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT id, name FROM custom_field_defs WHERE board_id = ?1")
+        .map_err(to_string_err)?;
+    let names = stmt
+        .query_map(params![board_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .map_err(to_string_err)?;
+    let wanted = name.to_lowercase();
+    for existing in names {
+        let (id, existing) = existing.map_err(to_string_err)?;
+        if Some(id) != except && existing.to_lowercase() == wanted {
+            return Err(ERR_FIELD_NAME_TAKEN.to_string());
+        }
+    }
+    Ok(name.to_string())
+}
+
 /// Варианты выбора без пробелов по краям, без пустых и без повторов: повтор дал
 /// бы в выпадающем списке две одинаковые строки. Повтором считается и тот же
 /// вариант в другом регистре. Порядок ввода сохраняется — это порядок в списке.
@@ -2809,31 +2892,9 @@ fn create_custom_field_in(
         return Err("Доска не найдена".to_string());
     }
 
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(ERR_FIELD_NAME_EMPTY.to_string());
-    }
-    if name.chars().count() > MAX_FIELD_NAME_LENGTH {
-        return Err(format!("Название поля длиннее {} символов", MAX_FIELD_NAME_LENGTH));
-    }
+    let name = checked_field_name(conn, board_id, name, None)?;
     if !CUSTOM_FIELD_TYPES.contains(&field_type) {
         return Err(ERR_FIELD_TYPE_UNKNOWN.to_string());
-    }
-
-    // Два поля с одним названием в окне карточки не различить. Регистр
-    // сравнивается здесь, а не в SQL: `lower()` SQLite знает только латиницу, и
-    // «Статус» со «статус» для него были бы разными.
-    let mut stmt = conn
-        .prepare("SELECT name FROM custom_field_defs WHERE board_id = ?1")
-        .map_err(to_string_err)?;
-    let names = stmt
-        .query_map(params![board_id], |row| row.get::<_, String>(0))
-        .map_err(to_string_err)?;
-    let wanted = name.to_lowercase();
-    for existing in names {
-        if existing.map_err(to_string_err)?.to_lowercase() == wanted {
-            return Err(ERR_FIELD_NAME_TAKEN.to_string());
-        }
     }
 
     let options_json = if field_type == "select" {
@@ -2858,6 +2919,101 @@ fn create_custom_field_in(
         params![board_id, name, field_type, options_json, position],
     ).map_err(to_string_err)?;
     read_custom_field(conn, conn.last_insert_rowid())
+}
+
+pub const ERR_FIELD_NOT_SELECT: &str = "Варианты бывают только у выбора из списка";
+pub const ERR_FIELD_ORDER_STALE: &str = "Список полей устарел — откройте настройки доски заново";
+
+/// Переименовывает поле. Значения на карточках не трогаются: они привязаны к
+/// полю, а не к его названию.
+#[tauri::command]
+pub fn rename_custom_field(id: i64, name: String, state: State<'_, DbState>) -> CmdResult<CustomField> {
+    let conn = state.conn.lock().unwrap();
+    rename_custom_field_in(&conn, id, &name)
+}
+
+fn rename_custom_field_in(conn: &rusqlite::Connection, id: i64, name: &str) -> CmdResult<CustomField> {
+    let field = read_custom_field(conn, id)?;
+    let name = checked_field_name(conn, field.board_id, name, Some(id))?;
+    conn.execute("UPDATE custom_field_defs SET name = ?1 WHERE id = ?2", params![name, id])
+        .map_err(to_string_err)?;
+    read_custom_field(conn, id)
+}
+
+/// Задаёт порядок полей доски — в нём они стоят в окне карточки и в настройках.
+///
+/// Приходит полный список id полей доски в новом порядке. Список, в котором
+/// поля не те, отклоняется целиком, а не применяется частично: так бывает,
+/// если поле удалили или добавили, пока окно настроек было открыто, и порядок,
+/// собранный по старому списку, перемешал бы поля не так, как их расставили.
+#[tauri::command]
+pub fn reorder_custom_fields(board_id: i64, field_ids: Vec<i64>, state: State<'_, DbState>) -> CmdResult<()> {
+    let mut conn = state.conn.lock().unwrap();
+    reorder_custom_fields_in(&mut conn, board_id, &field_ids)
+}
+
+fn reorder_custom_fields_in(conn: &mut rusqlite::Connection, board_id: i64, field_ids: &[i64]) -> CmdResult<()> {
+    let mut stmt = conn
+        .prepare("SELECT id FROM custom_field_defs WHERE board_id = ?1")
+        .map_err(to_string_err)?;
+    let mut current: Vec<i64> = stmt
+        .query_map(params![board_id], |row| row.get(0))
+        .map_err(to_string_err)?
+        .collect::<rusqlite::Result<Vec<i64>>>()
+        .map_err(to_string_err)?;
+    drop(stmt);
+
+    let mut wanted = field_ids.to_vec();
+    current.sort_unstable();
+    wanted.sort_unstable();
+    if current != wanted {
+        return Err(ERR_FIELD_ORDER_STALE.to_string());
+    }
+
+    let tx = conn.transaction().map_err(to_string_err)?;
+    for (position, id) in field_ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE custom_field_defs SET position = ?1 WHERE id = ?2",
+            params![position as i64, id],
+        ).map_err(to_string_err)?;
+    }
+    tx.commit().map_err(to_string_err)?;
+    Ok(())
+}
+
+/// Заменяет варианты выбора у поля `select`.
+///
+/// Значения на карточках не проверяются и не чинятся (решение пользователя,
+/// §31.4): значение хранится текстом независимо от нынешнего списка. Убрали
+/// вариант «Высокая» — у карточек, где он выбран, «Высокая» так и остаётся, и
+/// окно карточки показывает её отдельной строкой списка.
+#[tauri::command]
+pub fn update_custom_field_options(
+    id: i64,
+    select_options: Vec<String>,
+    state: State<'_, DbState>,
+) -> CmdResult<CustomField> {
+    let conn = state.conn.lock().unwrap();
+    update_custom_field_options_in(&conn, id, select_options)
+}
+
+fn update_custom_field_options_in(
+    conn: &rusqlite::Connection,
+    id: i64,
+    select_options: Vec<String>,
+) -> CmdResult<CustomField> {
+    let field = read_custom_field(conn, id)?;
+    if field.field_type != "select" {
+        return Err(ERR_FIELD_NOT_SELECT.to_string());
+    }
+    let options = normalize_select_options(select_options)?;
+    if options.is_empty() {
+        return Err(ERR_SELECT_WITHOUT_OPTIONS.to_string());
+    }
+    let json = serde_json::to_string(&options).map_err(to_string_err)?;
+    conn.execute("UPDATE custom_field_defs SET select_options = ?1 WHERE id = ?2", params![json, id])
+        .map_err(to_string_err)?;
+    read_custom_field(conn, id)
 }
 
 /// Удаляет поле вместе со всеми его значениями. Сами карточки не меняются: у
@@ -3025,16 +3181,23 @@ pub fn get_custom_fields_with_values(board_id: i64, state: State<'_, DbState>) -
 }
 
 fn custom_fields_in(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<Vec<CustomField>> {
+    read_custom_fields(conn, "d.board_id = ?1", board_id)
+}
+
+/// Поля, отобранные условием по `d`, вместе со значениями — одним запросом.
+/// Общая часть поля одной доски (окно карточки) и полей всего пространства
+/// («Список»).
+fn read_custom_fields(conn: &rusqlite::Connection, filter: &str, id: i64) -> CmdResult<Vec<CustomField>> {
     let sql = format!(
         "SELECT {}, v.card_id, v.value
            FROM custom_field_defs d
            LEFT JOIN custom_field_values v ON v.field_def_id = d.id
-          WHERE d.board_id = ?1
-          ORDER BY d.position, d.id, v.card_id",
-        CUSTOM_FIELD_COLUMNS,
+          WHERE {}
+          ORDER BY d.board_id, d.position, d.id, v.card_id",
+        CUSTOM_FIELD_COLUMNS, filter,
     );
     let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
-    let mut rows = stmt.query(params![board_id]).map_err(to_string_err)?;
+    let mut rows = stmt.query(params![id]).map_err(to_string_err)?;
 
     // Строки одного поля идут подряд — так их упорядочил `ORDER BY`, — поэтому
     // новое поле начинается там, где сменился id.
@@ -3139,9 +3302,16 @@ pub fn get_archived_cards(board_id: i64, state: State<'_, DbState>) -> CmdResult
 /// positions. If the column itself was archived meanwhile it is restored too —
 /// otherwise the card would come back into a place the user cannot see, and the
 /// button would look broken.
+///
+/// Зависимости, время и значения полей возвращать не нужно: архивация их не
+/// трогает (§31.1), и карточка приходит обратно со всеми связями.
 #[tauri::command]
 pub fn restore_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let mut conn = state.conn.lock().unwrap();
+    restore_card_in(&mut conn, id)
+}
+
+fn restore_card_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     let tx = conn.transaction().map_err(to_string_err)?;
 
     let column_id: i64 = tx.query_row(
@@ -4290,9 +4460,9 @@ pub fn process_overdue_cards(conn: &rusqlite::Connection) -> rusqlite::Result<Ov
                 "UPDATE cards SET archived = 1, archive_reason = ?1 WHERE id = ?2",
                 params![crate::models::ARCHIVE_REASON_MAX_RETRIES, card_id],
             )?;
-            // Тот же довод, что и в `archive_card`: карточки больше не видно,
-            // и держать её в чужих списках блокировок незачем.
-            drop_dependencies_of(&tx, card_id)?;
+            // То же, что и в `archive_card`: зависимости остаются (вернётся из
+            // архива — вернутся и они), а идущий таймер останавливается.
+            stop_running(&tx, "card_id = ?1", card_id)?;
             outcome.archived.push(title);
         }
     }

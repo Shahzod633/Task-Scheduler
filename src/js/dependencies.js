@@ -67,7 +67,10 @@ async function blockerWarning(cardId) {
     let open = [];
     try {
         const deps = await api.listCardDependencies(cardId);
-        open = (deps.blocked_by || []).filter(d => !d.is_done);
+        // Архивная блокирующая задача ничего не держит, пока она в архиве:
+        // связь с ней сохранена (§31.1), но спрашивать о ней при закрытии —
+        // значит напоминать о задаче, которой нет на доске.
+        open = (deps.blocked_by || []).filter(d => !d.is_done && !d.is_archived);
     } catch (e) {
         console.error('Не удалось прочитать зависимости карточки:', e);
         return '';
@@ -197,14 +200,24 @@ export function renderDependencies(container, cardData, opts = {}) {
     }
 
     function createRow(item) {
+        // Архивная задача остаётся в списке: связь с ней не удаляется при
+        // архивации и вернётся вместе с карточкой (§31.1). Пока она в архиве,
+        // строка гасится и ничего не блокирует.
+        const state = item.is_archived ? 'archived' : (item.is_done ? 'done' : 'open');
         const row = createElement('div', {
-            className: `card-deps__row ${item.is_done ? 'card-deps__row--done' : ''}`,
+            className: `card-deps__row ${state === 'open' ? '' : `card-deps__row--${state}`}`,
         });
 
+        const icon = { archived: Icons.archive, done: Icons.checkCircle, open: Icons.link }[state];
+        const hint = {
+            archived: 'Задача в архиве — пока она там, ничего не блокирует',
+            done: 'Задача завершена',
+            open: 'Задача ещё не завершена',
+        }[state];
         row.appendChild(createElement('span', {
             className: 'card-deps__row-icon',
-            innerHTML: item.is_done ? Icons.checkCircle : Icons.link,
-            'data-tooltip': item.is_done ? 'Задача завершена' : 'Задача ещё не завершена',
+            innerHTML: icon,
+            'data-tooltip': hint,
         }));
 
         const text = createElement('div', { className: 'card-deps__row-text' });
@@ -212,10 +225,17 @@ export function renderDependencies(container, cardData, opts = {}) {
             className: 'card-deps__row-title',
             type: 'button',
         }, item.title);
-        title.addEventListener('click', () => openLinked(item));
+        title.addEventListener('click', () => {
+            // На доске архивной задачи нет — переход туда ничего бы не показал.
+            if (item.is_archived) {
+                showToast('Задача в архиве. Вернуть её можно через «Архив доски»', 'info');
+                return;
+            }
+            openLinked(item);
+        });
         text.appendChild(title);
         text.appendChild(createElement('div', { className: 'card-deps__row-where' },
-            `${item.board_name} · ${item.column_name}`));
+            `${item.board_name} · ${item.column_name}${item.is_archived ? ' · в архиве' : ''}`));
         row.appendChild(text);
 
         const removeBtn = createElement('button', {
