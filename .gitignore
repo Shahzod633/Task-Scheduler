@@ -16,6 +16,9 @@ src-tauri/gen/
 .idea/
 .DS_Store
 Thumbs.db
+# Кэш анализа модулей PowerShell (ModuleAnalysisCache). Появляется в корне
+# проекта, когда PowerShell запускают отсюда, и к проекту не относится.
+Microsoft/
 
 
 antigravity_prompt_taskflow_fixes.md
