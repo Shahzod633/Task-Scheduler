@@ -348,6 +348,38 @@ pub struct StartTimerResult {
     pub stopped: Option<StoppedTimer>,
 }
 
+// ─── Пользовательские поля ───
+
+/// Допустимые типы поля — те же, что в `CHECK` схемы. Хранятся по-английски,
+/// подписи рисует интерфейс, как у приоритета.
+pub const CUSTOM_FIELD_TYPES: [&str; 4] = ["text", "number", "date", "select"];
+
+/// Поле доски вместе со значениями на её карточках.
+///
+/// Значения приезжают внутри поля, а не отдельным списком с id поля в каждой
+/// строке: читают их всегда в связке «какое поле → что на какой карточке».
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CustomField {
+    pub id: i64,
+    pub board_id: i64,
+    pub name: String,
+    /// Одно из `CUSTOM_FIELD_TYPES`.
+    pub field_type: String,
+    /// Варианты выбора в порядке ввода — только у `select`, у прочих пусто.
+    /// В базе — JSON-массив строк, наружу — готовым списком.
+    pub select_options: Vec<String>,
+    pub position: i64,
+    pub values: Vec<CustomFieldValue>,
+}
+
+/// Значение поля на одной карточке. Карточки без значения здесь нет вовсе:
+/// пустого значения в базе не бывает.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CustomFieldValue {
+    pub card_id: i64,
+    pub value: String,
+}
+
 /// Причина автоматической архивации: попытки исчерпаны, а срок опять прошёл.
 /// Хранится строкой в `cards.archive_reason`; интерфейс рисует свой ярлык.
 pub const ARCHIVE_REASON_MAX_RETRIES: &str = "incomplete_max_retries";

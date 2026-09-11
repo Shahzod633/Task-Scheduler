@@ -4273,3 +4273,238 @@ fn deleting_a_member_keeps_their_time_and_stops_their_timer() {
     assert!(read_time_entry(&conn, running).unwrap().ended_at.is_some(), "идущий таймер остановлен");
     assert!(total_time_in(&conn, card).unwrap() >= 1200 + 600, "сумма карточки не уменьшилась");
 }
+
+// ─── Пользовательские поля ───
+
+/// Рабочая колонка на свежей доске с заданным названием.
+fn fields_column(conn: &Connection, board_name: &str) -> i64 {
+    workload_board(conn, 1, board_name).0
+}
+
+fn options(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+/// Значение поля на карточке — тем же чтением, которым пользуется окно карточки.
+fn value_of(conn: &Connection, board_id: i64, field_id: i64, card_id: i64) -> Option<String> {
+    custom_fields_in(conn, board_id).unwrap()
+        .into_iter().find(|f| f.id == field_id)?
+        .values.into_iter().find(|v| v.card_id == card_id)
+        .map(|v| v.value)
+}
+
+#[test]
+fn a_select_field_keeps_its_options_clean_and_in_order() {
+    let conn = test_db();
+    let board = board_of(&conn, fields_column(&conn, "Доска полей"));
+    assert!(custom_fields_in(&conn, board).unwrap().is_empty());
+
+    let field = create_custom_field_in(&conn, board, "  Срочность ", "select",
+        options(&[" Низкая ", "Средняя", "", "Высокая", "средняя"])).unwrap();
+    assert_eq!(field.name, "Срочность");
+    assert_eq!(field.select_options, options(&["Низкая", "Средняя", "Высокая"]),
+        "пробелы сняты, пустые и повторы в любом регистре выброшены, порядок ввода сохранён");
+    assert!(field.values.is_empty());
+
+    let second = create_custom_field_in(&conn, board, "Заметка", "text", options(&["лишнее"])).unwrap();
+    assert!(second.select_options.is_empty(), "у текстового поля вариантов не бывает");
+    assert!(second.position > field.position, "новое поле встаёт последним");
+
+    let names: Vec<String> = custom_fields_in(&conn, board).unwrap().into_iter().map(|f| f.name).collect();
+    assert_eq!(names, vec!["Срочность", "Заметка"]);
+}
+
+#[test]
+fn a_field_needs_a_free_name_a_known_type_and_options_for_select() {
+    let conn = test_db();
+    let board = board_of(&conn, fields_column(&conn, "Доска полей"));
+    let other = board_of(&conn, fields_column(&conn, "Другая доска"));
+
+    create_custom_field_in(&conn, board, "Статус", "text", vec![]).unwrap();
+    assert_eq!(create_custom_field_in(&conn, board, "статус", "number", vec![]).unwrap_err(), ERR_FIELD_NAME_TAKEN,
+        "регистр кириллицы не делает название другим");
+    assert!(create_custom_field_in(&conn, other, "Статус", "text", vec![]).is_ok(),
+        "на другой доске то же название свободно");
+
+    assert_eq!(create_custom_field_in(&conn, board, "   ", "text", vec![]).unwrap_err(), ERR_FIELD_NAME_EMPTY);
+    assert_eq!(create_custom_field_in(&conn, board, "Цвет", "color", vec![]).unwrap_err(), ERR_FIELD_TYPE_UNKNOWN);
+    assert_eq!(create_custom_field_in(&conn, board, "Выбор", "select", options(&[" ", ""])).unwrap_err(),
+        ERR_SELECT_WITHOUT_OPTIONS);
+    assert_eq!(create_custom_field_in(&conn, 9999, "Поле", "text", vec![]).unwrap_err(), "Доска не найдена");
+}
+
+#[test]
+fn values_are_stored_per_card_and_read_back_in_one_call() {
+    let conn = test_db();
+    let col = fields_column(&conn, "Доска полей");
+    let board = board_of(&conn, col);
+    let first = assigned_card(&conn, col, "Первая", None, "Medium");
+    let second = assigned_card(&conn, col, "Вторая", None, "Medium");
+    let field = create_custom_field_in(&conn, board, "Срочность", "select",
+        options(&["Низкая", "Средняя", "Высокая"])).unwrap();
+
+    set_custom_field_value_in(&conn, first, field.id, Some("Низкая".into())).unwrap();
+    set_custom_field_value_in(&conn, second, field.id, Some("Высокая".into())).unwrap();
+    // Повторная запись меняет значение, а не добавляет вторую строку.
+    set_custom_field_value_in(&conn, first, field.id, Some("Средняя".into())).unwrap();
+
+    let fields = custom_fields_in(&conn, board).unwrap();
+    assert_eq!(fields.len(), 1);
+    let values: Vec<(i64, String)> = fields[0].values.iter().map(|v| (v.card_id, v.value.clone())).collect();
+    assert_eq!(values, vec![(first, "Средняя".to_string()), (second, "Высокая".to_string())]);
+
+    // Пустое значение — это очистка, а не пустая строка в базе.
+    assert_eq!(set_custom_field_value_in(&conn, first, field.id, Some("   ".into())).unwrap(), None);
+    assert_eq!(set_custom_field_value_in(&conn, second, field.id, None).unwrap(), None);
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM custom_field_values", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn each_type_accepts_only_its_own_values() {
+    let conn = test_db();
+    let col = fields_column(&conn, "Доска полей");
+    let board = board_of(&conn, col);
+    let card = assigned_card(&conn, col, "Карточка", None, "Medium");
+    let number = create_custom_field_in(&conn, board, "Оценка", "number", vec![]).unwrap().id;
+    let date = create_custom_field_in(&conn, board, "Сдача", "date", vec![]).unwrap().id;
+    let choice = create_custom_field_in(&conn, board, "Срочность", "select", options(&["Низкая", "Высокая"])).unwrap().id;
+    let text = create_custom_field_in(&conn, board, "Заметка", "text", vec![]).unwrap().id;
+    let set = |field: i64, value: &str| set_custom_field_value_in(&conn, card, field, Some(value.to_string()));
+
+    assert_eq!(set(number, " 3,50 ").unwrap().as_deref(), Some("3.5"), "запятая — это дробь, запись одна на число");
+    assert_eq!(set(number, "42").unwrap().as_deref(), Some("42"));
+    assert_eq!(set(number, "-0").unwrap().as_deref(), Some("0"));
+    assert_eq!(set(number, "три").unwrap_err(), ERR_VALUE_NOT_NUMBER);
+    assert_eq!(set(number, "inf").unwrap_err(), ERR_VALUE_NOT_NUMBER);
+    assert_eq!(set(number, "1e20").unwrap_err(), ERR_VALUE_NUMBER_TOO_BIG);
+
+    assert_eq!(set(date, "2028-02-29").unwrap().as_deref(), Some("2028-02-29"), "високосный год");
+    assert_eq!(set(date, "2026-09-11").unwrap().as_deref(), Some("2026-09-11"));
+    // `date()` SQLite вернул бы «2026-02-30» как есть — проверка своя.
+    assert_eq!(set(date, "2026-02-30").unwrap_err(), ERR_VALUE_NOT_DATE);
+    assert_eq!(set(date, "2026-02-29").unwrap_err(), ERR_VALUE_NOT_DATE, "2026 год не високосный");
+    assert_eq!(set(date, "2026-13-01").unwrap_err(), ERR_VALUE_NOT_DATE);
+    assert_eq!(set(date, "11.09.2026").unwrap_err(), ERR_VALUE_NOT_DATE);
+    assert_eq!(set(date, "2026-09-11 10:00:00").unwrap_err(), ERR_VALUE_NOT_DATE);
+
+    assert_eq!(set(choice, "Высокая").unwrap().as_deref(), Some("Высокая"));
+    assert_eq!(set(choice, "высокая").unwrap_err(), ERR_VALUE_NOT_OPTION, "вариант выбирают таким, каким объявили");
+
+    assert!(set(text, &"ы".repeat(500)).is_ok());
+    assert!(set(text, &"ы".repeat(501)).is_err());
+
+    // Отклонённое значение прежнее не затирает.
+    assert_eq!(value_of(&conn, board, number, card).as_deref(), Some("0"));
+    assert_eq!(value_of(&conn, board, date, card).as_deref(), Some("2026-09-11"));
+}
+
+#[test]
+fn a_field_of_another_board_cannot_be_set_on_a_card() {
+    let conn = test_db();
+    let col = fields_column(&conn, "Доска А");
+    let card = assigned_card(&conn, col, "Карточка", None, "Medium");
+    let other_board = board_of(&conn, fields_column(&conn, "Доска Б"));
+    let foreign = create_custom_field_in(&conn, other_board, "Чужое", "text", vec![]).unwrap().id;
+
+    assert_eq!(set_custom_field_value_in(&conn, card, foreign, Some("x".into())).unwrap_err(), ERR_FIELD_OTHER_BOARD);
+    assert_eq!(set_custom_field_value_in(&conn, 9999, foreign, Some("x".into())).unwrap_err(), "Карточка не найдена");
+    assert_eq!(set_custom_field_value_in(&conn, card, 9999, Some("x".into())).unwrap_err(), ERR_FIELD_NOT_FOUND);
+}
+
+#[test]
+fn deleting_a_field_takes_its_values_and_leaves_the_cards_alone() {
+    let mut conn = test_db();
+    let col = fields_column(&conn, "Доска полей");
+    let board = board_of(&conn, col);
+    let first = assigned_card(&conn, col, "Первая", None, "Medium");
+    let second = assigned_card(&conn, col, "Вторая", None, "Medium");
+    let doomed = create_custom_field_in(&conn, board, "Срочность", "select", options(&["Низкая", "Высокая"])).unwrap().id;
+    let kept = create_custom_field_in(&conn, board, "Оценка", "number", vec![]).unwrap().id;
+    set_custom_field_value_in(&conn, first, doomed, Some("Низкая".into())).unwrap();
+    set_custom_field_value_in(&conn, second, doomed, Some("Высокая".into())).unwrap();
+    set_custom_field_value_in(&conn, first, kept, Some("5".into())).unwrap();
+
+    delete_custom_field_in(&mut conn, doomed).unwrap();
+
+    let ids: Vec<i64> = custom_fields_in(&conn, board).unwrap().iter().map(|f| f.id).collect();
+    assert_eq!(ids, vec![kept]);
+    assert_eq!(value_of(&conn, board, kept, first).as_deref(), Some("5"), "значения другого поля на месте");
+    let orphans: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM custom_field_values WHERE field_def_id = ?1", params![doomed], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(orphans, 0);
+    let cards: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM cards WHERE id IN (?1, ?2)", params![first, second], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(cards, 2, "карточки удаление поля не трогает");
+
+    assert_eq!(delete_custom_field_in(&mut conn, doomed).unwrap_err(), ERR_FIELD_NOT_FOUND);
+}
+
+#[test]
+fn deleting_a_card_column_or_board_takes_field_values_with_it() {
+    let mut conn = test_db();
+    let col = fields_column(&conn, "Доска полей");
+    let board = board_of(&conn, col);
+    let field = create_custom_field_in(&conn, board, "Заметка", "text", vec![]).unwrap().id;
+
+    let card = assigned_card(&conn, col, "Карточка", None, "Medium");
+    set_custom_field_value_in(&conn, card, field, Some("x".into())).unwrap();
+    delete_card_in(&mut conn, card).expect("значение поля не должно мешать удалить карточку");
+
+    // Колонка — не из костяка, такие удалять можно.
+    let extra = create_column_in(&mut conn, board, "Лишняя").unwrap();
+    let in_extra = assigned_card(&conn, extra.id, "В лишней", None, "Medium");
+    set_custom_field_value_in(&conn, in_extra, field, Some("y".into())).unwrap();
+    delete_column_in(&mut conn, extra.id).expect("значение поля не должно мешать удалить колонку");
+
+    let on_board = assigned_card(&conn, col, "На доске", None, "Medium");
+    set_custom_field_value_in(&conn, on_board, field, Some("z".into())).unwrap();
+    delete_board_in(&mut conn, board).expect("поля доски не должны мешать удалить доску");
+
+    let values: i64 = conn.query_row("SELECT COUNT(*) FROM custom_field_values", [], |r| r.get(0)).unwrap();
+    let defs: i64 = conn.query_row("SELECT COUNT(*) FROM custom_field_defs", [], |r| r.get(0)).unwrap();
+    assert_eq!((values, defs), (0, 0));
+    let violations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(violations, 0);
+}
+
+#[test]
+fn a_board_is_deleted_even_if_a_card_that_moved_away_holds_its_field_value() {
+    // Карточка получила значение поля доски А и уехала на доску Б — так
+    // карточки уезжают из Inbox. Удаление доски А обязано снять и это значение,
+    // иначе её поле упёрлось бы во внешний ключ.
+    let mut conn = test_db();
+    let col_a = fields_column(&conn, "Доска А");
+    let board_a = board_of(&conn, col_a);
+    let col_b = fields_column(&conn, "Доска Б");
+    let field = create_custom_field_in(&conn, board_a, "Заметка", "text", vec![]).unwrap().id;
+    let card = assigned_card(&conn, col_a, "Путешественница", None, "Medium");
+    set_custom_field_value_in(&conn, card, field, Some("x".into())).unwrap();
+    conn.execute("UPDATE cards SET column_id = ?1 WHERE id = ?2", params![col_b, card]).unwrap();
+
+    delete_board_in(&mut conn, board_a).expect("значение на уехавшей карточке не должно мешать удалить доску");
+    let violations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(violations, 0);
+    let still_there: i64 = conn.query_row("SELECT COUNT(*) FROM cards WHERE id = ?1", params![card], |r| r.get(0)).unwrap();
+    assert_eq!(still_there, 1, "уехавшая карточка на месте");
+}
+
+#[test]
+fn archiving_a_card_keeps_its_field_values() {
+    let conn = test_db();
+    let col = fields_column(&conn, "Доска полей");
+    let board = board_of(&conn, col);
+    let field = create_custom_field_in(&conn, board, "Оценка", "number", vec![]).unwrap().id;
+    let card = assigned_card(&conn, col, "Карточка", None, "Medium");
+    set_custom_field_value_in(&conn, card, field, Some("8".into())).unwrap();
+
+    archive_card_in(&conn, card).unwrap();
+    // Архив обратимый — вернувшаяся карточка должна прийти со своими данными.
+    assert_eq!(value_of(&conn, board, field, card).as_deref(), Some("8"));
+}

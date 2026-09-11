@@ -1277,3 +1277,172 @@ select.form-input option {
     font-size: var(--font-size-xs);
     color: var(--color-danger);
 }
+
+/* ─── Настройки доски ───────────────────────────────────────────────────── */
+.board-settings {
+    width: 520px;
+}
+
+/* Под заголовком — название доски: окно одно на все доски, и без него не
+   видно, чьи поля правишь. */
+.board-settings__heading {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.board-settings__board {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ─── Раздел «Пользовательские поля» ───
+   Строки и форма повторяют блок «Время» в окне карточки: подложка поля ввода,
+   приглушённая кнопка добавления, форма в рамке. */
+.field-settings__title {
+    margin: 0 0 var(--space-xs);
+    font-size: var(--font-size-md);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-primary);
+}
+
+.field-settings__hint {
+    margin: 0 0 var(--space-md);
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+}
+
+.field-settings__list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.field-settings__empty {
+    margin: 0;
+    padding: var(--space-xs) 0;
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+}
+
+.field-settings__row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: 8px var(--space-sm);
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+}
+
+.field-settings__main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.field-settings__name {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-medium);
+    color: var(--text-primary);
+    overflow-wrap: anywhere;
+}
+
+/* Варианты выбора перечислены прямо в строке: иначе, чтобы вспомнить их,
+   пришлось бы открывать карточку. */
+.field-settings__type {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+.field-settings__remove {
+    flex: none;
+}
+
+.field-settings__add {
+    margin-top: var(--space-sm);
+    padding: 2px 6px;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-xs);
+    color: var(--accent-text);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.field-settings__add:hover {
+    background: var(--accent-soft);
+}
+
+.field-settings__form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+}
+
+.field-settings__fields {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-md);
+}
+
+.field-settings__field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.field-settings__field--grow {
+    flex: 1 1 200px;
+    min-width: 0;
+}
+
+.field-settings__label {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+}
+
+.field-settings__type-select {
+    width: auto;
+    min-width: 170px;
+}
+
+.field-settings__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-xs);
+}
+
+/* ─── Пользовательские поля в окне карточки ───
+   Две колонки, как ряд «Исполнитель / Автор / Приоритет» над ними: поля
+   короткие, и столбик из них растягивал бы окно в высоту. Пока поля грузятся —
+   и если их у доски нет — блок пуст и места не занимает. */
+.card-fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-md);
+    margin-top: var(--space-lg);
+}
+
+.card-fields:empty {
+    display: none;
+}
+
+.card-fields__field {
+    min-width: 0;
+    margin-bottom: 0;
+}

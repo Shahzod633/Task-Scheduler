@@ -18,6 +18,7 @@ import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate,
 import { renderMarkdown } from './markdown.js';
 import { renderDependencies, confirmFinalColumnMove } from './dependencies.js';
 import { attachTimerButton, renderTimeLog } from './timer.js';
+import { renderFieldSettings, renderCardFields } from './fields.js';
 
 let currentBoardId = null;
 // Пространство открытой доски. Нужно выбору карточки для зависимости: тот
@@ -361,11 +362,55 @@ function createBoardHeader(board) {
     exportBtn.addEventListener('click', () => exportCurrentBoard(board));
     right.appendChild(exportBtn);
 
-    right.appendChild(createSoonButton('', Icons.moreHorizontal));
+    // Настройки доски. На этом месте стояла заглушка «⋯» — `createSoonButton`,
+    // которая на щелчок отвечала «появится в следующих версиях»: настроек у
+    // доски не было вовсе. Значок теперь шестерёнка — кнопка открывает ровно
+    // настройки, а не меню «ещё».
+    const settingsBtn = createElement('button', {
+        className: 'board-header__btn',
+        innerHTML: Icons.settings,
+        'data-tooltip': 'Настройки доски',
+    });
+    settingsBtn.addEventListener('click', () => showBoardSettings(board));
+    right.appendChild(settingsBtn);
 
     header.appendChild(left);
     header.appendChild(right);
     return header;
+}
+
+/**
+ * Окно «Настройки доски». Пока в нём один раздел — пользовательские поля.
+ *
+ * Поля пишутся сразу, по кнопкам внутри раздела, поэтому у окна нет своей
+ * «Сохранить». Доску после закрытия перерисовывать не нужно: на лицевой
+ * стороне карточек поля не показываются.
+ */
+function showBoardSettings(board) {
+    closePopovers();
+    const existing = $('.modal-overlay');
+    if (existing) existing.remove();
+
+    const overlay = createElement('div', { className: 'modal-overlay' });
+    const modal = createElement('div', { className: 'modal board-settings' });
+
+    const header = createElement('div', { className: 'modal__header' });
+    const heading = createElement('div', { className: 'board-settings__heading' });
+    heading.appendChild(createElement('h2', { className: 'modal__title' }, 'Настройки доски'));
+    heading.appendChild(createElement('span', { className: 'board-settings__board' }, board.name));
+    header.appendChild(heading);
+    const closeBtn = createElement('button', { className: 'modal__close', innerHTML: Icons.x });
+    closeBtn.addEventListener('click', () => overlay.remove());
+    header.appendChild(closeBtn);
+    modal.appendChild(header);
+
+    const body = createElement('div', { className: 'modal__body' });
+    renderFieldSettings(body, board.id);
+    modal.appendChild(body);
+
+    overlay.appendChild(modal);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
 }
 
 // ─── Заметки доски ───
@@ -1041,6 +1086,12 @@ export function showCardEditModal(cardData, options = {}) {
 
     body.appendChild(peopleRow);
 
+    // Пользовательские поля доски — сразу под стандартными. Доску карточки
+    // знают все экраны, кроме самой доски: «Список», палитра, планировщик и
+    // «Требуют внимания» приносят `board_id` в карточке, а `get_cards` его не
+    // отдаёт — для доски он взят при её отрисовке.
+    const customFields = renderCardFields(body, cardData.id, cardData.board_id ?? currentBoardId);
+
     // Loads asynchronously; the modal is already on screen by then.
     renderChecklist(body, cardData.id, () => { checklistDirty = true; });
     // Зависимости, как и чек-лист, пишутся сразу и видны на лицевой стороне
@@ -1098,6 +1149,15 @@ export function showCardEditModal(cardData, options = {}) {
         // Заданный срок уходит обратно как есть: поле выключено, менять
         // нечего, а бэкенд всё равно принимает дату только вместо пустой.
         const dueDate = hasDeadline ? cardData.due_date : (dueInput.value || null);
+        // Поля проверяются до первой записи: иначе карточка сохранилась бы
+        // наполовину — название уже в базе, а поле с ошибкой нет.
+        let fieldChanges;
+        try {
+            fieldChanges = customFields.changes();
+        } catch (e) {
+            showToast(e.message, 'error');
+            return;
+        }
         try {
             await api.updateCard(cardData.id, title, descInput.value, dueDate);
 
@@ -1108,12 +1168,17 @@ export function showCardEditModal(cardData, options = {}) {
             if (assigneeId !== wasAssignee) await api.updateCardAssignee(cardData.id, assigneeId);
             if (authorId !== wasAuthor) await api.updateCardAuthor(cardData.id, authorId);
             if (priority !== (cardData.priority || 'Medium')) await api.updateCardPriority(cardData.id, priority);
+            for (const { field, value } of fieldChanges) {
+                await api.setCustomFieldValue(cardData.id, field.id, value);
+            }
 
             overlay.remove();
             onChange();
             showToast('Карточка обновлена');
         } catch (e) {
-            showToast('Не удалось сохранить карточку', 'error');
+            // Отказ по значению поля («Такого варианта у поля нет») приходит с
+            // бэкенда строкой и объясняет, что не так, — его и показываем.
+            showToast(typeof e === 'string' ? e : 'Не удалось сохранить карточку', 'error');
         }
     });
     footer.appendChild(saveBtn);

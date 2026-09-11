@@ -146,6 +146,11 @@ pub fn run() {
             commands::add_time_entry,
             commands::list_orphaned_timers,
 
+            commands::create_custom_field,
+            commands::delete_custom_field,
+            commands::set_custom_field_value,
+            commands::get_custom_fields_with_values,
+
             commands::get_inbox_column,
             commands::get_cards_with_due_dates,
 

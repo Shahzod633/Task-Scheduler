@@ -365,6 +365,56 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
              ON time_entries(member_id) WHERE ended_at IS NULL;",
     )?;
 
+    // Пользовательские поля: доска объявляет поле (`custom_field_defs`), и у
+    // каждой её карточки появляется своё значение (`custom_field_values`).
+    //
+    // `select_options` — JSON-массив строк, только у типа `select`; у прочих
+    // NULL. Тип закреплён `CHECK`, как приоритет карточки: неизвестный тип
+    // интерфейс не сумел бы нарисовать.
+    //
+    // Пустого значения в базе не бывает: очистить поле значит удалить его
+    // строку, поэтому `value` — `NOT NULL`.
+    //
+    // Каскада `ON DELETE` нет по общему правилу базы (см. `card_dependencies`):
+    // удаление поля, карточки, колонки и доски снимает строки вручную.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS custom_field_defs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            board_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            field_type TEXT NOT NULL CHECK (field_type IN ('text', 'number', 'date', 'select')),
+            select_options TEXT,
+            position INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (board_id) REFERENCES boards(id)
+        )",
+        (),
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS custom_field_values (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL,
+            field_def_id INTEGER NOT NULL,
+            value TEXT NOT NULL,
+            FOREIGN KEY (card_id) REFERENCES cards(id),
+            FOREIGN KEY (field_def_id) REFERENCES custom_field_defs(id)
+        )",
+        (),
+    )?;
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_custom_field_defs_board
+             ON custom_field_defs(board_id);
+         -- Одно значение поля на карточку: запись идёт через UPSERT по этой паре.
+         -- Индекс же покрывает поиск по `card_id` — удаление карточки.
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_field_values_card_field
+             ON custom_field_values(card_id, field_def_id);
+         -- Обратное направление: значения поля — при его удалении и при
+         -- чтении полей доски.
+         CREATE INDEX IF NOT EXISTS idx_custom_field_values_field
+             ON custom_field_values(field_def_id);",
+    )?;
+
     // ─── Migrations for pre-existing databases ───
     // (CREATE TABLE IF NOT EXISTS above only creates columns on brand-new tables;
     // existing installs need ALTER TABLE for newly introduced columns.)

@@ -9,6 +9,7 @@ use crate::models::{
     CommentExport, MemberExport, DatabaseExport,
     Member, ChecklistItem, CardComment, CardRow, CardDependencies, DependencyCard, BoardColumns, WorkspaceCardList, WorkloadRow, MEMBER_COLORS, PRIORITIES,
     TimeEntry, ActiveTimer, StoppedTimer, StartTimerResult,
+    CustomField, CustomFieldValue, CUSTOM_FIELD_TYPES,
     EXPORT_FORMAT_VERSION, ReminderSettings, DueReminder,
     EmailSettings, EmailReminder, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, DEFAULT_EMAIL_RECIPIENT,
 };
@@ -834,6 +835,13 @@ fn update_card_in(
 #[tauri::command]
 pub fn archive_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
+    archive_card_in(&conn, id)
+}
+
+/// Время (`time_entries`) и значения пользовательских полей архивация не
+/// трогает: архив обратимый, и вернувшаяся карточка должна прийти со своими
+/// данными. Удаляются только зависимости — см. комментарий ниже.
+fn archive_card_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<()> {
     conn.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![id]).map_err(to_string_err)?;
     // Ушедшая в архив карточка никого не блокирует и заблокированной не
     // считается: её не видно, и «жду задачу, которой нет на доске» — тупик.
@@ -2685,6 +2693,365 @@ fn orphaned_timers_in(conn: &rusqlite::Connection, cutoff: &str) -> CmdResult<Ve
     Ok(res)
 }
 
+// ─── Пользовательские поля ───
+//
+// Доска объявляет поле, и в окне каждой её карточки под стандартными полями
+// появляется ввод под него. Типов четыре: текст, число, дата и выбор из списка.
+//
+// Значение проверяется по типу здесь, а не только в интерфейсе: число хранится
+// числом, дата — календарной датой, выбор — одним из объявленных вариантов.
+// Иначе в базе оседали бы значения, которые окно карточки не сумеет показать в
+// своём поле.
+
+/// Название поля — подпись над его вводом; длиннее она перестаёт помещаться.
+const MAX_FIELD_NAME_LENGTH: usize = 60;
+/// Вариант выбора — строка выпадающего списка, а не описание.
+const MAX_SELECT_OPTION_LENGTH: usize = 60;
+/// Текстовое поле — короткая строка, а не второе описание карточки.
+const MAX_TEXT_VALUE_LENGTH: usize = 500;
+/// Числа по модулю больше этого JavaScript уже не хранит точно (2^53 ≈ 9·10^15),
+/// и в окне карточки вернулось бы не то число, что вписали.
+const MAX_NUMBER_VALUE: f64 = 1e15;
+
+pub const ERR_FIELD_NOT_FOUND: &str = "Поле не найдено";
+pub const ERR_FIELD_NAME_EMPTY: &str = "Укажите название поля";
+pub const ERR_FIELD_NAME_TAKEN: &str = "Поле с таким названием на этой доске уже есть";
+pub const ERR_FIELD_TYPE_UNKNOWN: &str = "Неизвестный тип поля";
+pub const ERR_SELECT_WITHOUT_OPTIONS: &str = "Для выбора из списка нужен хотя бы один вариант";
+pub const ERR_FIELD_OTHER_BOARD: &str = "Это поле принадлежит другой доске";
+pub const ERR_VALUE_NOT_NUMBER: &str = "Значение должно быть числом";
+pub const ERR_VALUE_NUMBER_TOO_BIG: &str = "Слишком большое число";
+pub const ERR_VALUE_NOT_DATE: &str = "Значение должно быть датой";
+pub const ERR_VALUE_NOT_OPTION: &str = "Такого варианта у поля нет";
+
+const CUSTOM_FIELD_COLUMNS: &str = "d.id, d.board_id, d.name, d.field_type, d.select_options, d.position";
+
+/// Поле без значений — их дочитывает `custom_fields_in`.
+fn row_to_custom_field(row: &rusqlite::Row) -> rusqlite::Result<CustomField> {
+    // Варианты пишет только `create_custom_field`, и JSON там всегда верный.
+    // Не разобрался бы он лишь в испорченной базе — тогда поле покажется с
+    // пустым списком, а не уронит окно карточки целиком.
+    let options: Option<String> = row.get(4)?;
+    Ok(CustomField {
+        id: row.get(0)?,
+        board_id: row.get(1)?,
+        name: row.get(2)?,
+        field_type: row.get(3)?,
+        select_options: options
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default(),
+        position: row.get(5)?,
+        values: Vec::new(),
+    })
+}
+
+fn read_custom_field(conn: &rusqlite::Connection, id: i64) -> CmdResult<CustomField> {
+    let sql = format!("SELECT {} FROM custom_field_defs d WHERE d.id = ?1", CUSTOM_FIELD_COLUMNS);
+    conn.query_row(&sql, params![id], row_to_custom_field)
+        .optional()
+        .map_err(to_string_err)?
+        .ok_or_else(|| ERR_FIELD_NOT_FOUND.to_string())
+}
+
+/// Варианты выбора без пробелов по краям, без пустых и без повторов: повтор дал
+/// бы в выпадающем списке две одинаковые строки. Повтором считается и тот же
+/// вариант в другом регистре. Порядок ввода сохраняется — это порядок в списке.
+fn normalize_select_options(options: Vec<String>) -> CmdResult<Vec<String>> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut result = Vec::new();
+    for option in options {
+        let option = option.trim().to_string();
+        if option.is_empty() {
+            continue;
+        }
+        if option.chars().count() > MAX_SELECT_OPTION_LENGTH {
+            return Err(format!("Вариант «{}» длиннее {} символов", option, MAX_SELECT_OPTION_LENGTH));
+        }
+        let key = option.to_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        result.push(option);
+    }
+    Ok(result)
+}
+
+/// Заводит поле на доске. Новое поле встаёт последним.
+///
+/// Варианты выбора принимаются только у `select`; у остальных типов они не
+/// хранятся вовсе, даже если пришли.
+#[tauri::command]
+pub fn create_custom_field(
+    board_id: i64,
+    name: String,
+    field_type: String,
+    select_options: Option<Vec<String>>,
+    state: State<'_, DbState>,
+) -> CmdResult<CustomField> {
+    let conn = state.conn.lock().unwrap();
+    create_custom_field_in(&conn, board_id, &name, &field_type, select_options.unwrap_or_default())
+}
+
+fn create_custom_field_in(
+    conn: &rusqlite::Connection,
+    board_id: i64,
+    name: &str,
+    field_type: &str,
+    select_options: Vec<String>,
+) -> CmdResult<CustomField> {
+    let board_exists = conn
+        .query_row("SELECT 1 FROM boards WHERE id = ?1", params![board_id], |_| Ok(()))
+        .optional()
+        .map_err(to_string_err)?
+        .is_some();
+    if !board_exists {
+        return Err("Доска не найдена".to_string());
+    }
+
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ERR_FIELD_NAME_EMPTY.to_string());
+    }
+    if name.chars().count() > MAX_FIELD_NAME_LENGTH {
+        return Err(format!("Название поля длиннее {} символов", MAX_FIELD_NAME_LENGTH));
+    }
+    if !CUSTOM_FIELD_TYPES.contains(&field_type) {
+        return Err(ERR_FIELD_TYPE_UNKNOWN.to_string());
+    }
+
+    // Два поля с одним названием в окне карточки не различить. Регистр
+    // сравнивается здесь, а не в SQL: `lower()` SQLite знает только латиницу, и
+    // «Статус» со «статус» для него были бы разными.
+    let mut stmt = conn
+        .prepare("SELECT name FROM custom_field_defs WHERE board_id = ?1")
+        .map_err(to_string_err)?;
+    let names = stmt
+        .query_map(params![board_id], |row| row.get::<_, String>(0))
+        .map_err(to_string_err)?;
+    let wanted = name.to_lowercase();
+    for existing in names {
+        if existing.map_err(to_string_err)?.to_lowercase() == wanted {
+            return Err(ERR_FIELD_NAME_TAKEN.to_string());
+        }
+    }
+
+    let options_json = if field_type == "select" {
+        let options = normalize_select_options(select_options)?;
+        if options.is_empty() {
+            return Err(ERR_SELECT_WITHOUT_OPTIONS.to_string());
+        }
+        Some(serde_json::to_string(&options).map_err(to_string_err)?)
+    } else {
+        None
+    };
+
+    let position: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM custom_field_defs WHERE board_id = ?1",
+        params![board_id],
+        |row| row.get(0),
+    ).map_err(to_string_err)?;
+
+    conn.execute(
+        "INSERT INTO custom_field_defs (board_id, name, field_type, select_options, position)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![board_id, name, field_type, options_json, position],
+    ).map_err(to_string_err)?;
+    read_custom_field(conn, conn.last_insert_rowid())
+}
+
+/// Удаляет поле вместе со всеми его значениями. Сами карточки не меняются: у
+/// них просто пропадает одна строка в окне.
+#[tauri::command]
+pub fn delete_custom_field(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let mut conn = state.conn.lock().unwrap();
+    delete_custom_field_in(&mut conn, id)
+}
+
+fn delete_custom_field_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
+    let tx = conn.transaction().map_err(to_string_err)?;
+    tx.execute("DELETE FROM custom_field_values WHERE field_def_id = ?1", params![id])
+        .map_err(to_string_err)?;
+    let removed = tx.execute("DELETE FROM custom_field_defs WHERE id = ?1", params![id])
+        .map_err(to_string_err)?;
+    if removed == 0 {
+        // Транзакция откатится сама, когда `tx` выйдет из области видимости.
+        return Err(ERR_FIELD_NOT_FOUND.to_string());
+    }
+    tx.commit().map_err(to_string_err)?;
+    Ok(())
+}
+
+/// Записывает значение поля на карточке и возвращает его в том виде, в каком
+/// оно сохранено («3,50» → «3.5»). Пустое значение — `None` или одни пробелы —
+/// очищает поле: строка удаляется, пустых значений в базе не бывает.
+#[tauri::command]
+pub fn set_custom_field_value(
+    card_id: i64,
+    field_def_id: i64,
+    value: Option<String>,
+    state: State<'_, DbState>,
+) -> CmdResult<Option<String>> {
+    let conn = state.conn.lock().unwrap();
+    set_custom_field_value_in(&conn, card_id, field_def_id, value)
+}
+
+fn set_custom_field_value_in(
+    conn: &rusqlite::Connection,
+    card_id: i64,
+    field_def_id: i64,
+    value: Option<String>,
+) -> CmdResult<Option<String>> {
+    let field = read_custom_field(conn, field_def_id)?;
+
+    // Поле доски A на карточке доски B нигде не показалось бы, а в базе лежало
+    // бы — поэтому такая запись отклоняется.
+    let card_board: Option<i64> = conn.query_row(
+        "SELECT col.board_id FROM cards c INNER JOIN columns col ON col.id = c.column_id WHERE c.id = ?1",
+        params![card_id],
+        |row| row.get(0),
+    ).optional().map_err(to_string_err)?;
+    let Some(card_board) = card_board else {
+        return Err("Карточка не найдена".to_string());
+    };
+    if card_board != field.board_id {
+        return Err(ERR_FIELD_OTHER_BOARD.to_string());
+    }
+
+    let Some(raw) = value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) else {
+        conn.execute(
+            "DELETE FROM custom_field_values WHERE card_id = ?1 AND field_def_id = ?2",
+            params![card_id, field_def_id],
+        ).map_err(to_string_err)?;
+        return Ok(None);
+    };
+
+    let stored = normalize_field_value(&field, &raw)?;
+    conn.execute(
+        "INSERT INTO custom_field_values (card_id, field_def_id, value) VALUES (?1, ?2, ?3)
+         ON CONFLICT(card_id, field_def_id) DO UPDATE SET value = excluded.value",
+        params![card_id, field_def_id, stored],
+    ).map_err(to_string_err)?;
+    Ok(Some(stored))
+}
+
+/// «YYYY-MM-DD» с днём, который есть в календаре.
+///
+/// Проверка своя, а не `date()` SQLite: тот без модификаторов возвращает
+/// «2026-02-30» как есть (проверено на встроенной сборке 3.39.4), а с
+/// модификатором молча переносит на 2 марта — и так и так несуществующая дата
+/// проскочила бы в базу.
+fn is_calendar_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    let digits = |range: std::ops::Range<usize>| b[range].iter().all(u8::is_ascii_digit);
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' || !digits(0..4) || !digits(5..7) || !digits(8..10) {
+        return false;
+    }
+    // Срезы безопасны: все десять байт уже проверены и все — ASCII.
+    let (year, month, day): (u32, u32, u32) = match (s[0..4].parse(), s[5..7].parse(), s[8..10].parse()) {
+        (Ok(y), Ok(m), Ok(d)) => (y, m, d),
+        _ => return false,
+    };
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    year >= 1 && (1..=days_in_month).contains(&day)
+}
+
+/// Значение в том виде, в каком оно хранится, — или объяснение, почему его
+/// нельзя сохранить.
+fn normalize_field_value(field: &CustomField, raw: &str) -> CmdResult<String> {
+    match field.field_type.as_str() {
+        "text" => {
+            if raw.chars().count() > MAX_TEXT_VALUE_LENGTH {
+                return Err(format!("Значение длиннее {} символов", MAX_TEXT_VALUE_LENGTH));
+            }
+            Ok(raw.to_string())
+        }
+        // Запятая принимается наравне с точкой: по-русски дробь пишут через
+        // запятую. Хранится одна запись на число — «3.5», а не «3,50» или
+        // «3.50»: одно и то же число двумя строками потом не сравнить.
+        "number" => {
+            let number: f64 = raw.replace(',', ".").parse()
+                .map_err(|_| ERR_VALUE_NOT_NUMBER.to_string())?;
+            // `parse` принимает и «inf», и «NaN» — числом в этом поле они не
+            // считаются.
+            if !number.is_finite() {
+                return Err(ERR_VALUE_NOT_NUMBER.to_string());
+            }
+            if number.abs() >= MAX_NUMBER_VALUE {
+                return Err(ERR_VALUE_NUMBER_TOO_BIG.to_string());
+            }
+            // `+ 0.0` убирает знак у минус нуля: «-0» в поле выглядело бы ошибкой.
+            Ok((number + 0.0).to_string())
+        }
+        // Дата календарная, как срок карточки: «YYYY-MM-DD» без времени и зоны.
+        "date" => {
+            if is_calendar_date(raw) {
+                Ok(raw.to_string())
+            } else {
+                Err(ERR_VALUE_NOT_DATE.to_string())
+            }
+        }
+        "select" => {
+            if field.select_options.iter().any(|option| option == raw) {
+                Ok(raw.to_string())
+            } else {
+                Err(ERR_VALUE_NOT_OPTION.to_string())
+            }
+        }
+        _ => Err(ERR_FIELD_TYPE_UNKNOWN.to_string()),
+    }
+}
+
+/// Поля доски вместе со значениями на её карточках — одним запросом.
+///
+/// Задание прямо просило не N+1: поля и значения соединяются в SQL, а не
+/// дочитываются запросом на поле или на карточку. Соединение — `LEFT JOIN`:
+/// поле, у которого ещё нет ни одного значения, приходит одной строкой с
+/// `NULL` справа, а не пропадает.
+///
+/// Значения не отфильтрованы по тому, где карточка лежит сейчас: окно карточки
+/// всё равно ищет в них свою, а лишняя строка ничего не ломает.
+#[tauri::command]
+pub fn get_custom_fields_with_values(board_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<CustomField>> {
+    let conn = state.conn.lock().unwrap();
+    custom_fields_in(&conn, board_id)
+}
+
+fn custom_fields_in(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<Vec<CustomField>> {
+    let sql = format!(
+        "SELECT {}, v.card_id, v.value
+           FROM custom_field_defs d
+           LEFT JOIN custom_field_values v ON v.field_def_id = d.id
+          WHERE d.board_id = ?1
+          ORDER BY d.position, d.id, v.card_id",
+        CUSTOM_FIELD_COLUMNS,
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
+    let mut rows = stmt.query(params![board_id]).map_err(to_string_err)?;
+
+    // Строки одного поля идут подряд — так их упорядочил `ORDER BY`, — поэтому
+    // новое поле начинается там, где сменился id.
+    let mut fields: Vec<CustomField> = Vec::new();
+    while let Some(row) = rows.next().map_err(to_string_err)? {
+        let id: i64 = row.get(0).map_err(to_string_err)?;
+        if fields.last().map(|f| f.id) != Some(id) {
+            fields.push(row_to_custom_field(row).map_err(to_string_err)?);
+        }
+        let card_id: Option<i64> = row.get(6).map_err(to_string_err)?;
+        if let (Some(card_id), Some(field)) = (card_id, fields.last_mut()) {
+            field.values.push(CustomFieldValue { card_id, value: row.get(7).map_err(to_string_err)? });
+        }
+    }
+    Ok(fields)
+}
+
 // ─── Inbox (hidden system board) ───
 
 #[tauri::command]
@@ -2861,6 +3228,7 @@ fn delete_card_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     tx.execute("DELETE FROM checklist_items WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM card_comments WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM time_entries WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
+    tx.execute("DELETE FROM custom_field_values WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     drop_dependencies_of(&tx, id).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE id = ?1", params![id]).map_err(to_string_err)?;
     tx.commit().map_err(to_string_err)?;
@@ -2894,6 +3262,10 @@ fn delete_column_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     ).map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM time_entries WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM custom_field_values WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
         params![id],
     ).map_err(to_string_err)?;
     drop_dependencies_where(&tx, "SELECT id FROM cards WHERE column_id = ?1", id).map_err(to_string_err)?;
@@ -2956,6 +3328,20 @@ fn delete_board_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
         )",
         params![id],
     ).map_err(to_string_err)?;
+    // Значения полей снимаются с двух сторон: у карточек этой доски и у полей
+    // этой доски. Обычно это одни и те же строки, но карточка, приехавшая из
+    // Inbox или уехавшая на другую доску, могла увезти значение чужого поля —
+    // без второго условия его поле потом не удалилось бы на внешнем ключе.
+    tx.execute(
+        "DELETE FROM custom_field_values
+          WHERE card_id IN (
+                    SELECT c.id FROM cards c
+                    INNER JOIN columns col ON col.id = c.column_id
+                    WHERE col.board_id = ?1)
+             OR field_def_id IN (SELECT id FROM custom_field_defs WHERE board_id = ?1)",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute("DELETE FROM custom_field_defs WHERE board_id = ?1", params![id]).map_err(to_string_err)?;
     drop_dependencies_where(
         &tx,
         "SELECT c.id FROM cards c INNER JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1",

@@ -468,6 +468,41 @@ export async function listOrphanedTimers() {
     return await invoke('list_orphaned_timers');
 }
 
+// ─── Пользовательские поля ───
+
+/**
+ * Поля доски вместе со значениями на её карточках — одним вызовом.
+ *
+ * @returns {Promise<Array<{id, board_id, name, field_type, select_options: string[],
+ *          position, values: Array<{card_id, value}>}>>}
+ */
+export async function getCustomFieldsWithValues(boardId) {
+    return await invoke('get_custom_fields_with_values', { boardId });
+}
+
+/**
+ * Заводит поле на доске.
+ *
+ * @param {'text'|'number'|'date'|'select'} fieldType
+ * @param {string[]|null} selectOptions - варианты, только для `select`
+ */
+export async function createCustomField(boardId, name, fieldType, selectOptions = null) {
+    return await invoke('create_custom_field', { boardId, name, fieldType, selectOptions });
+}
+
+/** Удаляет поле вместе со всеми его значениями на карточках. */
+export async function deleteCustomField(id) {
+    return await invoke('delete_custom_field', { id });
+}
+
+/**
+ * Записывает значение поля на карточке; `null` или пустая строка — очистить.
+ * Возвращает значение в том виде, в каком оно сохранено («3,50» → «3.5»).
+ */
+export async function setCustomFieldValue(cardId, fieldDefId, value) {
+    return await invoke('set_custom_field_value', { cardId, fieldDefId, value });
+}
+
 // ─── Нагрузка по исполнителям ───
 
 /**
