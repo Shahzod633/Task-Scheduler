@@ -270,6 +270,93 @@
     height: 18px;
 }
 
+/* ─── Идущий таймер ───
+   Плашка слева от колокольчика: дышащая точка, название карточки, тикающее
+   время и знак «стоп». Щелчок по ней останавливает таймер. Название
+   обрезается многоточием, чтобы длинная задача не выдавила из шапки поиск —
+   целиком оно в подсказке. */
+.header-timer {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    height: 30px;
+    max-width: 300px;
+    padding: 0 var(--space-sm) 0 10px;
+    margin-right: var(--space-xs);
+    border: 1px solid var(--accent-border);
+    border-radius: var(--radius-pill);
+    background: var(--accent-soft);
+    color: var(--text-primary);
+    font-size: var(--font-size-sm);
+    animation: fade-in var(--duration-3) var(--ease-out) both;
+    transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.header-timer:hover {
+    background: var(--accent-light);
+}
+
+.header-timer:active {
+    transform: scale(0.97);
+}
+
+.header-timer__dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: var(--radius-round);
+    background: var(--accent-color);
+    animation: pulse-soft 1.6s var(--ease-in-out) infinite;
+}
+
+.header-timer__title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-secondary);
+}
+
+/* Цифры одной ширины — иначе плашка подрагивала бы каждую секунду. */
+.header-timer__time {
+    flex: none;
+    font-variant-numeric: tabular-nums;
+    font-weight: var(--font-weight-semibold);
+}
+
+.header-timer__stop {
+    display: flex;
+    flex: none;
+    color: var(--accent-text);
+}
+
+.header-timer__stop svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* Шапка не переносится и не прокручивается: в узком окне плашка сама
+   уступает место. Сначала короче название, а у самой узкой ширины окна (900px,
+   minWidth в tauri.conf.json) — одна точка, время и «стоп». Иначе колокольчик,
+   справка и аватар уезжали бы за правый край. Название остаётся в подсказке. */
+@media (max-width: 1180px) {
+    .header-timer {
+        max-width: 200px;
+    }
+}
+
+@media (max-width: 1000px) {
+    .header-timer__title {
+        display: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .header-timer__dot {
+        animation: none;
+    }
+}
+
 .header__avatar {
     width: 30px;
     height: 30px;

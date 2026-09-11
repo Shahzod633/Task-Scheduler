@@ -296,6 +296,58 @@ pub struct WorkloadRow {
     pub high: i64,
 }
 
+// ─── Учёт времени ───
+
+/// Одна сессия работы над карточкой — с таймера или вписанная руками.
+///
+/// `ended_at` и `duration_seconds` пусты, пока таймер идёт. Участник приезжает
+/// целиком, как автор комментария: строка лога рисует его кружок, и отдельный
+/// поход за инициалами был бы лишним. `None` — участника удалили; время при
+/// этом остаётся на карточке.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimeEntry {
+    pub id: i64,
+    pub card_id: i64,
+    pub member: Option<Member>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub duration_seconds: Option<i64>,
+    pub note: Option<String>,
+}
+
+/// Идущий таймер — то, что рисует индикатор в шапке и что показывает диалог
+/// про забытый таймер. Название карточки приезжает сразу: без него индикатор
+/// не может сказать, *что* идёт.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ActiveTimer {
+    pub entry_id: i64,
+    pub card_id: i64,
+    pub card_title: String,
+    pub member_id: Option<i64>,
+    pub started_at: String,
+    /// Секунд с запуска на момент чтения, по часам SQLite. Диалогу про
+    /// забытый таймер нужно готовое «запущен N часов назад», а тикающий
+    /// счётчик в шапке считает сам от `started_at`.
+    pub elapsed_seconds: i64,
+}
+
+/// Таймер, который `start_timer` остановил сам: у того же человека уже шёл
+/// другой. Приезжает, чтобы фронтенд мог сказать об этом тостом, — молча
+/// закрытая сессия выглядела бы как потерянное время.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StoppedTimer {
+    pub entry_id: i64,
+    pub card_id: i64,
+    pub card_title: String,
+    pub duration_seconds: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StartTimerResult {
+    pub timer: ActiveTimer,
+    pub stopped: Option<StoppedTimer>,
+}
+
 /// Причина автоматической архивации: попытки исчерпаны, а срок опять прошёл.
 /// Хранится строкой в `cards.archive_reason`; интерфейс рисует свой ярлык.
 pub const ARCHIVE_REASON_MAX_RETRIES: &str = "incomplete_max_retries";

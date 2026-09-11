@@ -17,6 +17,7 @@ import {
 import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate, isOverdue, staggerIn, pluralize, debounce, formatDate } from './utils.js';
 import { renderMarkdown } from './markdown.js';
 import { renderDependencies, confirmFinalColumnMove } from './dependencies.js';
+import { attachTimerButton, renderTimeLog } from './timer.js';
 
 let currentBoardId = null;
 // Пространство открытой доски. Нужно выбору карточки для зависимости: тот
@@ -831,6 +832,9 @@ function createCardElement(cardData) {
     });
     card.appendChild(menuBtn);
 
+    // Таймер — третьей кнопкой в том же ряду, что появляется по наведению.
+    attachTimerButton(card, cardData.id);
+
     // Click to open card detail
     card.addEventListener('click', () => {
         if (isDraggingCard) return;
@@ -1049,6 +1053,9 @@ export function showCardEditModal(cardData, options = {}) {
         // Карточку он передаёт уже прочитанной целиком.
         onOpenCard: (linked) => showCardEditModal(linked, { onChange: () => {}, workspaceId }),
     });
+    // Время, вписанное руками, пишется сразу. Лицевая сторона карточки его не
+    // показывает, поэтому доску после этого обновлять не нужно.
+    renderTimeLog(body, cardData.id);
     // Комментарии сохраняются сразу, поэтому окно про них ничего не помнит и
     // обновлять доску из-за них не нужно: на лицевой стороне карточки их нет.
     renderComments(body, cardData.id);

@@ -260,7 +260,9 @@
 }
 
 .card.sortable-ghost .card__edit-btn,
-.card.sortable-ghost .card__menu-btn {
+.card.sortable-ghost .card__menu-btn,
+.card.sortable-ghost .card__timer-btn,
+.card.sortable-ghost::after {
     display: none;
 }
 
@@ -275,7 +277,8 @@
 }
 
 .card.sortable-fallback .card__edit-btn,
-.card.sortable-fallback .card__menu-btn {
+.card.sortable-fallback .card__menu-btn,
+.card.sortable-fallback .card__timer-btn {
     display: none;
 }
 
@@ -363,7 +366,8 @@ body.is-dragging-card .card:hover {
 
 /* ─── Card Action Buttons (появляются при наведении) ─── */
 .card__edit-btn,
-.card__menu-btn {
+.card__menu-btn,
+.card__timer-btn {
     position: absolute;
     top: 6px;
     width: 26px;
@@ -390,23 +394,77 @@ body.is-dragging-card .card:hover {
     right: 36px;
 }
 
+/* Таймер — левее двух прежних кнопок, чтобы карандаш остался на своём месте
+   в углу: к нему рука привыкла раньше, чем появился таймер. */
+.card__timer-btn {
+    right: 66px;
+}
+
 .card:hover .card__edit-btn,
-.card:hover .card__menu-btn {
+.card:hover .card__menu-btn,
+.card:hover .card__timer-btn {
     opacity: 1;
     transform: scale(1);
 }
 
 .card__edit-btn:hover,
-.card__menu-btn:hover {
+.card__menu-btn:hover,
+.card__timer-btn:hover {
     background: var(--accent-soft);
     border-color: var(--accent-border);
     color: var(--text-primary);
 }
 
 .card__edit-btn svg,
-.card__menu-btn svg {
+.card__menu-btn svg,
+.card__timer-btn svg {
     width: 14px;
     height: 14px;
+}
+
+/* Пока таймер идёт, его кнопка показывает «стоп» в цвете акцента. */
+.card__timer-btn--running {
+    border-color: var(--accent-border);
+    color: var(--accent-text);
+}
+
+/* ─── Карточка с идущим таймером ───
+   Рамка цвета акцента и дышащая точка в правом верхнем углу. Кнопка «стоп»
+   появляется по наведению, как её соседки: постоянная кнопка поверх названия
+   закрывала бы текст. Точка — там же, где при наведении встаёт карандаш,
+   поэтому при наведении она гаснет, а не выглядывает из-под кнопок.
+   Рамка, а не тень: тенью карточка уже рисует полосу приоритета. */
+.card.card--timing,
+.card.card--timing:hover {
+    border-color: var(--accent-border);
+}
+
+.card--timing .card__title {
+    padding-right: 12px;
+}
+
+.card--timing::after {
+    content: '';
+    position: absolute;
+    top: 9px;
+    right: 9px;
+    width: 7px;
+    height: 7px;
+    border-radius: var(--radius-round);
+    background: var(--accent-color);
+    pointer-events: none;
+    animation: pulse-soft 1.6s var(--ease-in-out) infinite;
+    transition: opacity var(--transition-fast);
+}
+
+.card--timing:hover::after {
+    opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .card--timing::after {
+        animation: none;
+    }
 }
 
 /* ─── Mistake Tracking Tag ─── */

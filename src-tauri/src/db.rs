@@ -327,6 +327,44 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
              ON card_dependencies(blocked_card_id);",
     )?;
 
+    // Учёт времени: одна строка — одна сессия работы над карточкой, с таймера
+    // или вписанная руками. Пока таймер идёт, `ended_at` и `duration_seconds`
+    // пусты; длительность считает база при остановке, а не фронтенд, — у
+    // SQLite и отметки начала одни часы.
+    //
+    // `member_id` допускает NULL по тому же правилу, что автор комментария:
+    // удалили участника — его время остаётся на карточке без подписи, потому
+    // что работа над задачей была сделана и никуда не делась.
+    //
+    // Каскада `ON DELETE` нет по общему правилу базы (см. `card_dependencies`):
+    // удаление карточки, колонки и доски снимает эти строки вручную.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS time_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL,
+            member_id INTEGER,
+            started_at TEXT NOT NULL DEFAULT (datetime('now')),
+            ended_at TEXT,
+            duration_seconds INTEGER,
+            note TEXT,
+            FOREIGN KEY (card_id) REFERENCES cards(id),
+            FOREIGN KEY (member_id) REFERENCES members(id)
+        )",
+        (),
+    )?;
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_time_entries_card
+             ON time_entries(card_id);
+         -- Один человек — один идущий таймер. `start_timer` сам останавливает
+         -- прежний, а индекс держит правило и там, куда `start_timer` не ходит:
+         -- второй незакрытой строки одного участника база просто не примет.
+         -- NULL в уникальном индексе друг с другом не совпадают, поэтому строки
+         -- удалённых участников ему не мешают.
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_time_entries_one_running
+             ON time_entries(member_id) WHERE ended_at IS NULL;",
+    )?;
+
     // ─── Migrations for pre-existing databases ───
     // (CREATE TABLE IF NOT EXISTS above only creates columns on brand-new tables;
     // existing installs need ALTER TABLE for newly introduced columns.)

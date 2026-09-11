@@ -1077,3 +1077,203 @@ select.form-input option {
     background: var(--danger-soft);
     color: var(--color-danger);
 }
+
+/* ─── Учёт времени в окне карточки ───────────────────────────────────────
+   Форма та же, что у чек-листа и зависимостей: заголовок с итогом справа,
+   список строк на подложке поля ввода, приглушённая кнопка добавления. */
+.time-log {
+    margin-top: var(--space-lg);
+}
+
+.time-log__header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-sm);
+}
+
+.time-log__total {
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Длинный лог прокручивается внутри себя, как переписка ниже, — иначе он
+   выталкивал бы из окна всё, что под ним. */
+.time-log__list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.time-log__empty {
+    padding: var(--space-xs) 0;
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+}
+
+.time-log__row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: 6px var(--space-sm);
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+}
+
+.time-log__row--running {
+    background: var(--accent-soft);
+    border-color: var(--accent-border);
+}
+
+.time-log__main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.time-log__who {
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.time-log__note {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    overflow-wrap: anywhere;
+}
+
+/* Длительность и день — столбцами фиксированной ширины, чтобы числа строк
+   стояли друг под другом и читались сверху вниз. */
+.time-log__duration {
+    flex: none;
+    min-width: 76px;
+    text-align: right;
+    font-size: var(--font-size-sm);
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.time-log__date {
+    flex: none;
+    min-width: 64px;
+    text-align: right;
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+}
+
+.time-log__date--running {
+    color: var(--accent-text);
+    font-weight: var(--font-weight-semibold);
+}
+
+.time-log__add {
+    margin-top: var(--space-xs);
+    padding: 2px 6px;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-xs);
+    color: var(--accent-text);
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.time-log__add:hover {
+    background: var(--accent-soft);
+}
+
+.time-log__form {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: var(--bg-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+}
+
+.time-log__fields {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-md);
+}
+
+.time-log__field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.time-log__field-label {
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+}
+
+/* Высота задана явно и у дня, и у чисел длительности: поле даты со значком
+   календаря иначе выходит на пару пикселей выше соседних. */
+.time-log__day {
+    width: auto;
+    height: 38px;
+}
+
+.time-log__form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-xs);
+}
+
+/* ─── Поле длительности: «[ 1 ] ч [ 30 ] мин» ─── */
+.duration-input {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* У .form-input ширина 100% — два числа растянулись бы на всю строку. */
+.duration-input__num {
+    width: 64px;
+    height: 38px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Стрелки прокрутки числа в поле шириной 64px наезжают на сами цифры, а
+   часы и минуты и так быстрее набрать, чем накрутить. */
+.duration-input__num::-webkit-inner-spin-button,
+.duration-input__num::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.duration-input__unit {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+}
+
+/* ─── Окно про забытый таймер ───
+   Слой — как у подтверждений (`.modal-overlay--confirm`), ширина — обычной
+   модалки: две кнопки с длинными подписями в 400px подтверждения не встают. */
+.orphan-timer__icon {
+    color: var(--color-warning);
+}
+
+.orphan-timer__field {
+    margin: var(--space-lg) 0 var(--space-sm);
+}
+
+.orphan-timer__error {
+    margin: var(--space-xs) 0 0;
+    font-size: var(--font-size-xs);
+    color: var(--color-danger);
+}

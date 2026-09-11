@@ -143,6 +143,18 @@ export function todayKey() {
     return toDateKey(new Date());
 }
 
+/**
+ * `Date` → отметка времени в формате базы: **UTC**, "YYYY-MM-DD HH:MM:SS".
+ *
+ * Обратная сторона `parseTimestamp()`. Нужна там, где момент выбирает человек,
+ * а не пишет `datetime('now')`, — сессия времени, вписанная руками. Здесь
+ * `toISOString()` правилен ровно потому, что нужен UTC: ключ **дня** так
+ * получать нельзя (см. `toDateKey`), а момент — именно так.
+ */
+export function toTimestamp(date) {
+    return date.toISOString().slice(0, 19).replace('T', ' ');
+}
+
 export function formatDate(dateStr) {
     if (!dateStr) return '';
     const date = parseTimestamp(dateStr);
@@ -203,6 +215,64 @@ export function isOverdue(dateStr) {
         return endOfDay < new Date();
     }
     return date < new Date();
+}
+
+// ─── Длительность ───
+
+/**
+ * Секунды → «2 ч 15 мин», «25 мин», «< 1 мин».
+ *
+ * Для записанного времени: сумма на карточке, строка лога, тост после
+ * остановки. Секунды отбрасываются — в сумме за день они шум.
+ */
+export function formatDuration(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (total === 0) return '0 мин';
+    if (total < 60) return '< 1 мин';
+
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    if (hours === 0) return `${minutes} мин`;
+    return minutes ? `${hours} ч ${minutes} мин` : `${hours} ч`;
+}
+
+/**
+ * Секунды → «0:12:34» — тикающий счётчик идущего таймера. Часы не
+ * дополняются нулём и не ограничены сутками: забытый таймер честно покажет
+ * «26:14:03».
+ */
+export function formatClock(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    const pad = (n) => String(n).padStart(2, '0');
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    return `${hours}:${pad(minutes)}:${pad(total % 60)}`;
+}
+
+/**
+ * Начало сессии, вписанной руками: день выбран в календаре, длительность —
+ * числом, а времени суток человек не указывал.
+ *
+ * Сессия кладётся в конец выбранного дня, то есть заканчивается в полночь после
+ * него, — а сегодняшняя заканчивается сейчас: закончиться в будущем работа не
+ * могла. Если в день столько не помещается (сегодня прошло меньше, чем
+ * вписано), возвращается `null`. Отодвинуть начало на вчера нельзя: работа
+ * оказалась бы записана не в тот день, который человек выбрал.
+ *
+ * @param {string} dayKey          - "YYYY-MM-DD", местный календарь
+ * @param {number} durationSeconds
+ * @param {Date}  [now]
+ * @returns {Date|null}
+ */
+export function manualSessionStart(dayKey, durationSeconds, now = new Date()) {
+    if (!isDateOnly(dayKey)) return null;
+    const dayStart = parseDueDate(dayKey);
+    // Следующая местная полночь, а не «+ 24 часа»: в день перевода часов в
+    // сутках 23 или 25 часов.
+    const nextDay = new Date(dayStart.getFullYear(), dayStart.getMonth(), dayStart.getDate() + 1);
+    const end = Math.min(now.getTime(), nextDay.getTime());
+    const start = new Date(end - durationSeconds * 1000);
+    return start >= dayStart ? start : null;
 }
 
 /**

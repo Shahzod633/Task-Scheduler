@@ -3930,3 +3930,346 @@ fn a_pre_existing_circle_does_not_hang_the_check() {
     let _ = create_dependency(&conn, c, a);
     let _ = dependency_path_exists(&conn, a, c).unwrap();
 }
+
+// ─── Учёт времени ───
+
+/// Рабочая колонка для карточек с таймерами.
+fn timer_column(conn: &Connection) -> i64 {
+    workload_board(conn, 1, "Доска времени").0
+}
+
+fn board_of(conn: &Connection, column_id: i64) -> i64 {
+    conn.query_row("SELECT board_id FROM columns WHERE id = ?1", params![column_id], |r| r.get(0))
+        .unwrap()
+}
+
+/// Сдвигает начало сессии в прошлое — так тест «ждёт» час, не засыпая.
+fn started_ago(conn: &Connection, entry_id: i64, seconds: i64) {
+    conn.execute(
+        "UPDATE time_entries SET started_at = datetime('now', ?1) WHERE id = ?2",
+        params![format!("-{} seconds", seconds), entry_id],
+    ).unwrap();
+}
+
+#[test]
+fn a_started_timer_becomes_the_members_active_one() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+
+    let started = start_timer_in(&mut conn, card, me).unwrap();
+    assert!(started.stopped.is_none());
+    assert_eq!(started.timer.card_id, card);
+    assert_eq!(started.timer.card_title, "Отчёт");
+
+    let active = read_active_timer(&conn, me).unwrap().expect("таймер должен идти");
+    assert_eq!(active.entry_id, started.timer.entry_id);
+}
+
+#[test]
+fn stopping_records_how_long_it_ran() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+    started_ago(&conn, entry, 3600);
+
+    let stopped = stop_timer_in(&conn, entry).unwrap();
+    let d = stopped.duration_seconds.expect("у остановленной сессии есть длительность");
+    // Несколько секунд запаса: между сдвигом начала и остановкой тест может
+    // пересечь границу секунды, а под нагрузкой — и не одну.
+    assert!((3600..=3605).contains(&d), "час работы записан как {} с", d);
+    assert!(stopped.ended_at.is_some());
+    assert!(read_active_timer(&conn, me).unwrap().is_none());
+    assert_eq!(total_time_in(&conn, card).unwrap(), d, "сумма карточки должна обновиться");
+}
+
+#[test]
+fn a_second_timer_stops_the_first_and_says_so() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let first = assigned_card(&conn, col, "Первая", None, "Medium");
+    let second = assigned_card(&conn, col, "Вторая", None, "Medium");
+    let me = self_member_id(&conn);
+
+    let first_entry = start_timer_in(&mut conn, first, me).unwrap().timer.entry_id;
+    started_ago(&conn, first_entry, 25 * 60);
+
+    let result = start_timer_in(&mut conn, second, me).unwrap();
+    let stopped = result.stopped.expect("первый таймер должен остановиться сам");
+    assert_eq!(stopped.entry_id, first_entry);
+    assert_eq!(stopped.card_title, "Первая", "тосту нужно название остановленной задачи");
+    assert!((1500..=1505).contains(&stopped.duration_seconds));
+
+    let active = read_active_timer(&conn, me).unwrap().unwrap();
+    assert_eq!(active.card_id, second);
+    let running: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM time_entries WHERE member_id = ?1 AND ended_at IS NULL",
+        params![me], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(running, 1);
+}
+
+#[test]
+fn starting_the_running_card_again_is_not_a_new_session() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+
+    let first = start_timer_in(&mut conn, card, me).unwrap();
+    let again = start_timer_in(&mut conn, card, me).unwrap();
+    assert_eq!(again.timer.entry_id, first.timer.entry_id);
+    assert!(again.stopped.is_none(), "двойной клик ничего не останавливает");
+
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM time_entries", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn two_people_can_time_at_once() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Общая", None, "Medium");
+    let me = self_member_id(&conn);
+    let other = add_member(&conn, "Пётр");
+
+    start_timer_in(&mut conn, card, me).unwrap();
+    let theirs = start_timer_in(&mut conn, card, other).unwrap();
+    // Правило — один таймер на человека, а не на приложение.
+    assert!(theirs.stopped.is_none(), "чужой таймер не повод останавливать мой");
+    assert!(read_active_timer(&conn, me).unwrap().is_some());
+    assert!(read_active_timer(&conn, other).unwrap().is_some());
+}
+
+#[test]
+fn the_database_itself_refuses_a_second_running_timer_for_one_person() {
+    let conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+
+    conn.execute("INSERT INTO time_entries (card_id, member_id) VALUES (?1, ?2)", params![card, me]).unwrap();
+    let second = conn.execute("INSERT INTO time_entries (card_id, member_id) VALUES (?1, ?2)", params![card, me]);
+    assert!(second.is_err(), "уникальный индекс должен запрещать второй идущий таймер");
+}
+
+#[test]
+fn stopping_twice_is_refused_rather_than_stretching_the_session() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+    let first = stop_timer_in(&conn, entry).unwrap();
+
+    assert_eq!(stop_timer_in(&conn, entry).unwrap_err(), ERR_TIMER_ALREADY_STOPPED);
+    assert_eq!(read_time_entry(&conn, entry).unwrap().ended_at, first.ended_at, "конец не переписан");
+    assert_eq!(stop_timer_in(&conn, 9999).unwrap_err(), ERR_TIMER_NOT_FOUND);
+}
+
+#[test]
+fn the_total_counts_finished_sessions_only() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+
+    add_time_entry_in(&conn, card, me, "2026-09-01 09:00:00", 1800, None).unwrap();
+    add_time_entry_in(&conn, card, me, "2026-09-02 09:00:00", 600, None).unwrap();
+    let running = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+    started_ago(&conn, running, 3600);
+
+    assert_eq!(total_time_in(&conn, card).unwrap(), 2400, "идущая сессия в сумму не входит");
+}
+
+#[test]
+fn a_timer_left_running_over_twelve_hours_is_reported_and_a_fresh_one_is_not() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let old = assigned_card(&conn, col, "Забытая", None, "Medium");
+    let fresh = assigned_card(&conn, col, "Свежая", None, "Medium");
+    let me = self_member_id(&conn);
+    let other = add_member(&conn, "Пётр");
+
+    // Ровно та ситуация, которую ловит проверка при запуске: приложение
+    // закрыли с работающим таймером и открыли на следующий день.
+    let forgotten = start_timer_in(&mut conn, old, me).unwrap().timer.entry_id;
+    started_ago(&conn, forgotten, 13 * 3600);
+    let recent = start_timer_in(&mut conn, fresh, other).unwrap().timer.entry_id;
+    started_ago(&conn, recent, 11 * 3600);
+
+    let orphans = orphaned_timers_in(&conn, &orphan_cutoff(None)).unwrap();
+    assert_eq!(orphans.len(), 1);
+    assert_eq!(orphans[0].entry_id, forgotten);
+    assert_eq!(orphans[0].card_title, "Забытая");
+    assert!(orphans[0].elapsed_seconds >= 13 * 3600);
+
+    // Найти — не значит закрыть: решает человек.
+    assert!(read_time_entry(&conn, forgotten).unwrap().ended_at.is_none());
+}
+
+#[test]
+fn the_orphan_threshold_can_be_lowered_for_a_manual_check() {
+    assert_eq!(orphan_cutoff(None), "-12 hours");
+    assert_eq!(orphan_cutoff(Some(1)), "-1 minutes");
+    // С нулевым порогом забытым оказался бы любой только что запущенный таймер.
+    assert_eq!(orphan_cutoff(Some(0)), "-12 hours");
+    assert_eq!(orphan_cutoff(Some(-5)), "-12 hours");
+
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Проверка", None, "Medium");
+    let me = self_member_id(&conn);
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+    started_ago(&conn, entry, 2 * 60);
+
+    // Двухминутный таймер забыт по минутному порогу и не забыт по обычному.
+    let lowered = orphaned_timers_in(&conn, &orphan_cutoff(Some(1))).unwrap();
+    assert_eq!(lowered.iter().map(|t| t.entry_id).collect::<Vec<_>>(), vec![entry]);
+    assert!(orphaned_timers_in(&conn, &orphan_cutoff(None)).unwrap().is_empty());
+}
+
+#[test]
+fn a_forgotten_timer_can_be_closed_with_a_typed_duration() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Забытая", None, "Medium");
+    let me = self_member_id(&conn);
+
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+    started_ago(&conn, entry, 14 * 3600);
+
+    assert_eq!(stop_timer_with_duration_in(&conn, entry, 0).unwrap_err(), ERR_DURATION_NOT_POSITIVE);
+    assert_eq!(stop_timer_with_duration_in(&conn, entry, 15 * 3600).unwrap_err(), ERR_DURATION_OVER_ELAPSED);
+
+    let closed = stop_timer_with_duration_in(&conn, entry, 2 * 3600).unwrap();
+    assert_eq!(closed.duration_seconds, Some(7200));
+
+    // Конец — начало плюс вписанное, а не момент, когда о таймере вспомнили.
+    let gap: i64 = conn.query_row(
+        "SELECT CAST(strftime('%s', ended_at) AS INTEGER) - CAST(strftime('%s', started_at) AS INTEGER)
+           FROM time_entries WHERE id = ?1",
+        params![entry], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(gap, 7200);
+
+    assert!(orphaned_timers_in(&conn, &orphan_cutoff(None)).unwrap().is_empty());
+    assert_eq!(stop_timer_with_duration_in(&conn, entry, 60).unwrap_err(), ERR_TIMER_ALREADY_STOPPED);
+}
+
+#[test]
+fn a_session_typed_in_by_hand_is_stored_finished() {
+    let conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+
+    let entry = add_time_entry_in(&conn, card, me, "2026-09-10 07:30:00", 5400, Some("  созвон  ".to_string())).unwrap();
+    assert_eq!(entry.started_at, "2026-09-10 07:30:00");
+    assert_eq!(entry.ended_at.as_deref(), Some("2026-09-10 09:00:00"));
+    assert_eq!(entry.duration_seconds, Some(5400));
+    assert_eq!(entry.note.as_deref(), Some("созвон"));
+    assert!(entry.member.as_ref().unwrap().is_self);
+
+    // Подпись из одних пробелов — это отсутствие подписи.
+    let bare = add_time_entry_in(&conn, card, me, "2026-09-10 10:00:00", 60, Some("   ".to_string())).unwrap();
+    assert!(bare.note.is_none());
+}
+
+#[test]
+fn a_hand_typed_session_must_be_a_real_one() {
+    let conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+
+    assert_eq!(add_time_entry_in(&conn, card, me, "2026-09-10 07:30:00", 0, None).unwrap_err(), ERR_DURATION_NOT_POSITIVE);
+    assert_eq!(
+        add_time_entry_in(&conn, card, me, "2026-09-10 07:30:00", MAX_MANUAL_SESSION_SECONDS + 1, None).unwrap_err(),
+        ERR_DURATION_TOO_LONG,
+    );
+    assert!(add_time_entry_in(&conn, card, me, "вчера", 60, None).is_err(), "непонятное начало отклоняется");
+
+    // Началась десять минут назад, а длится час — кончится в будущем.
+    let ten_minutes_ago: String = conn.query_row("SELECT datetime('now', '-10 minutes')", [], |r| r.get(0)).unwrap();
+    assert_eq!(add_time_entry_in(&conn, card, me, &ten_minutes_ago, 3600, None).unwrap_err(), ERR_SESSION_IN_FUTURE);
+
+    assert_eq!(add_time_entry_in(&conn, 9999, me, "2026-09-10 07:30:00", 60, None).unwrap_err(), "Карточка не найдена");
+
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM time_entries", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0, "ни одна отклонённая сессия не должна была записаться");
+}
+
+#[test]
+fn the_log_shows_the_running_session_first_then_the_newest() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+
+    let older = add_time_entry_in(&conn, card, me, "2026-09-01 09:00:00", 600, None).unwrap().id;
+    let newer = add_time_entry_in(&conn, card, me, "2026-09-05 09:00:00", 600, None).unwrap().id;
+    let running = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+
+    let ids: Vec<i64> = list_time_entries_in(&conn, card).unwrap().iter().map(|e| e.id).collect();
+    assert_eq!(ids, vec![running, newer, older]);
+}
+
+#[test]
+fn deleting_a_card_column_or_board_takes_its_time_with_it() {
+    let mut conn = test_db();
+    let me = self_member_id(&conn);
+
+    // Карточка — с законченной сессией и с идущим таймером.
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Карточка", None, "Medium");
+    add_time_entry_in(&conn, card, me, "2026-09-01 09:00:00", 600, None).unwrap();
+    start_timer_in(&mut conn, card, me).unwrap();
+    delete_card_in(&mut conn, card).expect("время не должно мешать удалить карточку");
+
+    // Колонка — не из костяка, такие удалять можно.
+    let board = board_of(&conn, col);
+    let extra = create_column_in(&mut conn, board, "Лишняя").unwrap();
+    let in_extra = assigned_card(&conn, extra.id, "В лишней", None, "Medium");
+    add_time_entry_in(&conn, in_extra, me, "2026-09-01 09:00:00", 600, None).unwrap();
+    delete_column_in(&mut conn, extra.id).expect("время не должно мешать удалить колонку");
+
+    // Доска целиком.
+    let other_col = workload_board(&conn, 1, "Другая доска").0;
+    let on_other = assigned_card(&conn, other_col, "На другой", None, "Medium");
+    add_time_entry_in(&conn, on_other, me, "2026-09-01 09:00:00", 600, None).unwrap();
+    let other_board = board_of(&conn, other_col);
+    delete_board_in(&mut conn, other_board).expect("время не должно мешать удалить доску");
+
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM time_entries", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0);
+    let violations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(violations, 0);
+}
+
+#[test]
+fn deleting_a_member_keeps_their_time_and_stops_their_timer() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let petr = add_member(&conn, "Пётр");
+
+    add_time_entry_in(&conn, card, petr, "2026-09-01 09:00:00", 1200, None).unwrap();
+    let running = start_timer_in(&mut conn, card, petr).unwrap().timer.entry_id;
+    started_ago(&conn, running, 600);
+
+    delete_member_from(&mut conn, petr).expect("время участника не должно мешать его удалить");
+
+    let entries = list_time_entries_in(&conn, card).unwrap();
+    assert_eq!(entries.len(), 2, "записи остаются");
+    assert!(entries.iter().all(|e| e.member.is_none()), "подпись снята");
+    assert!(read_time_entry(&conn, running).unwrap().ended_at.is_some(), "идущий таймер остановлен");
+    assert!(total_time_in(&conn, card).unwrap() >= 1200 + 600, "сумма карточки не уменьшилась");
+}

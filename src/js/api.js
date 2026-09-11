@@ -408,6 +408,66 @@ export async function removeCardDependency(id) {
     return await invoke('remove_card_dependency', { id });
 }
 
+// ─── Учёт времени ───
+
+/**
+ * Запускает таймер участника на карточке.
+ *
+ * Если у того же участника уже шёл таймер на другой карточке, бэкенд
+ * останавливает его сам и возвращает в `stopped` — об этом нужно сказать.
+ * Повторный запуск идущего таймера ничего не меняет.
+ *
+ * @returns {Promise<{timer: object, stopped: object|null}>}
+ *          `timer` — `{entry_id, card_id, card_title, member_id, started_at, elapsed_seconds}`,
+ *          `stopped` — `{entry_id, card_id, card_title, duration_seconds}`
+ */
+export async function startTimer(cardId, memberId) {
+    return await invoke('start_timer', { cardId, memberId });
+}
+
+/** Останавливает таймер моментом «сейчас»; возвращает законченную сессию. */
+export async function stopTimer(entryId) {
+    return await invoke('stop_timer', { entryId });
+}
+
+/**
+ * Закрывает забытый таймер вписанной длительностью: конец сессии — начало плюс
+ * `durationSeconds`, а не «сейчас». Длиннее, чем прошло с запуска, нельзя.
+ */
+export async function stopTimerWithDuration(entryId, durationSeconds) {
+    return await invoke('stop_timer_with_duration', { entryId, durationSeconds });
+}
+
+/** Идущий таймер участника или `null`. */
+export async function getActiveTimer(memberId) {
+    return await invoke('get_active_timer', { memberId });
+}
+
+/** Сессии карточки: идущая первой, дальше от свежих к старым. */
+export async function listTimeEntries(cardId) {
+    return await invoke('list_time_entries', { cardId });
+}
+
+/** Сумма законченных сессий карточки, в секундах. */
+export async function getTotalTime(cardId) {
+    return await invoke('get_total_time', { cardId });
+}
+
+/**
+ * Вписывает сессию руками.
+ *
+ * @param {string} startedAt - UTC в формате базы, "YYYY-MM-DD HH:MM:SS" (см. `toTimestamp`)
+ * @param {string|null} note
+ */
+export async function addTimeEntry(cardId, memberId, startedAt, durationSeconds, note = null) {
+    return await invoke('add_time_entry', { cardId, memberId, startedAt, durationSeconds, note });
+}
+
+/** Таймеры, идущие дольше 12 часов, — забытые при закрытии приложения. */
+export async function listOrphanedTimers() {
+    return await invoke('list_orphaned_timers');
+}
+
 // ─── Нагрузка по исполнителям ───
 
 /**

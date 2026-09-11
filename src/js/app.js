@@ -24,6 +24,7 @@ import { renderMembersPage } from './members.js';
 import { applyWorkspaceBackground } from './background.js';
 import { initTheme } from './theme.js';
 import { openPalette, closePalette, isPaletteOpen } from './palette.js';
+import { initTimer, askAboutOrphanedTimers } from './timer.js';
 import { $, debounce, showToast } from './utils.js';
 
 let currentView = { name: 'hub', params: {} };
@@ -77,6 +78,9 @@ async function init() {
         // Render the global layout
         renderLayout();
         initHeaderInteractions(() => defaultWorkspaceId);
+        // Индикатор идущего таймера — сразу вместе с шапкой. Первый экран его
+        // не ждёт: таймера чаще всего нет, а чтение его — лишний шаг до доски.
+        const timerReady = initTimer();
         // Подсказки делегированы на document — достаточно включить один раз
         initTooltips();
         // Esc закрывает верхнюю открытую модалку. Справка обещала это с самого
@@ -96,6 +100,12 @@ async function init() {
         });
 
         initGlobalSearchShortcut();
+
+        // Вопрос про забытый таймер — поверх уже открытого экрана и только
+        // после того, как идущий таймер прочитан. Иначе запоздавшее чтение
+        // вернуло бы в шапку таймер, который человек только что остановил в
+        // этом самом окне.
+        timerReady.then(askAboutOrphanedTimers);
 
     } catch (error) {
         console.error('Failed to initialize app:', error);
@@ -152,6 +162,13 @@ function renderLayout() {
             </div>
 
             <div class="header__right">
+                <!-- Идущий таймер: виден, только пока время идёт (см. timer.js) -->
+                <button class="header-timer" id="header-timer" type="button" hidden>
+                    <span class="header-timer__dot"></span>
+                    <span class="header-timer__title"></span>
+                    <span class="header-timer__time"></span>
+                    <span class="header-timer__stop">${Icons.stop}</span>
+                </button>
                 <button class="header__icon-btn" id="btn-notifications" data-tooltip="Уведомления">
                     ${Icons.bell}
                 </button>

@@ -137,6 +137,15 @@ pub fn run() {
             commands::add_card_dependency,
             commands::remove_card_dependency,
 
+            commands::start_timer,
+            commands::stop_timer,
+            commands::stop_timer_with_duration,
+            commands::get_active_timer,
+            commands::list_time_entries,
+            commands::get_total_time,
+            commands::add_time_entry,
+            commands::list_orphaned_timers,
+
             commands::get_inbox_column,
             commands::get_cards_with_due_dates,
 

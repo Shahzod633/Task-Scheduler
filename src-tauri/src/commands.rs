@@ -8,6 +8,7 @@ use crate::models::{
     BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, ChecklistItemExport,
     CommentExport, MemberExport, DatabaseExport,
     Member, ChecklistItem, CardComment, CardRow, CardDependencies, DependencyCard, BoardColumns, WorkspaceCardList, WorkloadRow, MEMBER_COLORS, PRIORITIES,
+    TimeEntry, ActiveTimer, StoppedTimer, StartTimerResult,
     EXPORT_FORMAT_VERSION, ReminderSettings, DueReminder,
     EmailSettings, EmailReminder, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, DEFAULT_EMAIL_RECIPIENT,
 };
@@ -1587,6 +1588,13 @@ fn delete_member_from(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()>
     // с человеком нельзя: обсуждение задачи — это её часть, а не его.
     tx.execute("UPDATE card_comments SET author_id = NULL WHERE author_id = ?1", params![id])
         .map_err(to_string_err)?;
+    // Время — по тому же правилу: работа была сделана, и сумма на карточке не
+    // должна уменьшиться оттого, что человека убрали из справочника. Идущий
+    // таймер сначала останавливается: без подписи его уже никто не нашёл бы,
+    // и он тикал бы до следующего запуска приложения.
+    stop_running(&tx, "member_id = ?1", id).map_err(to_string_err)?;
+    tx.execute("UPDATE time_entries SET member_id = NULL WHERE member_id = ?1", params![id])
+        .map_err(to_string_err)?;
     tx.execute("DELETE FROM members WHERE id = ?1", params![id])
         .map_err(to_string_err)?;
     tx.commit().map_err(to_string_err)?;
@@ -2252,6 +2260,431 @@ fn write_notes(conn: &rusqlite::Connection, board_id: i64, content: String) -> C
     Ok(BoardNotes { board_id, content, updated_at })
 }
 
+// ─── Учёт времени ───
+//
+// Таймер ведёт «я» — строка `is_self` справочника, как и подпись под
+// комментарием: входа в приложение нет, и другого человека за клавиатурой не
+// бывает. Команды при этом принимают `member_id` явно — правило «один идущий
+// таймер на человека» сформулировано про участника, а не про установку.
+//
+// Все отметки — `datetime('now')`, то есть UTC, как везде в базе, и все
+// длительности считает SQLite по тем же часам. Фронтенд их не присылает: иначе
+// сессия зависела бы от часов вкладки. Исключение одно — начало сессии,
+// вписанной руками: какой день человек выбрал в своём календаре, знает только
+// фронтенд.
+
+/// Таймер, запущенный раньше этого и так и не остановленный, считается
+/// забытым: приложение закрыли или оно упало с работающим таймером. Двенадцать
+/// часов — дольше рабочего дня, но меньше суток: ночь с забытым таймером
+/// ловится при первом же утреннем запуске.
+pub const ORPHAN_TIMER_HOURS: i64 = 12;
+
+/// Самая длинная сессия, которую можно вписать руками. Больше суток за один
+/// присест не работают, и такое число почти наверняка опечатка.
+pub const MAX_MANUAL_SESSION_SECONDS: i64 = 24 * 60 * 60;
+
+/// Подпись к сессии длиннее этого — уже не подпись, а описание задачи. Обрезать
+/// молча нельзя, как и комментарий: это потеря текста.
+const MAX_TIME_NOTE_LENGTH: usize = 500;
+
+pub const ERR_TIMER_NOT_FOUND: &str = "Запись времени не найдена";
+pub const ERR_TIMER_ALREADY_STOPPED: &str = "Таймер уже остановлен";
+pub const ERR_DURATION_NOT_POSITIVE: &str = "Длительность должна быть больше нуля";
+pub const ERR_DURATION_OVER_ELAPSED: &str = "Длительность больше, чем прошло с запуска таймера";
+pub const ERR_DURATION_TOO_LONG: &str = "Одна сессия не может длиться больше суток";
+pub const ERR_SESSION_IN_FUTURE: &str = "Сессия не может закончиться в будущем";
+
+/// Секунд от `started_at` строки до этого момента, по часам SQLite.
+///
+/// `'now'` SQLite читает один раз на шаг запроса, поэтому `datetime('now')` и
+/// это выражение в одном `UPDATE` описывают одну и ту же секунду. `MAX(0, …)` —
+/// на случай, если часы машины перевели назад: минус двадцать минут работы —
+/// не длительность, а мусор.
+const SECONDS_SINCE_START: &str =
+    "MAX(0, CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', started_at) AS INTEGER))";
+
+const TIME_ENTRY_SELECT: &str = "SELECT t.id, t.card_id, t.started_at, t.ended_at, t.duration_seconds, t.note,
+                                        m.id, m.name, m.initials, m.color, m.is_self, m.created_at
+                                   FROM time_entries t
+                                   LEFT JOIN members m ON m.id = t.member_id";
+
+fn row_to_time_entry(row: &rusqlite::Row) -> rusqlite::Result<TimeEntry> {
+    // Как у комментария: LEFT JOIN без совпадения даёт NULL во всех столбцах
+    // участника, и решает его id.
+    let member = match row.get::<_, Option<i64>>(6)? {
+        Some(id) => Some(Member {
+            id,
+            name: row.get(7)?,
+            initials: row.get(8)?,
+            color: row.get(9)?,
+            is_self: { let s: i64 = row.get(10)?; s != 0 },
+            created_at: row.get(11)?,
+        }),
+        None => None,
+    };
+    Ok(TimeEntry {
+        id: row.get(0)?,
+        card_id: row.get(1)?,
+        member,
+        started_at: row.get(2)?,
+        ended_at: row.get(3)?,
+        duration_seconds: row.get(4)?,
+        note: row.get(5)?,
+    })
+}
+
+/// Идущий таймер вместе с названием карточки; условие дописывает вызывающий.
+fn active_timer_select() -> String {
+    format!(
+        "SELECT t.id, t.card_id, c.title, t.member_id, t.started_at, {}
+           FROM time_entries t
+           INNER JOIN cards c ON c.id = t.card_id",
+        SECONDS_SINCE_START,
+    )
+}
+
+fn row_to_active_timer(row: &rusqlite::Row) -> rusqlite::Result<ActiveTimer> {
+    Ok(ActiveTimer {
+        entry_id: row.get(0)?,
+        card_id: row.get(1)?,
+        card_title: row.get(2)?,
+        member_id: row.get(3)?,
+        started_at: row.get(4)?,
+        elapsed_seconds: row.get(5)?,
+    })
+}
+
+fn read_time_entry(conn: &rusqlite::Connection, id: i64) -> CmdResult<TimeEntry> {
+    let sql = format!("{} WHERE t.id = ?1", TIME_ENTRY_SELECT);
+    conn.query_row(&sql, params![id], row_to_time_entry)
+        .optional()
+        .map_err(to_string_err)?
+        .ok_or_else(|| ERR_TIMER_NOT_FOUND.to_string())
+}
+
+/// Карточка и участник проверяются явно, хотя внешний ключ поймал бы и сам:
+/// его «FOREIGN KEY constraint failed» человеку ничего не говорит.
+fn require_card_and_member(conn: &rusqlite::Connection, card_id: i64, member_id: i64) -> CmdResult<()> {
+    let exists = |sql: &str, id: i64| -> CmdResult<bool> {
+        conn.query_row(sql, params![id], |_| Ok(()))
+            .optional()
+            .map(|found| found.is_some())
+            .map_err(to_string_err)
+    };
+    if !exists("SELECT 1 FROM cards WHERE id = ?1", card_id)? {
+        return Err("Карточка не найдена".to_string());
+    }
+    if !exists("SELECT 1 FROM members WHERE id = ?1", member_id)? {
+        return Err("Участник не найден".to_string());
+    }
+    Ok(())
+}
+
+/// Останавливает идущие таймеры, отобранные условием, моментом «сейчас».
+/// Уже остановленных не касается: их `ended_at` — история, а не черновик.
+fn stop_running(conn: &rusqlite::Connection, filter: &str, id: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        &format!(
+            "UPDATE time_entries SET ended_at = datetime('now'), duration_seconds = {}
+              WHERE {} AND ended_at IS NULL",
+            SECONDS_SINCE_START, filter,
+        ),
+        params![id],
+    )
+}
+
+/// Запускает таймер участника на карточке.
+///
+/// Два таймера одного человека одновременно идти не могут — работать над двумя
+/// задачами сразу нельзя, а вдвое записанное время врёт о каждой из них.
+/// Поэтому идущий таймер на другой карточке останавливается здесь же, в той же
+/// транзакции, и возвращается в `stopped`: фронтенд говорит об этом тостом.
+#[tauri::command]
+pub fn start_timer(card_id: i64, member_id: i64, state: State<'_, DbState>) -> CmdResult<StartTimerResult> {
+    let mut conn = state.conn.lock().unwrap();
+    start_timer_in(&mut conn, card_id, member_id)
+}
+
+fn start_timer_in(conn: &mut rusqlite::Connection, card_id: i64, member_id: i64) -> CmdResult<StartTimerResult> {
+    require_card_and_member(conn, card_id, member_id)?;
+
+    let tx = conn.transaction().map_err(to_string_err)?;
+    let by_entry = format!("{} WHERE t.id = ?1", active_timer_select());
+
+    let running: Option<(i64, i64)> = tx.query_row(
+        "SELECT id, card_id FROM time_entries WHERE member_id = ?1 AND ended_at IS NULL",
+        params![member_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(to_string_err)?;
+
+    let mut stopped = None;
+    if let Some((entry_id, running_card)) = running {
+        if running_card == card_id {
+            // Повторный запуск идущего таймера — двойной клик, а не новая
+            // сессия: закрывать и тут же открывать заново значило бы дробить
+            // одну сессию на две.
+            let timer = tx.query_row(&by_entry, params![entry_id], row_to_active_timer)
+                .map_err(to_string_err)?;
+            return Ok(StartTimerResult { timer, stopped: None });
+        }
+
+        stop_running(&tx, "id = ?1", entry_id).map_err(to_string_err)?;
+        stopped = Some(tx.query_row(
+            "SELECT t.id, t.card_id, c.title, t.duration_seconds
+               FROM time_entries t
+               INNER JOIN cards c ON c.id = t.card_id
+              WHERE t.id = ?1",
+            params![entry_id],
+            |row| Ok(StoppedTimer {
+                entry_id: row.get(0)?,
+                card_id: row.get(1)?,
+                card_title: row.get(2)?,
+                duration_seconds: row.get(3)?,
+            }),
+        ).map_err(to_string_err)?);
+    }
+
+    tx.execute(
+        "INSERT INTO time_entries (card_id, member_id, started_at) VALUES (?1, ?2, datetime('now'))",
+        params![card_id, member_id],
+    ).map_err(to_string_err)?;
+    let entry_id = tx.last_insert_rowid();
+    let timer = tx.query_row(&by_entry, params![entry_id], row_to_active_timer)
+        .map_err(to_string_err)?;
+
+    tx.commit().map_err(to_string_err)?;
+    Ok(StartTimerResult { timer, stopped })
+}
+
+#[tauri::command]
+pub fn stop_timer(entry_id: i64, state: State<'_, DbState>) -> CmdResult<TimeEntry> {
+    let conn = state.conn.lock().unwrap();
+    stop_timer_in(&conn, entry_id)
+}
+
+/// Останавливает таймер моментом «сейчас». Повторная остановка — ошибка, а не
+/// тихий успех: переписать `ended_at` уже закрытой сессии значило бы удлинить
+/// её задним числом.
+fn stop_timer_in(conn: &rusqlite::Connection, entry_id: i64) -> CmdResult<TimeEntry> {
+    if read_time_entry(conn, entry_id)?.ended_at.is_some() {
+        return Err(ERR_TIMER_ALREADY_STOPPED.to_string());
+    }
+    stop_running(conn, "id = ?1", entry_id).map_err(to_string_err)?;
+    read_time_entry(conn, entry_id)
+}
+
+/// Закрывает забытый таймер длительностью, которую человек вписал сам.
+///
+/// Конец сессии — начало плюс длительность, а не «сейчас»: работа кончилась
+/// тогда, когда кончилась, а не когда о таймере вспомнили. Длиннее, чем прошло с
+/// запуска, сессия быть не может — такой конец оказался бы в будущем.
+#[tauri::command]
+pub fn stop_timer_with_duration(entry_id: i64, duration_seconds: i64, state: State<'_, DbState>) -> CmdResult<TimeEntry> {
+    let conn = state.conn.lock().unwrap();
+    stop_timer_with_duration_in(&conn, entry_id, duration_seconds)
+}
+
+fn stop_timer_with_duration_in(conn: &rusqlite::Connection, entry_id: i64, duration_seconds: i64) -> CmdResult<TimeEntry> {
+    let (ended_at, elapsed): (Option<String>, i64) = conn.query_row(
+        &format!("SELECT ended_at, {} FROM time_entries WHERE id = ?1", SECONDS_SINCE_START),
+        params![entry_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(to_string_err)?
+        .ok_or_else(|| ERR_TIMER_NOT_FOUND.to_string())?;
+
+    if ended_at.is_some() {
+        return Err(ERR_TIMER_ALREADY_STOPPED.to_string());
+    }
+    if duration_seconds <= 0 {
+        return Err(ERR_DURATION_NOT_POSITIVE.to_string());
+    }
+    if duration_seconds > elapsed {
+        return Err(ERR_DURATION_OVER_ELAPSED.to_string());
+    }
+
+    conn.execute(
+        "UPDATE time_entries
+            SET duration_seconds = ?2,
+                ended_at = datetime(started_at, '+' || ?2 || ' seconds')
+          WHERE id = ?1 AND ended_at IS NULL",
+        params![entry_id, duration_seconds],
+    ).map_err(to_string_err)?;
+    read_time_entry(conn, entry_id)
+}
+
+/// Идущий таймер участника или `None`. По нему рисуется индикатор в шапке.
+#[tauri::command]
+pub fn get_active_timer(member_id: i64, state: State<'_, DbState>) -> CmdResult<Option<ActiveTimer>> {
+    let conn = state.conn.lock().unwrap();
+    read_active_timer(&conn, member_id)
+}
+
+fn read_active_timer(conn: &rusqlite::Connection, member_id: i64) -> CmdResult<Option<ActiveTimer>> {
+    let sql = format!("{} WHERE t.member_id = ?1 AND t.ended_at IS NULL", active_timer_select());
+    conn.query_row(&sql, params![member_id], row_to_active_timer)
+        .optional()
+        .map_err(to_string_err)
+}
+
+/// Сессии карточки: идущая первой, дальше от свежих к старым. Лог времени
+/// читают, чтобы вспомнить, что было недавно, — в отличие от переписки, где
+/// порядок обратный.
+#[tauri::command]
+pub fn list_time_entries(card_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<TimeEntry>> {
+    let conn = state.conn.lock().unwrap();
+    list_time_entries_in(&conn, card_id)
+}
+
+fn list_time_entries_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<Vec<TimeEntry>> {
+    let sql = format!(
+        "{} WHERE t.card_id = ?1
+          ORDER BY t.ended_at IS NULL DESC, COALESCE(t.ended_at, t.started_at) DESC, t.id DESC",
+        TIME_ENTRY_SELECT,
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
+    let iter = stmt.query_map(params![card_id], row_to_time_entry).map_err(to_string_err)?;
+
+    let mut res = Vec::new();
+    for e in iter { res.push(e.map_err(to_string_err)?); }
+    Ok(res)
+}
+
+/// Сумма законченных сессий карточки, в секундах. Идущая не входит: её
+/// длительности ещё нет, и число в окне не должно меняться само по себе.
+#[tauri::command]
+pub fn get_total_time(card_id: i64, state: State<'_, DbState>) -> CmdResult<i64> {
+    let conn = state.conn.lock().unwrap();
+    total_time_in(&conn, card_id)
+}
+
+fn total_time_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<i64> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(duration_seconds), 0) FROM time_entries WHERE card_id = ?1",
+        params![card_id],
+        |row| row.get(0),
+    ).map_err(to_string_err)
+}
+
+/// Вписывает сессию руками — для работы, на которую забыли включить таймер.
+///
+/// `started_at` — UTC в формате базы, его собирает фронтенд из выбранного дня.
+/// SQLite разбирает и нормализует строку сам: непонятую `datetime()` превращает
+/// в NULL, и это ловится до записи.
+#[tauri::command]
+pub fn add_time_entry(
+    card_id: i64,
+    member_id: i64,
+    started_at: String,
+    duration_seconds: i64,
+    note: Option<String>,
+    state: State<'_, DbState>,
+) -> CmdResult<TimeEntry> {
+    let conn = state.conn.lock().unwrap();
+    add_time_entry_in(&conn, card_id, member_id, &started_at, duration_seconds, note)
+}
+
+fn add_time_entry_in(
+    conn: &rusqlite::Connection,
+    card_id: i64,
+    member_id: i64,
+    started_at: &str,
+    duration_seconds: i64,
+    note: Option<String>,
+) -> CmdResult<TimeEntry> {
+    require_card_and_member(conn, card_id, member_id)?;
+
+    if duration_seconds <= 0 {
+        return Err(ERR_DURATION_NOT_POSITIVE.to_string());
+    }
+    if duration_seconds > MAX_MANUAL_SESSION_SECONDS {
+        return Err(ERR_DURATION_TOO_LONG.to_string());
+    }
+
+    let note = note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    if let Some(n) = &note {
+        if n.chars().count() > MAX_TIME_NOTE_LENGTH {
+            return Err(format!("Подпись к сессии длиннее {} символов", MAX_TIME_NOTE_LENGTH));
+        }
+    }
+
+    let (start, end, in_future): (Option<String>, Option<String>, Option<i64>) = conn.query_row(
+        "SELECT datetime(?1),
+                datetime(?1, '+' || ?2 || ' seconds'),
+                datetime(?1, '+' || ?2 || ' seconds') > datetime('now')",
+        params![started_at, duration_seconds],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(to_string_err)?;
+
+    let (Some(start), Some(end)) = (start, end) else {
+        return Err("Не удалось разобрать время начала сессии".to_string());
+    };
+    if in_future == Some(1) {
+        return Err(ERR_SESSION_IN_FUTURE.to_string());
+    }
+
+    conn.execute(
+        "INSERT INTO time_entries (card_id, member_id, started_at, ended_at, duration_seconds, note)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![card_id, member_id, start, end, duration_seconds, note],
+    ).map_err(to_string_err)?;
+    read_time_entry(conn, conn.last_insert_rowid())
+}
+
+/// Переменная окружения, которой отладочная сборка подменяет порог забытого
+/// таймера — в минутах.
+///
+/// Проверка из задания («закрой приложение с идущим таймером, открой снова —
+/// должен появиться вопрос») иначе требовала бы ждать двенадцать часов. Базу
+/// снаружи не поправить: она зашифрована. Выпускная сборка переменную не читает
+/// вовсе, так что забытая в системе переменная на установленном приложении
+/// ничего не меняет.
+pub const ORPHAN_TIMER_MINUTES_ENV: &str = "TASKFLOW_ORPHAN_TIMER_MINUTES";
+
+/// Порог забытого таймера в виде модификатора SQLite: `-12 hours`, а при
+/// подмене — `-N minutes`. Ноль и отрицательные числа подменой не считаются:
+/// с нулевым порогом забытым оказался бы любой только что запущенный таймер.
+fn orphan_cutoff(override_minutes: Option<i64>) -> String {
+    match override_minutes {
+        Some(minutes) if minutes > 0 => format!("-{} minutes", minutes),
+        _ => format!("-{} hours", ORPHAN_TIMER_HOURS),
+    }
+}
+
+fn orphan_minutes_override() -> Option<i64> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var(ORPHAN_TIMER_MINUTES_ENV).ok()?.trim().parse().ok()
+}
+
+/// Таймеры, идущие дольше `ORPHAN_TIMER_HOURS`, — забытые.
+///
+/// Закрывать их молча здесь нельзя: на карточку тихо легли бы десять часов,
+/// которых не было. Команда только находит, решает человек — фронтенд
+/// спрашивает про каждый при запуске.
+#[tauri::command]
+pub fn list_orphaned_timers(state: State<'_, DbState>) -> CmdResult<Vec<ActiveTimer>> {
+    let conn = state.conn.lock().unwrap();
+    orphaned_timers_in(&conn, &orphan_cutoff(orphan_minutes_override()))
+}
+
+/// Порог приходит снаружи, а не читается здесь из окружения: тесты идут
+/// параллельно в одном процессе, и переменная, заданная в оболочке для ручной
+/// проверки, не должна менять их результат.
+fn orphaned_timers_in(conn: &rusqlite::Connection, cutoff: &str) -> CmdResult<Vec<ActiveTimer>> {
+    let sql = format!(
+        "{} WHERE t.ended_at IS NULL AND t.started_at < datetime('now', ?1)
+          ORDER BY t.started_at ASC",
+        active_timer_select(),
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
+    let iter = stmt.query_map(params![cutoff], row_to_active_timer).map_err(to_string_err)?;
+
+    let mut res = Vec::new();
+    for t in iter { res.push(t.map_err(to_string_err)?); }
+    Ok(res)
+}
+
 // ─── Inbox (hidden system board) ───
 
 #[tauri::command]
@@ -2419,10 +2852,15 @@ fn restore_column_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> 
 #[tauri::command]
 pub fn delete_card(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let mut conn = state.conn.lock().unwrap();
+    delete_card_in(&mut conn, id)
+}
+
+fn delete_card_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     let tx = conn.transaction().map_err(to_string_err)?;
     tx.execute("DELETE FROM card_labels WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM checklist_items WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM card_comments WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
+    tx.execute("DELETE FROM time_entries WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     drop_dependencies_of(&tx, id).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE id = ?1", params![id]).map_err(to_string_err)?;
     tx.commit().map_err(to_string_err)?;
@@ -2454,6 +2892,10 @@ fn delete_column_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
         "DELETE FROM card_comments WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
         params![id],
     ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM time_entries WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
+        params![id],
+    ).map_err(to_string_err)?;
     drop_dependencies_where(&tx, "SELECT id FROM cards WHERE column_id = ?1", id).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE column_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM columns WHERE id = ?1", params![id]).map_err(to_string_err)?;
@@ -2466,7 +2908,10 @@ fn delete_column_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
 #[tauri::command]
 pub fn delete_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let mut conn = state.conn.lock().unwrap();
+    delete_board_in(&mut conn, id)
+}
 
+fn delete_board_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     // The hidden Inbox board backs the Inbox screen; deleting it would break
     // that screen for the whole workspace.
     let is_system: i64 = conn.query_row(
@@ -2497,6 +2942,14 @@ pub fn delete_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     ).map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM card_comments WHERE card_id IN (
+            SELECT c.id FROM cards c
+            INNER JOIN columns col ON col.id = c.column_id
+            WHERE col.board_id = ?1
+        )",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM time_entries WHERE card_id IN (
             SELECT c.id FROM cards c
             INNER JOIN columns col ON col.id = c.column_id
             WHERE col.board_id = ?1
