@@ -661,3 +661,48 @@ export async function getMistakeCards(workspaceId) {
 export async function requestCardRetry(cardId) {
     return await invoke('request_card_retry', { cardId });
 }
+
+// ─── ИИ-ассистент (Ollama) ───
+
+/** Адрес Ollama, выбранная модель и длина контекста — одни на приложение. */
+export async function getAiSettings() {
+    return await invoke('get_ai_settings');
+}
+
+/**
+ * Сохраняет настройки ассистента. Отклоняется, если адрес не петлевой
+ * (`localhost`, `127.0.0.1`, `[::1]`); длину контекста бэкенд зажимает в
+ * допустимые границы.
+ */
+export async function updateAiSettings(ollamaUrl, model, contextLength) {
+    return await invoke('update_ai_settings', { ollamaUrl, model, contextLength });
+}
+
+/**
+ * Модели Ollama по адресу `url` (или по сохранённому, если `url` пуст) —
+ * `[{ name, size }]`. Отказ — готовый текст для человека.
+ */
+export async function ollamaCheckStatus(url = null) {
+    return await invoke('ollama_check_status', { url });
+}
+
+export async function ollamaListModels(url = null) {
+    return await invoke('ollama_list_models', { url });
+}
+
+export async function getChatHistory(workspaceId) {
+    return await invoke('get_chat_history', { workspaceId });
+}
+
+export async function clearChatHistory(workspaceId) {
+    return await invoke('clear_chat_history', { workspaceId });
+}
+
+/**
+ * Вопрос ассистенту. Ответ может идти десятки секунд. Возвращает обе
+ * сохранённые реплики — вопрос и ответ; при отказе в историю не пишется
+ * ничего.
+ */
+export async function ollamaChat(workspaceId, content) {
+    return await invoke('ollama_chat', { workspaceId, content });
+}

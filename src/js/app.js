@@ -16,6 +16,7 @@ import { renderHomePage } from './home.js';
 import { renderSettingsPage } from './settings.js';
 import { renderInboxPage } from './inbox.js';
 import { renderPlannerPage } from './planner.js';
+import { renderAssistantPage } from './assistant.js';
 import { renderRecentPage } from './recent.js';
 import { renderFavoritesPage } from './favorites.js';
 import { renderMistakesPage } from './mistakes.js';
@@ -34,7 +35,7 @@ let lastBoardId = null;
 // Views that show the left sidebar (workspace/hub-style navigation)
 const SIDEBAR_VIEWS = new Set(['hub', 'templates', 'home', 'settings', 'recent', 'favorites', 'mistakes', 'list', 'members']);
 // Views that show the floating dock (board working context)
-const DOCK_VIEWS = new Set(['board', 'inbox', 'planner']);
+const DOCK_VIEWS = new Set(['board', 'inbox', 'planner', 'assistant']);
 // view name -> sidebar top-level item id
 const SIDEBAR_ITEM_IDS = { hub: 'sidebar-boards', list: 'sidebar-list', mistakes: 'sidebar-mistakes', templates: 'sidebar-templates', home: 'sidebar-home', settings: 'sidebar-settings' };
 
@@ -55,6 +56,7 @@ const ROUTES = {
     settings: (params) => renderSettingsPage(params.workspaceId || defaultWorkspaceId),
     inbox: (params) => renderInboxPage(params.workspaceId || defaultWorkspaceId),
     planner: (params) => renderPlannerPage(params.workspaceId || defaultWorkspaceId),
+    assistant: (params) => renderAssistantPage(params.workspaceId || defaultWorkspaceId),
     recent: (params) => renderRecentPage(params.workspaceId || defaultWorkspaceId),
     favorites: (params) => renderFavoritesPage(params.workspaceId || defaultWorkspaceId),
     mistakes: (params) => renderMistakesPage(params.workspaceId || defaultWorkspaceId),

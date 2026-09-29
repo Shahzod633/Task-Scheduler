@@ -194,6 +194,39 @@ pub struct EmailReminder {
     pub days_left: i64,
 }
 
+// ─── ИИ-ассистент ───
+
+/// Настройки ассистента — одни на всё приложение, в `user_profile`, как и
+/// прочие. Модель — имя из `/api/tags` Ollama; пустая строка — «не выбрана».
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AiSettings {
+    pub ollama_url: String,
+    pub model: String,
+    /// Сколько последних сообщений истории уходит модели с каждым вопросом.
+    pub context_length: i64,
+}
+
+/// Сколько сообщений истории отправлять по умолчанию. У локальных моделей
+/// окно в 4–8 тысяч токенов, и двадцать реплик в него помещаются с запасом.
+pub const DEFAULT_AI_CONTEXT_LENGTH: i64 = 20;
+/// Границы «Длины контекста». Меньше двух — модель не увидит даже своего
+/// прошлого ответа; больше двухсот — переполнит окно любой локальной модели.
+pub const AI_CONTEXT_LENGTH_MIN: i64 = 2;
+pub const AI_CONTEXT_LENGTH_MAX: i64 = 200;
+
+/// Реплика чата ассистента. История своя у каждого пространства.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct ChatMessage {
+    pub id: i64,
+    pub workspace_id: i64,
+    /// `user` или `assistant`. `system` схема допускает, но в историю его не
+    /// пишут: системный промпт зашит в коде и подставляется при каждом вопросе.
+    pub role: String,
+    pub content: String,
+    /// UTC, `datetime('now')` — как все отметки времени в базе.
+    pub created_at: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserProfile {
     pub avatar_initials: String,

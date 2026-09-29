@@ -65,3 +65,12 @@ base64 = "0.22"
 # бинарнике, ни своего набора корневых сертификатов, который пришлось бы
 # обновлять руками.
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }
+# HTTP к локальной Ollama (ИИ-ассистент, `ollama.rs`). Сама Ollama в
+# зависимостях не значится и для сборки не нужна — это внешний процесс.
+#
+# Без функций по умолчанию, то есть без TLS: адрес принимается только
+# петлевой (`localhost`), а Ollama на нём говорит по обычному http. 0.13 —
+# та же версия, что уже стоит в Cargo.lock через Tauri.
+# `blocking` — синхронный клиент, как у почты; tokio он везёт внутри себя, но
+# tokio и так в дереве через Tauri.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json"] }

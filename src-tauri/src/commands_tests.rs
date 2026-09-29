@@ -4730,3 +4730,105 @@ fn the_workspace_list_brings_the_fields_of_its_visible_boards() {
     assert_eq!(list.fields[0].values.len(), 1);
     assert_eq!((list.fields[0].values[0].card_id, list.fields[0].values[0].value.as_str()), (card, "7"));
 }
+
+// ─── ИИ-ассистент: настройки и история ───
+
+#[test]
+fn ai_settings_default_to_local_ollama_without_a_model() {
+    let conn = test_db();
+    let s = read_ai_settings(&conn).unwrap();
+    assert_eq!(s.ollama_url, crate::ollama::DEFAULT_OLLAMA_URL);
+    assert_eq!(s.model, "");
+    assert_eq!(s.context_length, DEFAULT_AI_CONTEXT_LENGTH);
+}
+
+#[test]
+fn ai_settings_are_saved_trimmed_and_clamped() {
+    let conn = test_db();
+    let saved = write_ai_settings(&conn, &AiSettings {
+        ollama_url: " http://127.0.0.1:8080/ ".into(),
+        model: " qwen2.5:7b ".into(),
+        context_length: 5000,
+    }).unwrap();
+    assert_eq!(saved.ollama_url, "http://127.0.0.1:8080");
+    assert_eq!(saved.model, "qwen2.5:7b");
+    assert_eq!(saved.context_length, AI_CONTEXT_LENGTH_MAX);
+    assert_eq!(read_ai_settings(&conn).unwrap(), saved);
+
+    let saved = write_ai_settings(&conn, &AiSettings { context_length: 0, ..saved }).unwrap();
+    assert_eq!(saved.context_length, AI_CONTEXT_LENGTH_MIN);
+}
+
+#[test]
+fn a_remote_ollama_address_is_not_saved() {
+    let conn = test_db();
+    let err = write_ai_settings(&conn, &AiSettings {
+        ollama_url: "http://192.168.1.5:11434".into(),
+        model: "x".into(),
+        context_length: 20,
+    }).unwrap_err();
+    assert_eq!(err, crate::ollama::ERR_NOT_LOCAL);
+    // Ничего не легло — осталось значение по умолчанию.
+    let s = read_ai_settings(&conn).unwrap();
+    assert_eq!(s.ollama_url, crate::ollama::DEFAULT_OLLAMA_URL);
+    assert_eq!(s.model, "");
+}
+
+#[test]
+fn chat_exchange_is_saved_as_a_pair_in_order() {
+    let mut conn = test_db();
+    let saved = save_chat_exchange(&mut conn, 1, "Привет", "Здравствуйте!").unwrap();
+    assert_eq!(saved.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect::<Vec<_>>(),
+               [("user", "Привет"), ("assistant", "Здравствуйте!")]);
+    assert!(saved.iter().all(|m| m.workspace_id == 1 && !m.created_at.is_empty()));
+    assert_eq!(read_chat_history(&conn, 1, None).unwrap(), saved);
+}
+
+#[test]
+fn chat_history_belongs_to_its_workspace() {
+    let mut conn = test_db();
+    let other = second_workspace(&conn);
+    save_chat_exchange(&mut conn, 1, "a", "b").unwrap();
+    save_chat_exchange(&mut conn, other, "c", "d").unwrap();
+
+    assert_eq!(read_chat_history(&conn, other, None).unwrap().iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["c", "d"]);
+
+    conn.execute("DELETE FROM chat_history WHERE workspace_id = ?1", params![1]).unwrap();
+    assert!(read_chat_history(&conn, 1, None).unwrap().is_empty());
+    assert_eq!(read_chat_history(&conn, other, None).unwrap().len(), 2);
+}
+
+#[test]
+fn the_context_window_takes_the_latest_messages_oldest_first() {
+    let mut conn = test_db();
+    for i in 0..5 {
+        save_chat_exchange(&mut conn, 1, &format!("q{i}"), &format!("a{i}")).unwrap();
+    }
+    let last = read_chat_history(&conn, 1, Some(3)).unwrap();
+    assert_eq!(last.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["a3", "q4", "a4"]);
+}
+
+#[test]
+fn system_rows_never_reach_the_history() {
+    let mut conn = test_db();
+    conn.execute("INSERT INTO chat_history (workspace_id, role, content) VALUES (1, 'system', 'старый промпт')", ()).unwrap();
+    save_chat_exchange(&mut conn, 1, "q", "a").unwrap();
+    assert_eq!(read_chat_history(&conn, 1, None).unwrap().len(), 2);
+}
+
+#[test]
+fn unknown_roles_are_refused_by_the_schema() {
+    let conn = test_db();
+    assert!(conn.execute("INSERT INTO chat_history (workspace_id, role, content) VALUES (1, 'tool', 'x')", ()).is_err());
+}
+
+#[test]
+fn the_request_starts_with_the_fixed_system_prompt() {
+    let mut conn = test_db();
+    save_chat_exchange(&mut conn, 1, "q", "a").unwrap();
+    let history = read_chat_history(&conn, 1, None).unwrap();
+    let request = build_chat_request(&history, "новый вопрос");
+    assert_eq!(request.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(), ["system", "user", "assistant", "user"]);
+    assert_eq!(request[0].content, AI_SYSTEM_PROMPT);
+    assert_eq!(request[3].content, "новый вопрос");
+}

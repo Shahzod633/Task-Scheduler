@@ -3,6 +3,7 @@ pub mod models;
 pub mod commands;
 pub mod crypto;
 pub mod email;
+pub mod ollama;
 
 use tauri::Manager;
 
@@ -162,6 +163,14 @@ pub fn run() {
             commands::resolve_card_mistake,
             commands::get_mistake_cards,
             commands::request_card_retry,
+
+            commands::get_ai_settings,
+            commands::update_ai_settings,
+            commands::ollama_check_status,
+            commands::ollama_list_models,
+            commands::get_chat_history,
+            commands::clear_chat_history,
+            commands::ollama_chat,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

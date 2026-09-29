@@ -12,6 +12,7 @@ use crate::models::{
     CustomField, CustomFieldValue, CUSTOM_FIELD_TYPES,
     EXPORT_FORMAT_VERSION, ReminderSettings, DueReminder,
     EmailSettings, EmailReminder, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, DEFAULT_EMAIL_RECIPIENT,
+    AiSettings, ChatMessage, DEFAULT_AI_CONTEXT_LENGTH, AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX,
 };
 
 #[cfg(test)]
@@ -5188,4 +5189,259 @@ pub fn run_email_reminder_check(app: &tauri::AppHandle) {
     if sent > 0 {
         log::info!("email: отправлено писем: {}", sent);
     }
+}
+
+// ─── ИИ-ассистент (Ollama) ───
+//
+// Ollama — внешний процесс, см. `ollama.rs`. Всё, что здесь трогает сеть,
+// объявлено `async fn` и уходит в `spawn_blocking`: `reqwest::blocking` внутри
+// задачи tokio падает с паникой, а обычная команда заняла бы главный поток и
+// подвесила окно на всё время раздумий модели.
+//
+// По тому же правилу, что у почты (§24.4), замок базы на время сетевого
+// обращения не держится: сначала короткий заход за настройками и историей,
+// потом разговор с моделью, потом второй короткий заход — записать ответ.
+
+/// Системный промпт. Зашит в коде и пользователем не редактируется; в историю
+/// не пишется — подставляется первым сообщением при каждом вопросе.
+const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри приложения TaskFlow (локальный таск-менеджер). \
+Отвечай кратко и по делу, на русском языке. Ты помогаешь пользователю управлять задачами, \
+анализировать продуктивность и отвечать на вопросы о его проектах. Пока у тебя нет доступа \
+к данным пользователя — просто веди диалог и помогай планировать.";
+
+/// Предел длины одного сообщения человека. Не про безопасность, а про окно
+/// контекста: вставленный целиком лог на мегабайт модель всё равно обрежет, а
+/// ждать её придётся минуты.
+const AI_MAX_MESSAGE_CHARS: usize = 8000;
+
+#[tauri::command]
+pub fn get_ai_settings(state: State<'_, DbState>) -> CmdResult<AiSettings> {
+    let conn = state.conn.lock().unwrap();
+    read_ai_settings(&conn)
+}
+
+/// NULL в базе — «ещё не настраивали», подставляется значение по умолчанию.
+fn read_ai_settings(conn: &rusqlite::Connection) -> CmdResult<AiSettings> {
+    conn.query_row(
+        "SELECT ai_ollama_url, ai_model, ai_context_length FROM user_profile WHERE id = 1",
+        [],
+        |row| {
+            let url: Option<String> = row.get(0)?;
+            let model: Option<String> = row.get(1)?;
+            let context: Option<i64> = row.get(2)?;
+            Ok(AiSettings {
+                ollama_url: url
+                    .filter(|u| !u.trim().is_empty())
+                    .unwrap_or_else(|| crate::ollama::DEFAULT_OLLAMA_URL.to_string()),
+                model: model.unwrap_or_default(),
+                context_length: context
+                    .unwrap_or(DEFAULT_AI_CONTEXT_LENGTH)
+                    .clamp(AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX),
+            })
+        },
+    )
+    .map_err(to_string_err)
+}
+
+#[tauri::command]
+pub fn update_ai_settings(
+    ollama_url: String,
+    model: String,
+    context_length: i64,
+    state: State<'_, DbState>,
+) -> CmdResult<AiSettings> {
+    let conn = state.conn.lock().unwrap();
+    write_ai_settings(&conn, &AiSettings { ollama_url, model, context_length })
+}
+
+/// Сохраняет и возвращает то, что легло в базу. Неверный адрес отвергается
+/// целиком — в отличие от порта почты, «исправить» его молча нечем. Длина
+/// контекста зажимается в границы.
+fn write_ai_settings(conn: &rusqlite::Connection, settings: &AiSettings) -> CmdResult<AiSettings> {
+    let url = crate::ollama::normalize_url(&settings.ollama_url)?;
+    let context = settings.context_length.clamp(AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX);
+    conn.execute(
+        "UPDATE user_profile SET ai_ollama_url = ?1, ai_model = ?2, ai_context_length = ?3 WHERE id = 1",
+        params![url, settings.model.trim(), context],
+    )
+    .map_err(to_string_err)?;
+    read_ai_settings(conn)
+}
+
+/// Адрес для проверки: набранный в форме, если его передали, иначе
+/// сохранённый. Так «Проверить подключение» проверяет то, что человек видит
+/// на экране, ещё до «Сохранить».
+fn ollama_url_for(url: Option<String>, app: &tauri::AppHandle) -> CmdResult<String> {
+    use tauri::Manager;
+    match url {
+        Some(u) if !u.trim().is_empty() => Ok(u),
+        _ => {
+            let state = app.state::<DbState>();
+            let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+            Ok(read_ai_settings(&conn)?.ollama_url)
+        }
+    }
+}
+
+async fn run_blocking<T, F>(f: F) -> CmdResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CmdResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("Внутренняя ошибка запроса к Ollama: {}", e))?
+}
+
+/// Запущена ли Ollama и какие модели в ней есть. Ошибка — готовый текст для
+/// человека («Ollama не запущена…»), а не код.
+#[tauri::command]
+pub async fn ollama_check_status(
+    url: Option<String>,
+    app: tauri::AppHandle,
+) -> CmdResult<Vec<crate::ollama::ModelInfo>> {
+    let url = ollama_url_for(url, &app)?;
+    run_blocking(move || crate::ollama::list_models(&url)).await
+}
+
+/// Только имена моделей — для выпадающего списка.
+#[tauri::command]
+pub async fn ollama_list_models(url: Option<String>, app: tauri::AppHandle) -> CmdResult<Vec<String>> {
+    let url = ollama_url_for(url, &app)?;
+    let models = run_blocking(move || crate::ollama::list_models(&url)).await?;
+    Ok(models.into_iter().map(|m| m.name).collect())
+}
+
+#[tauri::command]
+pub fn get_chat_history(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<ChatMessage>> {
+    let conn = state.conn.lock().unwrap();
+    read_chat_history(&conn, workspace_id, None)
+}
+
+fn chat_message_from_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
+    Ok(ChatMessage {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        role: row.get(2)?,
+        content: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
+/// История пространства в хронологическом порядке. `last` — взять только
+/// столько последних реплик (окно контекста модели).
+fn read_chat_history(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+    last: Option<i64>,
+) -> CmdResult<Vec<ChatMessage>> {
+    // Последние N берутся с конца по убыванию и переворачиваются: `LIMIT` без
+    // `DESC` отдал бы первые N, то есть самое старое. `LIMIT -1` в SQLite —
+    // «без предела».
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, workspace_id, role, content, created_at FROM chat_history
+              WHERE workspace_id = ?1 AND role IN ('user', 'assistant')
+              ORDER BY id DESC LIMIT ?2",
+        )
+        .map_err(to_string_err)?;
+    let mut messages = stmt
+        .query_map(params![workspace_id, last.unwrap_or(-1)], chat_message_from_row)
+        .map_err(to_string_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string_err)?;
+    messages.reverse();
+    Ok(messages)
+}
+
+#[tauri::command]
+pub fn clear_chat_history(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<usize> {
+    let conn = state.conn.lock().unwrap();
+    conn.execute("DELETE FROM chat_history WHERE workspace_id = ?1", params![workspace_id])
+        .map_err(to_string_err)
+}
+
+/// Что уходит модели: системный промпт, реплики истории, новое сообщение.
+fn build_chat_request(history: &[ChatMessage], user_text: &str) -> Vec<crate::ollama::Message> {
+    let mut messages = Vec::with_capacity(history.len() + 2);
+    messages.push(crate::ollama::Message { role: "system".into(), content: AI_SYSTEM_PROMPT.into() });
+    messages.extend(history.iter().map(|m| crate::ollama::Message {
+        role: m.role.clone(),
+        content: m.content.clone(),
+    }));
+    messages.push(crate::ollama::Message { role: "user".into(), content: user_text.into() });
+    messages
+}
+
+/// Обе реплики — вопрос и ответ — пишутся одной транзакцией и только после
+/// ответа модели. Не ответила — в истории не остаётся вопроса без ответа, а
+/// текст возвращается человеку в поле ввода (это делает интерфейс).
+fn save_chat_exchange(
+    conn: &mut rusqlite::Connection,
+    workspace_id: i64,
+    user_text: &str,
+    answer: &str,
+) -> CmdResult<Vec<ChatMessage>> {
+    let tx = conn.transaction().map_err(to_string_err)?;
+    let mut ids = Vec::with_capacity(2);
+    for (role, content) in [("user", user_text), ("assistant", answer)] {
+        tx.execute(
+            "INSERT INTO chat_history (workspace_id, role, content) VALUES (?1, ?2, ?3)",
+            params![workspace_id, role, content],
+        )
+        .map_err(to_string_err)?;
+        ids.push(tx.last_insert_rowid());
+    }
+    let saved = tx
+        .prepare("SELECT id, workspace_id, role, content, created_at FROM chat_history WHERE id IN (?1, ?2) ORDER BY id")
+        .map_err(to_string_err)?
+        .query_map(params![ids[0], ids[1]], chat_message_from_row)
+        .map_err(to_string_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)?;
+    Ok(saved)
+}
+
+/// Задать вопрос ассистенту. Возвращает обе сохранённые реплики — вопрос и
+/// ответ — с их id и временем.
+///
+/// Модель, адрес, системный промпт и окно истории берутся на бэкенде, а не
+/// приходят из интерфейса: промпт пользователем не редактируется, и
+/// передавать его из JS значило бы сделать его редактируемым через консоль.
+#[tauri::command]
+pub async fn ollama_chat(
+    workspace_id: i64,
+    content: String,
+    app: tauri::AppHandle,
+) -> CmdResult<Vec<ChatMessage>> {
+    use tauri::Manager;
+
+    let text = content.trim().to_string();
+    if text.is_empty() {
+        return Err("Пустое сообщение".to_string());
+    }
+    if text.chars().count() > AI_MAX_MESSAGE_CHARS {
+        return Err(format!("Сообщение длиннее {} символов — сократите его", AI_MAX_MESSAGE_CHARS));
+    }
+
+    let (settings, request) = {
+        let state = app.state::<DbState>();
+        let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        let settings = read_ai_settings(&conn)?;
+        // «Последние 20» считаются вместе с новым сообщением — одно место
+        // окна уходит под него.
+        let history = read_chat_history(&conn, workspace_id, Some(settings.context_length - 1))?;
+        let request = build_chat_request(&history, &text);
+        (settings, request)
+    };
+
+    let answer = run_blocking(move || {
+        crate::ollama::chat(&settings.ollama_url, &settings.model, &request)
+    })
+    .await?;
+
+    let state = app.state::<DbState>();
+    let mut conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+    save_chat_exchange(&mut conn, workspace_id, &text, &answer)
 }

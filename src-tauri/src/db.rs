@@ -415,6 +415,28 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
              ON custom_field_values(field_def_id);",
     )?;
 
+    // История чата с ИИ-ассистентом. Привязана к пространству, а не общая:
+    // у разных пространств разные доски, и разговор об одних не должен
+    // подмешиваться в вопросы о других.
+    //
+    // Пространства не удаляются, только архивируются, поэтому очистки в
+    // путях удаления эта таблица не требует — ссылки на `cards` у неё нет.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL,
+            role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+            content TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+        )",
+        (),
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_history_workspace ON chat_history(workspace_id, id)",
+        (),
+    )?;
+
     // ─── Migrations for pre-existing databases ───
     // (CREATE TABLE IF NOT EXISTS above only creates columns on brand-new tables;
     // existing installs need ALTER TABLE for newly introduced columns.)
@@ -546,6 +568,19 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
     // внутри неё означал бы, что один унесённый файл выдаёт оба.
     if !table_has_column(conn, "user_profile", "email_recipient") {
         conn.execute("ALTER TABLE user_profile ADD COLUMN email_recipient TEXT", ())?;
+    }
+
+    // Настройки ИИ-ассистента. Как и у почты, без `DEFAULT`: значения по
+    // умолчанию — константы в `ollama.rs`/`models.rs`, подставляются при
+    // чтении, и NULL означает «ещё не настраивали».
+    if !table_has_column(conn, "user_profile", "ai_ollama_url") {
+        conn.execute("ALTER TABLE user_profile ADD COLUMN ai_ollama_url TEXT", ())?;
+    }
+    if !table_has_column(conn, "user_profile", "ai_model") {
+        conn.execute("ALTER TABLE user_profile ADD COLUMN ai_model TEXT", ())?;
+    }
+    if !table_has_column(conn, "user_profile", "ai_context_length") {
+        conn.execute("ALTER TABLE user_profile ADD COLUMN ai_context_length INTEGER", ())?;
     }
 
     // Ensure the singleton user profile row exists

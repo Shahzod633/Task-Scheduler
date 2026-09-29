@@ -83,6 +83,10 @@ export async function renderSettingsPage(workspaceId) {
     const emailCard = createElement('div', { className: 'settings-card' });
     page.appendChild(emailCard);
 
+    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'ИИ-ассистент'));
+    const aiCard = createElement('div', { className: 'settings-card' });
+    page.appendChild(aiCard);
+
     page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Резервные копии'));
     const backupCard = createElement('div', { className: 'settings-card' });
     page.appendChild(backupCard);
@@ -94,7 +98,143 @@ export async function renderSettingsPage(workspaceId) {
     renderProfileFields(profileCard);
     renderRemindersSection(remindersCard);
     renderEmailSection(emailCard);
+    renderAiSection(aiCard);
     renderBackupSection(backupCard);
+}
+
+/**
+ * «ИИ-ассистент» — адрес локальной Ollama, модель и длина контекста.
+ *
+ * Список моделей берётся у самой Ollama по адресу, набранному в поле, — так
+ * «Проверить подключение» проверяет то, что на экране, ещё до «Сохранить».
+ * Ollama не запущена — список пуст, но сохранённая модель в нём остаётся:
+ * иначе сохранение формы молча стёрло бы выбор.
+ */
+async function renderAiSection(container) {
+    container.appendChild(createElement('p', { className: 'form-hint settings-ai__intro' },
+        'Ассистент работает через Ollama на этом компьютере — TaskFlow её не запускает ' +
+        'и без неё работает как обычно. Переписка никуда за пределы компьютера не уходит.'));
+
+    let settings;
+    try {
+        settings = await api.getAiSettings();
+    } catch (e) {
+        container.appendChild(createElement('p', { className: 'form-hint' },
+            'Не удалось прочитать настройки ассистента'));
+        return;
+    }
+
+    const urlInput = createElement('input', { className: 'form-input', placeholder: 'http://localhost:11434' });
+    urlInput.value = settings.ollama_url;
+    container.appendChild(field('Адрес Ollama', urlInput,
+        'Только этот компьютер: localhost, 127.0.0.1 или [::1]. Порт меняйте, если запускали Ollama не на 11434.'));
+
+    const modelSelect = createElement('select', { className: 'form-input' });
+    container.appendChild(field('Модель', modelSelect,
+        'Лёгкая модель отвечает быстрее. Для будущих функций с доступом к задачам нужна модель ' +
+        'с поддержкой инструментов — например, qwen2.5 или llama3.1.'));
+
+    const contextInput = createElement('input', {
+        className: 'form-input', type: 'number', min: '2', max: '200',
+    });
+    contextInput.value = String(settings.context_length);
+    container.appendChild(field('Длина контекста', contextInput,
+        'Сколько последних сообщений чата модель видит при каждом ответе. ' +
+        'Больше — лучше помнит разговор, но отвечает медленнее.'));
+
+    const actions = createElement('div', { className: 'settings-ai__actions' });
+    const saveBtn = createElement('button', { className: 'btn btn--primary' }, 'Сохранить');
+    const checkBtn = createElement('button', { className: 'btn btn--secondary' }, 'Проверить подключение');
+    actions.appendChild(saveBtn);
+    actions.appendChild(checkBtn);
+    container.appendChild(actions);
+
+    const result = createElement('p', { className: 'settings-ai__result', hidden: 'hidden' });
+    container.appendChild(result);
+
+    function showResult(text, kind) {
+        result.textContent = text;
+        result.className = `settings-ai__result settings-ai__result--${kind}`;
+        result.hidden = false;
+    }
+
+    /**
+     * Заполняет список: модели Ollama плюс сохранённая, если её там нет.
+     * `known` — список действительно получен; пока Ollama не ответила,
+     * сохранённую модель пропавшей не называем.
+     */
+    function fillModels(models, known = true) {
+        const chosen = modelSelect.value || settings.model;
+        modelSelect.innerHTML = '';
+        modelSelect.appendChild(createElement('option', { value: '' }, '— не выбрана —'));
+        const names = models.map(m => m.name);
+        for (const m of models) {
+            modelSelect.appendChild(createElement('option', { value: m.name },
+                m.size ? `${m.name} — ${(m.size / 1024 ** 3).toFixed(1).replace('.', ',')} ГБ` : m.name));
+        }
+        if (chosen && !names.includes(chosen)) {
+            modelSelect.appendChild(createElement('option', { value: chosen }, known ? `${chosen} — нет в Ollama` : chosen));
+        }
+        modelSelect.value = chosen || '';
+    }
+
+    /** Спрашивает Ollama по адресу из поля. Возвращает `true`, если ответила. */
+    async function check() {
+        showResult('Проверяем…', 'pending');
+        try {
+            const models = await api.ollamaCheckStatus(urlInput.value);
+            fillModels(models);
+            if (models.length === 0) {
+                showResult('Ollama запущена, но моделей в ней нет. Установите хотя бы одну: ' +
+                           'ollama pull qwen2.5:7b', 'error');
+            } else {
+                showResult(`Ollama отвечает. Моделей: ${models.length}.` +
+                           (modelSelect.value ? '' : ' Выберите модель и сохраните.'), 'ok');
+            }
+            return true;
+        } catch (e) {
+            fillModels([], false);
+            showResult(String(e), 'error');
+            return false;
+        }
+    }
+
+    fillModels([], false);
+    // Без плашки при открытии, если всё в порядке: результат проверки нужен,
+    // когда её просили, а список моделей — всегда.
+    api.ollamaCheckStatus(urlInput.value)
+        .then((models) => fillModels(models))
+        .catch(() => {});
+
+    checkBtn.addEventListener('click', async () => {
+        checkBtn.disabled = true;
+        try {
+            await check();
+        } finally {
+            checkBtn.disabled = false;
+        }
+    });
+
+    saveBtn.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        try {
+            const saved = await api.updateAiSettings(
+                urlInput.value,
+                modelSelect.value,
+                Number(contextInput.value) || 0,
+            );
+            // Бэкенд приводит адрес к виду без «/» и зажимает длину — показываем
+            // то, что действительно сохранилось.
+            settings = saved;
+            urlInput.value = saved.ollama_url;
+            contextInput.value = String(saved.context_length);
+            showToast('Настройки ассистента сохранены');
+        } catch (e) {
+            showResult(String(e), 'error');
+        } finally {
+            saveBtn.disabled = false;
+        }
+    });
 }
 
 /**

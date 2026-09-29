@@ -956,7 +956,14 @@
     color: var(--color-success);
 }
 
-.settings-email__actions {
+/* Пояснение над первым полем — иначе оно прилипает к подписи «Адрес». */
+.settings-ai__intro {
+    margin-bottom: var(--space-md);
+}
+
+/* Блок «ИИ-ассистент» устроен так же: действия и результат проверки. */
+.settings-email__actions,
+.settings-ai__actions {
     display: flex;
     gap: var(--space-sm);
     flex-wrap: wrap;
@@ -965,7 +972,8 @@
 
 /* Результат проверки остаётся на экране, в отличие от всплывающей подсказки:
    причину отказа сервера читают, перечитывают и переписывают в поиск. */
-.settings-email__result {
+.settings-email__result,
+.settings-ai__result {
     margin-top: var(--space-md);
     padding: var(--space-sm) var(--space-md);
     border-radius: var(--radius-md);
@@ -976,17 +984,20 @@
     overflow-wrap: anywhere;
 }
 
-.settings-email__result--pending {
+.settings-email__result--pending,
+.settings-ai__result--pending {
     background: var(--bg-input);
     color: var(--text-secondary);
 }
 
-.settings-email__result--ok {
+.settings-email__result--ok,
+.settings-ai__result--ok {
     background: var(--success-soft);
     color: var(--color-success);
 }
 
-.settings-email__result--error {
+.settings-email__result--error,
+.settings-ai__result--error {
     background: var(--danger-soft);
     color: var(--color-danger);
 }
@@ -1066,4 +1077,223 @@
     background: var(--bg-input);
     border: 1px solid var(--border-subtle);
     box-sizing: border-box;
+}
+
+/* ─── ИИ-ассистент (чат) ─────────────────────────────────────────────────
+   Страница не прокручивается целиком: прокручивается лента сообщений, а поле
+   ввода стоит внизу над доком. Иначе при длинной переписке поле уезжало бы
+   под док, и чтобы написать, пришлось бы листать вниз.
+   Под лентой нет сплошной заливки — фон пространства виден и здесь (§14.3). */
+.page--assistant {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    max-width: 880px;
+    margin: 0 auto;
+    gap: var(--space-md);
+}
+
+.assistant__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-md);
+}
+
+.assistant__title {
+    margin-bottom: var(--space-2xs);
+}
+
+.assistant__subtitle {
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+}
+
+.assistant__clear {
+    flex-shrink: 0;
+}
+
+.assistant__clear:disabled,
+.assistant__send:disabled {
+    opacity: 0.45;
+    cursor: default;
+    pointer-events: none;
+}
+
+/* Почему поговорить нельзя: Ollama не запущена, модель не выбрана. */
+.assistant__notice {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    padding: var(--space-md) var(--space-lg);
+    border-radius: var(--radius-lg);
+    background: var(--warning-soft);
+    border: 1px solid var(--border-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+}
+
+.assistant__notice[hidden] { display: none; }
+
+.assistant__notice-icon {
+    flex-shrink: 0;
+    display: inline-flex;
+    color: var(--color-warning);
+}
+
+.assistant__notice-icon svg {
+    width: 20px;
+    height: 20px;
+}
+
+.assistant__notice-text {
+    flex: 1;
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+
+.assistant__messages {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-2xs);
+}
+
+.assistant__empty {
+    margin: auto;
+    max-width: 360px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: var(--font-size-sm);
+    line-height: 1.6;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.assistant__empty-icon {
+    display: inline-flex;
+    color: var(--accent-text);
+}
+
+.assistant__empty-icon svg {
+    width: 32px;
+    height: 32px;
+}
+
+.assistant__row {
+    display: flex;
+    animation: rise-in-sm var(--duration-3) var(--ease-out) both;
+}
+
+.assistant__row--user { justify-content: flex-end; }
+.assistant__row--ai   { justify-content: flex-start; }
+
+.assistant__bubble {
+    position: relative;
+    max-width: 78%;
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-lg);
+    font-size: var(--font-size-md);
+    line-height: 1.55;
+    /* Ответ модели бывает с длинной ссылкой или строкой кода без пробелов. */
+    overflow-wrap: anywhere;
+}
+
+.assistant__bubble--user {
+    background: var(--accent-gradient);
+    color: var(--text-on-accent);
+    border-bottom-right-radius: var(--radius-xs);
+}
+
+.assistant__bubble--ai {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    color: var(--text-primary);
+    border-bottom-left-radius: var(--radius-xs);
+}
+
+/* `reset.css` снимает маркеры со всех списков, а `.markdown-body` их не
+   возвращает. Модель нумерует шаги постоянно, и «1. 2. 3.» без цифр читаются
+   как три несвязанные строки. Возвращено только здесь — заметки доски пока
+   живут как жили. */
+.assistant__text.markdown-body ul { list-style: disc; }
+.assistant__text.markdown-body ol { list-style: decimal; }
+.assistant__text.markdown-body > :last-child { margin-bottom: 0; }
+
+/* Текст человека — как написан, с его переводами строк. */
+.assistant__bubble--user .assistant__text {
+    white-space: pre-wrap;
+}
+
+.assistant__time {
+    display: block;
+    margin-top: var(--space-2xs);
+    font-size: var(--font-size-xs);
+    opacity: 0.65;
+    text-align: right;
+}
+
+/* «Модель думает» — три точки. Локальная модель отвечает от секунд до
+   минуты, и без движения на экране это читалось бы как зависание. */
+.assistant__typing {
+    display: inline-flex;
+    gap: 5px;
+    padding: var(--space-md);
+}
+
+.assistant__dot {
+    width: 7px;
+    height: 7px;
+    border-radius: var(--radius-round);
+    background: var(--text-secondary);
+    animation: pulse-soft 1.1s var(--ease-in-out) infinite;
+}
+
+.assistant__dot:nth-child(2) { animation-delay: 0.18s; }
+.assistant__dot:nth-child(3) { animation-delay: 0.36s; }
+
+.assistant__composer {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.assistant__error {
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    background: var(--danger-soft);
+    color: var(--color-danger);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.assistant__error[hidden] { display: none; }
+
+.assistant__input-row {
+    display: flex;
+    gap: var(--space-sm);
+    align-items: flex-end;
+}
+
+.assistant__input {
+    flex: 1;
+    min-width: 0;
+    resize: none;
+    max-height: 180px;
+    overflow-y: auto;
+    line-height: 1.5;
+}
+
+.assistant__send {
+    flex-shrink: 0;
+    padding: 10px 14px;
 }
