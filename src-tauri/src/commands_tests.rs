@@ -4992,3 +4992,200 @@ fn the_greeting_carries_the_report_and_is_saved_alone() {
     assert_eq!(saved.tools_used, ["get_productivity_report"]);
     assert_eq!(read_chat_history(&conn, 1, None).unwrap(), vec![saved]);
 }
+
+// ─── Повторяющиеся задачи (Фаза 6 пакета из шести функций) ───
+
+#[test]
+fn civil_day_arithmetic_round_trips() {
+    assert_eq!(days_from_civil(1970, 1, 1), 0);
+    assert_eq!(days_from_civil(2000, 3, 1), 11017);
+    assert_eq!(civil_from_days(0), (1970, 1, 1));
+    let mut z = days_from_civil(1999, 12, 25);
+    for _ in 0..2000 {
+        let (y, m, d) = civil_from_days(z);
+        assert_eq!(days_from_civil(y, m, d), z);
+        assert!(is_calendar_date(&format_day((y, m, d))));
+        z += 17;
+    }
+}
+
+#[test]
+fn next_due_steps_from_the_old_due_date() {
+    let today = "2026-09-27";
+    assert_eq!(next_due_date("2026-09-29", "daily", today).as_deref(), Some("2026-09-30"));
+    assert_eq!(next_due_date("2026-09-29", "weekly", today).as_deref(), Some("2026-10-06"));
+    assert_eq!(next_due_date("2026-09-29", "monthly", today).as_deref(), Some("2026-10-29"));
+    // Через границу года.
+    assert_eq!(next_due_date("2026-12-30", "weekly", today).as_deref(), Some("2027-01-06"));
+    assert_eq!(next_due_date("2026-12-15", "monthly", today).as_deref(), Some("2027-01-15"));
+    // Срок сегодня — следующий через шаг, а не сегодня же.
+    assert_eq!(next_due_date(today, "daily", today).as_deref(), Some("2026-09-28"));
+}
+
+#[test]
+fn a_month_step_keeps_to_the_calendar() {
+    let today = "2026-01-01";
+    assert_eq!(next_due_date("2026-01-31", "monthly", today).as_deref(), Some("2026-02-28"));
+    assert_eq!(next_due_date("2028-01-31", "monthly", today).as_deref(), Some("2028-02-29"));
+    assert_eq!(next_due_date("2026-03-31", "monthly", today).as_deref(), Some("2026-04-30"));
+}
+
+#[test]
+fn a_late_close_skips_to_the_first_date_not_in_the_past() {
+    let today = "2026-09-27";
+    // Срок 1 сентября, закрыли 27-го: +7 дало бы 8 сентября — уже прошло.
+    assert_eq!(next_due_date("2026-09-01", "weekly", today).as_deref(), Some("2026-09-29"),
+               "тот же день недели, первый не прошедший");
+    assert_eq!(next_due_date("2026-09-01", "daily", today).as_deref(), Some("2026-09-27"));
+    // Месяц — от исходного дня: 31 мая → 30 сентября, первое не прошедшее.
+    assert_eq!(next_due_date("2026-05-31", "monthly", today).as_deref(), Some("2026-09-30"));
+}
+
+#[test]
+fn unknown_rules_and_broken_dates_give_no_date() {
+    assert!(next_due_date("2026-09-29", "yearly", "2026-09-27").is_none());
+    assert!(next_due_date("29.09.2026", "daily", "2026-09-27").is_none());
+}
+
+#[test]
+fn recurrence_is_set_cleared_and_validated() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = assigned_card(&conn, first, "Отчёт", None, "Medium");
+    set_card_recurrence_in(&conn, card, Some("weekly")).unwrap();
+    assert_eq!(card_recurrence_in(&conn, card).unwrap().as_deref(), Some("weekly"));
+    assert_eq!(set_card_recurrence_in(&conn, card, Some("yearly")).unwrap_err(), ERR_BAD_RECURRENCE);
+    assert_eq!(card_recurrence_in(&conn, card).unwrap().as_deref(), Some("weekly"), "отказ ничего не меняет");
+    set_card_recurrence_in(&conn, card, None).unwrap();
+    assert!(card_recurrence_in(&conn, card).unwrap().is_none());
+    set_card_recurrence_in(&conn, card, Some("  ")).unwrap();
+    assert!(card_recurrence_in(&conn, card).unwrap().is_none(), "пустая строка — не повторять");
+    assert!(set_card_recurrence_in(&conn, 99999, Some("daily")).is_err());
+    // И сама схема не пустит мусор мимо команды.
+    assert!(conn.execute("UPDATE cards SET recurrence_rule = 'hourly' WHERE id = ?1", params![card]).is_err());
+}
+
+/// Повторяющаяся карточка со всем, что копируется, и тем, что нет.
+fn recurring_card(conn: &mut Connection) -> (i64, i64, i64, i64) {
+    let (board, first) = board_for_retries(conn);
+    let final_col = column_id_by_name(conn, board, "Закрыто");
+    let work = column_id_by_name(conn, board, "В работе");
+    let colleague = add_member(conn, "Коллега");
+    let card = assigned_card(conn, work, "Недельный отчёт", Some(colleague), "High");
+    let due = local_day(conn, 2);
+    conn.execute("UPDATE cards SET description = 'Собрать цифры', due_date = ?1 WHERE id = ?2", params![due, card]).unwrap();
+    set_card_recurrence_in(conn, card, Some("weekly")).unwrap();
+
+    conn.execute("INSERT INTO checklist_items (card_id, text, is_done, position) VALUES (?1, 'Выгрузка', 1, 0)", params![card]).unwrap();
+    conn.execute("INSERT INTO checklist_items (card_id, text, is_done, position) VALUES (?1, 'Письмо', 0, 1)", params![card]).unwrap();
+    conn.execute("INSERT INTO labels (board_id, name, color) VALUES (?1, 'Отчёты', '#f00')", params![board]).unwrap();
+    let label = conn.last_insert_rowid();
+    conn.execute("INSERT INTO card_labels (card_id, label_id) VALUES (?1, ?2)", params![card, label]).unwrap();
+    let text_field = create_custom_field_in(conn, board, "Клиент", "text", vec![]).unwrap().id;
+    let date_field = create_custom_field_in(conn, board, "Созвон", "date", vec![]).unwrap().id;
+    set_custom_field_value_in(conn, card, text_field, Some("ООО Ромашка".into())).unwrap();
+    set_custom_field_value_in(conn, card, date_field, Some("2026-10-01".into())).unwrap();
+    conn.execute("INSERT INTO card_comments (card_id, body) VALUES (?1, 'сделал половину')", params![card]).unwrap();
+    let me = self_member_id(conn);
+    conn.execute(
+        "INSERT INTO time_entries (card_id, member_id, started_at, ended_at, duration_seconds)
+         VALUES (?1, ?2, datetime('now', '-1 hour'), datetime('now'), 3600)",
+        params![card, me],
+    ).unwrap();
+    (card, first, final_col, colleague)
+}
+
+fn count_where(conn: &Connection, sql: &str, id: i64) -> i64 {
+    conn.query_row(sql, params![id], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn closing_a_recurring_card_spawns_the_next_one() {
+    let mut conn = test_db();
+    let (card, first, final_col, colleague) = recurring_card(&mut conn);
+    let old_due: String = conn.query_row("SELECT due_date FROM cards WHERE id = ?1", params![card], |r| r.get(0)).unwrap();
+
+    let spawn = move_card_in(&mut conn, card, final_col, 0).unwrap().expect("следующая карточка");
+    let expected_due = next_due_date(&old_due, "weekly", &local_day(&conn, 0)).unwrap();
+    assert_eq!(expected_due, local_day(&conn, 9), "срок старой +7 дней");
+    assert_eq!(spawn.title, "Недельный отчёт");
+    assert_eq!(spawn.due_date.as_deref(), Some(expected_due.as_str()));
+    assert_eq!(spawn.column_name, "Новые");
+    assert_eq!(spawn.rule, "weekly");
+
+    let (col, desc, due, prio, who, rule, done): (i64, String, Option<String>, String, Option<i64>, Option<String>, Option<String>) = conn.query_row(
+        "SELECT column_id, description, due_date, priority, assignee_id, recurrence_rule, completed_at FROM cards WHERE id = ?1",
+        params![spawn.card_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+    ).unwrap();
+    assert_eq!(col, first, "в первую рабочую колонку — туда же, куда возвращает попытка");
+    assert_eq!((desc.as_str(), due.as_deref(), prio.as_str(), who), ("Собрать цифры", Some(expected_due.as_str()), "High", Some(colleague)));
+    assert_eq!(rule.as_deref(), Some("weekly"), "цикл продолжается");
+    assert!(done.is_none());
+
+    // Чек-лист — копия, все пункты непомеченные, в том же порядке.
+    let items: Vec<(String, bool)> = conn.prepare("SELECT text, is_done FROM checklist_items WHERE card_id = ?1 ORDER BY position")
+        .unwrap().query_map(params![spawn.card_id], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0))).unwrap()
+        .collect::<Result<_, _>>().unwrap();
+    assert_eq!(items, vec![("Выгрузка".to_string(), false), ("Письмо".to_string(), false)]);
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM card_labels WHERE card_id = ?1", spawn.card_id), 1);
+    let values: Vec<String> = conn.prepare("SELECT value FROM custom_field_values WHERE card_id = ?1").unwrap()
+        .query_map(params![spawn.card_id], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    assert_eq!(values, vec!["ООО Ромашка".to_string()], "поле-дата не копируется");
+    // Комментарии и время — история того выполнения.
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM card_comments WHERE card_id = ?1", spawn.card_id), 0);
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM time_entries WHERE card_id = ?1", spawn.card_id), 0);
+
+    // Исходная — в «Закрыто», нетронутая.
+    let (old_col, old_rule): (i64, Option<String>) = conn.query_row(
+        "SELECT column_id, recurrence_rule FROM cards WHERE id = ?1", params![card], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!((old_col, old_rule.as_deref()), (final_col, Some("weekly")));
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM checklist_items WHERE card_id = ?1 AND is_done = 1", card), 1);
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM card_comments WHERE card_id = ?1", card), 1);
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM time_entries WHERE card_id = ?1", card), 1);
+}
+
+#[test]
+fn a_card_without_a_rule_spawns_nothing() {
+    let mut conn = test_db();
+    let (card, _first, final_col, _) = recurring_card(&mut conn);
+    set_card_recurrence_in(&conn, card, None).unwrap();
+    let before = count_where(&conn, "SELECT COUNT(*) FROM cards WHERE id > ?1", 0);
+    assert!(move_card_in(&mut conn, card, final_col, 0).unwrap().is_none());
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM cards WHERE id > ?1", 0), before);
+}
+
+#[test]
+fn shuffling_inside_the_final_column_does_not_spawn_again() {
+    let mut conn = test_db();
+    let (card, _first, final_col, _) = recurring_card(&mut conn);
+    move_card_in(&mut conn, card, final_col, 0).unwrap().unwrap();
+    let after_close = count_where(&conn, "SELECT COUNT(*) FROM cards WHERE id > ?1", 0);
+    assert!(move_card_in(&mut conn, card, final_col, 0).unwrap().is_none());
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM cards WHERE id > ?1", 0), after_close);
+}
+
+#[test]
+fn a_recurring_card_without_a_due_date_spawns_one_without_it() {
+    let mut conn = test_db();
+    let (board, first) = board_for_retries(&mut conn);
+    let final_col = column_id_by_name(&conn, board, "Закрыто");
+    let card = assigned_card(&conn, first, "Полить цветы", None, "Low");
+    set_card_recurrence_in(&conn, card, Some("daily")).unwrap();
+    let spawn = move_card_in(&mut conn, card, final_col, 0).unwrap().unwrap();
+    assert!(spawn.due_date.is_none());
+}
+
+#[test]
+fn a_late_recurring_card_is_not_born_overdue() {
+    let mut conn = test_db();
+    let (board, first) = board_for_retries(&mut conn);
+    let final_col = column_id_by_name(&conn, board, "Закрыто");
+    let card = overdue_card(&conn, first, "Планёрка", 20);
+    set_card_recurrence_in(&conn, card, Some("weekly")).unwrap();
+    let spawn = move_card_in(&mut conn, card, final_col, 0).unwrap().unwrap();
+    let due = spawn.due_date.unwrap();
+    assert!(due >= local_day(&conn, 0), "{due}");
+    assert!(due < local_day(&conn, 7), "первый не прошедший, а не на неделю дальше: {due}");
+}

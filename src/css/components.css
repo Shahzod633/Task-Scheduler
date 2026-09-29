@@ -482,6 +482,23 @@ select.form-input option {
     animation: slide-out-right var(--duration-3) var(--ease-swift) forwards;
 }
 
+/* Кнопка действия в тосте — «Открыть» у созданной следующей задачи. */
+.toast__action {
+    flex-shrink: 0;
+    margin-left: var(--space-xs);
+    padding: 4px 10px;
+    border-radius: var(--radius-md);
+    color: var(--accent-text);
+    font-weight: var(--font-weight-semibold);
+    background: var(--accent-light);
+    transition: background var(--transition-fast);
+}
+
+.toast__action:hover {
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+
 /* ─── Context Menu ─── */
 /* Позицию и слой задаёт js/popover.js — здесь только внешний вид. */
 .context-menu {

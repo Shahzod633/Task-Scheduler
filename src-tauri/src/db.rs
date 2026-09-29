@@ -597,6 +597,17 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
     if !table_has_column(conn, "cards", "completed_at") {
         conn.execute("ALTER TABLE cards ADD COLUMN completed_at TEXT", ())?;
     }
+    // Правило повторения задачи (Фаза 6 пакета из шести функций): при
+    // переносе в финальную колонку создаётся следующая карточка. NULL — не
+    // повторяется. `CHECK` — как у приоритета: неизвестное правило бэкенд не
+    // сумел бы посчитать.
+    if !table_has_column(conn, "cards", "recurrence_rule") {
+        conn.execute(
+            "ALTER TABLE cards ADD COLUMN recurrence_rule TEXT
+                 CHECK (recurrence_rule IN ('daily', 'weekly', 'monthly'))",
+            (),
+        )?;
+    }
     // Каждая запрошенная попытка — отдельной строкой: `cards.retry_count`
     // знает только «сколько всего», а отчёту нужно «сколько за неделю».
     // Каскада нет по общему правилу базы: удаление карточки, колонки и доски

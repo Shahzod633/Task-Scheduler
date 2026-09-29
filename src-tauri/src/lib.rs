@@ -68,6 +68,8 @@ pub fn run() {
             commands::update_card,
             commands::archive_card,
             commands::update_card_position,
+            commands::set_card_recurrence,
+            commands::get_card_recurrence,
 
             commands::list_card_comments,
             commands::create_card_comment,

@@ -382,6 +382,9 @@ fn get_card_details(conn: &rusqlite::Connection, workspace_id: i64, card_id: i64
     answer["author"] = json!(card.author.as_ref().map(|m| m.name.clone()));
     answer["created_at_utc"] = json!(card.created_at);
     answer["needs_attention"] = json!(card.is_mistake);
+    // daily / weekly / monthly или null — после закрытия такая задача
+    // рождает следующую.
+    answer["recurrence"] = json!(card_recurrence_in(conn, card_id)?);
     answer["checklist"] = json!(checklist);
     answer["time_spent"] = json!(format_duration(seconds));
     answer["time_spent_seconds"] = json!(seconds);
@@ -722,15 +725,8 @@ fn arg_opt_str(args: &Value, key: &str) -> CmdResult<Option<String>> {
 /// Первая рабочая колонка доски — туда встаёт новая задача. Финальная не
 /// годится никогда: задача, созданная сразу закрытой, — не задача.
 fn first_working_column(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<(i64, String)> {
-    conn.query_row(
-        "SELECT id, name FROM columns WHERE board_id = ?1 AND archived = 0 AND is_final = 0
-          ORDER BY position ASC, id ASC LIMIT 1",
-        params![board_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )
-    .optional()
-    .map_err(to_string_err)?
-    .ok_or_else(|| "На доске нет рабочей колонки — задачу некуда поставить".to_string())
+    first_working_column_in(conn, board_id)?
+        .ok_or_else(|| "На доске нет рабочей колонки — задачу некуда поставить".to_string())
 }
 
 const MAX_TITLE_CHARS: usize = 200;
@@ -823,6 +819,15 @@ pub(super) fn prepare(conn: &rusqlite::Connection, workspace_id: i64, name: &str
                     .collect();
                 if !open.is_empty() {
                     warnings.push(format!("Задачу блокируют незавершённые: {}.", open.join(", ")));
+                }
+                // Повторяющаяся задача после закрытия рождает следующую —
+                // человек должен знать об этом до «Да», а не узнать из ответа.
+                if let Some(rule) = card_recurrence_in(conn, card.id)? {
+                    let next = card.due_date.as_deref()
+                        .and_then(|d| next_due_date(d, &rule, &today_local(conn).ok()?))
+                        .map(|d| format!(", срок {}", date_label(&d)))
+                        .unwrap_or_default();
+                    warnings.push(format!("Задача повторяется — будет создана следующая{}.", next));
                 }
             }
             (json!({ "card_id": card.id, "column_id": column_id }),
@@ -948,8 +953,13 @@ pub(super) fn execute(conn: &mut rusqlite::Connection, workspace_id: i64, prepar
             let end: i64 = conn
                 .query_row("SELECT COUNT(*) FROM cards WHERE column_id = ?1", params![column_id], |r| r.get(0))
                 .map_err(to_string_err)?;
-            move_card_in(conn, id("card_id")?, column_id, end)?;
-            Ok(json!({ "ok": true }))
+            let spawned = move_card_in(conn, id("card_id")?, column_id, end)?;
+            Ok(match spawned {
+                Some(s) => json!({ "ok": true, "next_recurring_card": {
+                    "id": s.card_id, "title": s.title, "due_date": s.due_date, "column": s.column_name,
+                } }),
+                None => json!({ "ok": true }),
+            })
         }
         "update_card_priority" => {
             update_card_priority_in(conn, id("card_id")?, a["priority"].as_str().unwrap_or("Medium"))?;

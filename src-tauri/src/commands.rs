@@ -14,6 +14,7 @@ use crate::models::{
     EmailSettings, EmailReminder, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, DEFAULT_EMAIL_RECIPIENT,
     AiSettings, ChatMessage, AiActionLog, AiPendingAction, ChatTurn,
     DEFAULT_AI_CONTEXT_LENGTH, AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX,
+    RecurringSpawn, RECURRENCE_RULES,
 };
 
 #[cfg(test)]
@@ -919,8 +920,16 @@ pub const ERR_CARD_IS_FINAL: &str = "Карточка в финальной ко
 
 /// Moves a card to `new_column_id` at `new_position`, renumbering only the
 /// neighboring cards actually affected by the move (not the whole board).
+///
+/// Если это был въезд повторяющейся задачи в финальную колонку, возвращает
+/// созданную следующую карточку — экран говорит о ней тостом (§36).
 #[tauri::command]
-pub fn update_card_position(id: i64, new_column_id: i64, new_position: i64, state: State<'_, DbState>) -> CmdResult<()> {
+pub fn update_card_position(
+    id: i64,
+    new_column_id: i64,
+    new_position: i64,
+    state: State<'_, DbState>,
+) -> CmdResult<Option<RecurringSpawn>> {
     let mut conn = state.conn.lock().unwrap();
     move_card_in(&mut conn, id, new_column_id, new_position)
 }
@@ -932,22 +941,28 @@ fn move_card_in(
     id: i64,
     new_column_id: i64,
     new_position: i64,
-) -> CmdResult<()> {
+) -> CmdResult<Option<RecurringSpawn>> {
     let tx = conn.transaction().map_err(to_string_err)?;
-    move_card_within(&tx, id, new_column_id, new_position)?;
+    let spawned = move_card_within(&tx, id, new_column_id, new_position)?;
     tx.commit().map_err(to_string_err)?;
-    Ok(())
+    Ok(spawned)
 }
 
 /// Тело переноса без собственной транзакции — чтобы вызвать его изнутри уже
 /// открытой (так делает продление ретрая, которое переносит карточку и правит
 /// её поля одним куском).
+///
+/// Въезд в финальную колонку — единственный момент, когда задача считается
+/// сделанной, поэтому именно здесь, в той же транзакции, ставится
+/// `completed_at` и рождается следующая карточка повторяющейся задачи. Все
+/// три двери в финальную колонку (доска, «Список», Inbox) и ассистент ходят
+/// через эту функцию — и спрашивают подтверждение до вызова.
 fn move_card_within(
     tx: &rusqlite::Connection,
     id: i64,
     new_column_id: i64,
     new_position: i64,
-) -> CmdResult<()> {
+) -> CmdResult<Option<RecurringSpawn>> {
     let (old_column_id, old_position): (i64, i64) = tx.query_row(
         "SELECT column_id, position FROM cards WHERE id = ?1",
         params![id],
@@ -1007,15 +1022,244 @@ fn move_card_within(
         ).map_err(to_string_err)?;
         // Въезд в финальную колонку — момент завершения задачи. Выезда оттуда
         // нет (проверка выше), так что отметка ставится ровно один раз.
-        tx.execute(
+        let entered_final = tx.execute(
             "UPDATE cards SET completed_at = datetime('now')
               WHERE id = ?1 AND completed_at IS NULL
                 AND (SELECT is_final FROM columns WHERE id = ?2) = 1",
             params![id, new_column_id],
-        ).map_err(to_string_err)?;
+        ).map_err(to_string_err)? > 0;
+        if entered_final {
+            return spawn_recurring_card(tx, id);
+        }
     }
 
+    Ok(None)
+}
+
+// ─── Повторяющиеся задачи ───
+//
+// Правило повторения — не защищённое поле, как срок (§20.2): его можно
+// поставить, сменить и снять когда угодно. Срок следующей карточки считает
+// система, а не человек, поэтому правило «срок задаётся один раз» он не
+// нарушает — у новой карточки это её первый и единственный срок.
+
+#[tauri::command]
+pub fn set_card_recurrence(card_id: i64, rule: Option<String>, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    set_card_recurrence_in(&conn, card_id, rule.as_deref())
+}
+
+pub const ERR_BAD_RECURRENCE: &str = "Неизвестное правило повторения";
+
+fn set_card_recurrence_in(conn: &rusqlite::Connection, card_id: i64, rule: Option<&str>) -> CmdResult<()> {
+    let rule = rule.map(str::trim).filter(|r| !r.is_empty());
+    if let Some(r) = rule {
+        if !RECURRENCE_RULES.contains(&r) {
+            return Err(ERR_BAD_RECURRENCE.to_string());
+        }
+    }
+    let changed = conn
+        .execute("UPDATE cards SET recurrence_rule = ?1 WHERE id = ?2", params![rule, card_id])
+        .map_err(to_string_err)?;
+    if changed == 0 {
+        return Err("Карточка не найдена".to_string());
+    }
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_card_recurrence(card_id: i64, state: State<'_, DbState>) -> CmdResult<Option<String>> {
+    let conn = state.conn.lock().unwrap();
+    card_recurrence_in(&conn, card_id)
+}
+
+fn card_recurrence_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<Option<String>> {
+    conn.query_row("SELECT recurrence_rule FROM cards WHERE id = ?1", params![card_id], |r| r.get(0))
+        .map_err(to_string_err)
+}
+
+/// Первая рабочая колонка доски — первая по `position` среди не финальных и
+/// не архивных. Туда возвращает задачу попытка (§23.4), туда встаёт
+/// следующая карточка повторяющейся задачи и задача, созданная ассистентом.
+fn first_working_column_in(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<Option<(i64, String)>> {
+    conn.query_row(
+        "SELECT id, name FROM columns
+          WHERE board_id = ?1 AND archived = 0 AND is_final = 0
+          ORDER BY position ASC, id ASC LIMIT 1",
+        params![board_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(to_string_err)
+}
+
+/// Дни от 1970-01-01 до календарной даты (пролептический григорианский
+/// календарь). Алгоритм Говарда Хиннанта `days_from_civil` — без внешних
+/// крейтов: `chrono` ради трёх сложений дат в зависимости не нужен.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Обратное к `days_from_civil`.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+fn parse_day(s: &str) -> Option<(i64, i64, i64)> {
+    if !is_calendar_date(s) {
+        return None;
+    }
+    Some((s[0..4].parse().ok()?, s[5..7].parse().ok()?, s[8..10].parse().ok()?))
+}
+
+fn format_day((y, m, d): (i64, i64, i64)) -> String {
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        _ => 28,
+    }
+}
+
+/// Следующий срок повторяющейся задачи.
+///
+/// Шаг — день, неделя или месяц от **старого срока**, как просит задание.
+/// Месяц — календарный: 31 января + месяц = последний день февраля, а не
+/// 3 марта, как посчитал бы `date(…, '+1 month')` SQLite.
+///
+/// Если так посчитанный срок уже прошёл (задачу закрыли позже, чем через
+/// шаг), он сдвигается тем же шагом вперёд до первого не прошедшего дня —
+/// иначе следующая карточка рождалась бы просроченной и тут же попадала в
+/// «Требуют внимания». Пропущенные повторы не создаются: просроченная работа
+/// уже закрыта одной карточкой.
+fn next_due_date(old_due: &str, rule: &str, today: &str) -> Option<String> {
+    let (y, m, d) = parse_day(old_due)?;
+    let today = parse_day(today).map(|(y, m, d)| days_from_civil(y, m, d))?;
+    match rule {
+        "daily" | "weekly" => {
+            let step = if rule == "daily" { 1 } else { 7 };
+            let mut next = days_from_civil(y, m, d) + step;
+            if next < today {
+                next += (today - next + step - 1) / step * step;
+            }
+            Some(format_day(civil_from_days(next)))
+        }
+        "monthly" => {
+            // От исходного дня месяца, а не от уже подрезанного: у задачи на
+            // 31-е в апреле срок 30-е, но в мае снова 31-е.
+            let mut months = 1;
+            loop {
+                let total = y * 12 + (m - 1) + months;
+                let (ny, nm) = (total.div_euclid(12), total.rem_euclid(12) + 1);
+                let nd = d.min(days_in_month(ny, nm));
+                if days_from_civil(ny, nm, nd) >= today || months > 12 * 100 {
+                    return Some(format_day((ny, nm, nd)));
+                }
+                months += 1;
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Создаёт следующую карточку повторяющейся задачи — если у `card_id` есть
+/// правило. Вызывается из `move_card_within` при въезде в финальную колонку,
+/// в той же транзакции.
+///
+/// Копируется то, что описывает задачу: название, описание, исполнитель,
+/// приоритет, метки, пункты чек-листа (все непомеченными), правило (цикл
+/// продолжается) и значения пользовательских полей, **кроме полей-дат** —
+/// дата, как и срок, относится к конкретному выполнению. Не копируются
+/// комментарии и время: это история именно того выполнения.
+///
+/// Исходная карточка не меняется: она остаётся в финальной колонке как
+/// история.
+fn spawn_recurring_card(tx: &rusqlite::Connection, card_id: i64) -> CmdResult<Option<RecurringSpawn>> {
+    let (title, description, due, rule, assignee, priority, board_id): (
+        String, String, Option<String>, Option<String>, Option<i64>, String, i64,
+    ) = tx
+        .query_row(
+            "SELECT c.title, COALESCE(c.description, ''), c.due_date, c.recurrence_rule, c.assignee_id,
+                    COALESCE(c.priority, 'Medium'), col.board_id
+               FROM cards c JOIN columns col ON col.id = c.column_id
+              WHERE c.id = ?1",
+            params![card_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )
+        .map_err(to_string_err)?;
+    let Some(rule) = rule else { return Ok(None) };
+
+    let Some((column_id, column_name)) = first_working_column_in(tx, board_id)? else {
+        // Доска без единой рабочей колонки — ставить следующую карточку
+        // некуда. Перенос при этом не отменяется: задачу закрыли законно.
+        log::warn!("повтор: у доски {} нет рабочей колонки — следующая карточка не создана", board_id);
+        return Ok(None);
+    };
+
+    let today: String = tx
+        .query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))
+        .map_err(to_string_err)?;
+    let next_due = due.as_deref().and_then(|d| next_due_date(d, &rule, &today));
+
+    let card = create_card_in(tx, column_id, title.clone(), description.clone())?;
+    if next_due.is_some() {
+        update_card_in(tx, card.id, &title, &description, next_due.as_deref())?;
+    }
+    update_card_priority_in(tx, card.id, &priority)?;
+    update_card_assignee_in(tx, card.id, assignee)?;
+    tx.execute(
+        "UPDATE cards SET recurrence_rule = ?1 WHERE id = ?2",
+        params![rule, card.id],
+    )
+    .map_err(to_string_err)?;
+    tx.execute(
+        "INSERT INTO checklist_items (card_id, text, is_done, position)
+         SELECT ?1, text, 0, position FROM checklist_items WHERE card_id = ?2 ORDER BY position, id",
+        params![card.id, card_id],
+    )
+    .map_err(to_string_err)?;
+    tx.execute(
+        "INSERT INTO card_labels (card_id, label_id) SELECT ?1, label_id FROM card_labels WHERE card_id = ?2",
+        params![card.id, card_id],
+    )
+    .map_err(to_string_err)?;
+    tx.execute(
+        "INSERT INTO custom_field_values (card_id, field_def_id, value)
+         SELECT ?1, v.field_def_id, v.value
+           FROM custom_field_values v JOIN custom_field_defs d ON d.id = v.field_def_id
+          WHERE v.card_id = ?2 AND d.field_type != 'date'",
+        params![card.id, card_id],
+    )
+    .map_err(to_string_err)?;
+
+    log::info!("повтор: карточка {} → следующая {} (срок {:?})", card_id, card.id, next_due);
+    Ok(Some(RecurringSpawn {
+        card_id: card.id,
+        title,
+        due_date: next_due,
+        board_id,
+        column_name,
+        rule,
+    }))
 }
 
 // ─── Export / import ───
@@ -4649,15 +4893,9 @@ fn request_card_retry_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult
     // Первая рабочая колонка доски: после костяка это «Новые», но правило
     // выражено через `is_final`, а не через имя, — доска могла приехать
     // импортом из файла и костяка не иметь.
-    let working_column: i64 = conn
-        .query_row(
-            "SELECT id FROM columns
-             WHERE board_id = ?1 AND archived = 0 AND is_final = 0
-             ORDER BY position ASC, id ASC LIMIT 1",
-            params![board_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| ERR_NO_WORKING_COLUMN.to_string())?;
+    let working_column: i64 = first_working_column_in(conn, board_id)?
+        .map(|(id, _)| id)
+        .ok_or_else(|| ERR_NO_WORKING_COLUMN.to_string())?;
 
     let tx = conn.unchecked_transaction().map_err(to_string_err)?;
 

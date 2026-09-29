@@ -602,6 +602,28 @@ fn needs_attention_matches_the_attention_section() {
     assert_eq!(v["right_now"]["needs_attention"], section);
 }
 
+
+#[test]
+fn closing_a_recurring_card_through_the_assistant_warns_and_reports_the_next_one() {
+    let mut f = fixture();
+    let due = date_offset(&f.conn, 2);
+    let c = card(&f.conn, f.open_col, "Недельный отчёт", Some(&due), None);
+    f.conn.execute("UPDATE cards SET recurrence_rule = 'weekly' WHERE id = ?1", params![c]).unwrap();
+
+    let details = call(&f, "get_card_details", json!({"card_id": c}));
+    assert_eq!(details["recurrence"], "weekly");
+
+    let p = prepared(&f, "move_card", json!({"card_id": c, "column_id": f.final_col}));
+    let next = date_label(&date_offset(&f.conn, 9));
+    assert!(p.warnings.iter().any(|w| w.contains("повторяется") && w.contains(&next)), "{:?}", p.warnings);
+
+    let result = execute(&mut f.conn, f.ws, &p).unwrap();
+    let spawned = &result["next_recurring_card"];
+    assert_eq!(spawned["title"], "Недельный отчёт");
+    assert_eq!(spawned["due_date"], date_offset(&f.conn, 9));
+    assert_eq!(spawned["column"], "В работе");
+}
+
 // ─── Живая проверка с настоящей моделью ───
 
 fn live_settings() -> AiSettings {

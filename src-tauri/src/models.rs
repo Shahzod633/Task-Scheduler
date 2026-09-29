@@ -470,6 +470,23 @@ pub const ARCHIVE_REASON_MAX_RETRIES: &str = "incomplete_max_retries";
 /// schema. Stored in English; the interface renders its own Russian labels.
 pub const PRIORITIES: [&str; 3] = ["Low", "Medium", "High"];
 
+/// Допустимые значения `cards.recurrence_rule` — те же, что в `CHECK` схемы.
+/// NULL — задача не повторяется.
+pub const RECURRENCE_RULES: [&str; 3] = ["daily", "weekly", "monthly"];
+
+/// Следующая карточка повторяющейся задачи, созданная при переносе
+/// предыдущей в финальную колонку. Возвращается из `update_card_position`,
+/// чтобы экран сказал об этом тостом и дал её открыть.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct RecurringSpawn {
+    pub card_id: i64,
+    pub title: String,
+    pub due_date: Option<String>,
+    pub board_id: i64,
+    pub column_name: String,
+    pub rule: String,
+}
+
 // ─── Workspace-wide card list (the "Список" screen) ───
 
 /// One row of the list screen: a card plus everything needed to render and edit

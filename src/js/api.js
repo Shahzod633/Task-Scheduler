@@ -126,8 +126,26 @@ export async function updateCard(id, title, description, dueDate) {
     return await invoke('update_card', { id, title, description, dueDate });
 }
 
+/**
+ * Переносит карточку. Если это был въезд повторяющейся задачи в финальную
+ * колонку, возвращает созданную следующую карточку —
+ * `{ card_id, title, due_date, board_id, column_name, rule }`, иначе null.
+ * Показывать её — `announceRecurringSpawn` из board.js.
+ */
 export async function updateCardPosition(id, newColumnId, newPosition) {
     return await invoke('update_card_position', { id, newColumnId, newPosition });
+}
+
+/**
+ * Правило повторения карточки: 'daily' | 'weekly' | 'monthly' или null —
+ * не повторять. Можно менять когда угодно — это не срок.
+ */
+export async function setCardRecurrence(cardId, rule) {
+    return await invoke('set_card_recurrence', { cardId, rule });
+}
+
+export async function getCardRecurrence(cardId) {
+    return await invoke('get_card_recurrence', { cardId });
 }
 
 export async function archiveCard(id) {
