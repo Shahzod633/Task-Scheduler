@@ -7,6 +7,7 @@ use crate::models::{
     Workspace, Board, Column, Card, Notification, UserProfile, BoardNotes, BackupInfo,
     BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, ChecklistItemExport,
     CommentExport, MemberExport, DatabaseExport,
+    CustomFieldExport, FieldValueExport, TimeEntryExport, DependencyExport,
     Member, ChecklistItem, CardComment, CardRow, CardDependencies, DependencyCard, BoardColumns, WorkspaceCardList, WorkloadRow, MEMBER_COLORS, PRIORITIES,
     TimeEntry, ActiveTimer, StoppedTimer, StartTimerResult,
     CustomField, CustomFieldValue, CUSTOM_FIELD_TYPES,
@@ -1318,6 +1319,8 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
              JOIN cards c ON c.assignee_id = m.id
                           OR c.author_id = m.id
                           OR m.id IN (SELECT cc.author_id FROM card_comments cc WHERE cc.card_id = c.id)
+                          OR m.id IN (SELECT te.member_id FROM time_entries te
+                                       WHERE te.card_id = c.id AND te.ended_at IS NOT NULL)
              JOIN columns col ON col.id = c.column_id
              WHERE col.board_id = ?1
              ORDER BY m.id ASC",
@@ -1351,7 +1354,8 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .prepare(
             "SELECT id, title, description, position, due_date, archived,
                     is_mistake, mistake_marked_at, mistake_resolved_at,
-                    assignee_id, author_id, priority, retry_count, archive_reason
+                    assignee_id, author_id, priority, retry_count, archive_reason,
+                    created_at, completed_at, recurrence_rule
              FROM cards WHERE column_id = ?1 ORDER BY position ASC",
         )
         .map_err(to_string_err)?;
@@ -1372,6 +1376,24 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .prepare(
             "SELECT body, created_at, author_id FROM card_comments
              WHERE card_id = ?1 ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(to_string_err)?;
+    // Значения полей: `field_def_id` — настоящий id поля, он же
+    // экспорт-локальный в `custom_fields` ниже.
+    let mut field_value_stmt = conn
+        .prepare(
+            "SELECT field_def_id, value FROM custom_field_values
+             WHERE card_id = ?1 ORDER BY field_def_id ASC",
+        )
+        .map_err(to_string_err)?;
+    // Только законченные сессии: у идущей нет длительности, а в другой
+    // установке она стала бы чужим тикающим таймером.
+    let mut time_stmt = conn
+        .prepare(
+            "SELECT member_id, started_at, ended_at, COALESCE(duration_seconds, 0), note
+               FROM time_entries
+              WHERE card_id = ?1 AND ended_at IS NOT NULL
+              ORDER BY started_at ASC, id ASC",
         )
         .map_err(to_string_err)?;
 
@@ -1400,6 +1422,14 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
                         priority: row.get(11)?,
                         checklist: Vec::new(),
                         comments: Vec::new(),
+                        // Настоящий id карточки служит экспорт-локальным — как
+                        // у меток: на него ссылаются зависимости в файле.
+                        id: Some(row.get(0)?),
+                        created_at: row.get(14)?,
+                        completed_at: row.get(15)?,
+                        recurrence_rule: row.get(16)?,
+                        field_values: Vec::new(),
+                        time_entries: Vec::new(),
                     },
                 ))
             })
@@ -1436,6 +1466,26 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
                 .map_err(to_string_err)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(to_string_err)?;
+            card.field_values = field_value_stmt
+                .query_map(params![card_id], |row| {
+                    Ok(FieldValueExport { field_id: row.get(0)?, value: row.get(1)? })
+                })
+                .map_err(to_string_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(to_string_err)?;
+            card.time_entries = time_stmt
+                .query_map(params![card_id], |row| {
+                    Ok(TimeEntryExport {
+                        member_id: row.get(0)?,
+                        started_at: row.get(1)?,
+                        ended_at: row.get(2)?,
+                        duration_seconds: row.get(3)?,
+                        note: row.get(4)?,
+                    })
+                })
+                .map_err(to_string_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(to_string_err)?;
             cards.push(card);
         }
 
@@ -1446,6 +1496,45 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
             cards,
         });
     }
+
+    let (notes, notes_updated_at): (String, Option<String>) = conn
+        .query_row(
+            "SELECT content, updated_at FROM board_notes WHERE board_id = ?1",
+            params![board_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(to_string_err)?
+        .unwrap_or_default();
+
+    let custom_fields: Vec<CustomFieldExport> = custom_fields_in(conn, board_id)?
+        .into_iter()
+        .map(|f| CustomFieldExport {
+            id: f.id,
+            name: f.name,
+            field_type: f.field_type,
+            select_options: f.select_options,
+        })
+        .collect();
+
+    // Оба конца — карточки этой доски. Архивные тоже: они в файле есть
+    // (снимок целиком), и связь с ними переживает архив (§31.1).
+    let mut dependency_stmt = conn
+        .prepare(
+            "SELECT d.blocker_card_id, d.blocked_card_id FROM card_dependencies d
+               JOIN cards a ON a.id = d.blocker_card_id JOIN columns ac ON ac.id = a.column_id
+               JOIN cards b ON b.id = d.blocked_card_id JOIN columns bc ON bc.id = b.column_id
+              WHERE ac.board_id = ?1 AND bc.board_id = ?1
+              ORDER BY d.id ASC",
+        )
+        .map_err(to_string_err)?;
+    let dependencies: Vec<DependencyExport> = dependency_stmt
+        .query_map(params![board_id], |row| {
+            Ok(DependencyExport { blocker_id: row.get(0)?, blocked_id: row.get(1)? })
+        })
+        .map_err(to_string_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(to_string_err)?;
 
     let exported_at: String = conn
         .query_row("SELECT datetime('now', 'localtime')", [], |row| row.get(0))
@@ -1461,6 +1550,10 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
             labels,
             members,
             columns,
+            notes,
+            notes_updated_at,
+            custom_fields,
+            dependencies,
         },
     })
 }
@@ -1566,6 +1659,34 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
         member_id_map.insert(member.id, new_id);
     }
 
+    // Заметки доски — одна страница (§26). Время правки переносится как есть,
+    // как у комментариев.
+    if !export.board.notes.trim().is_empty() {
+        tx.execute(
+            "INSERT INTO board_notes (board_id, content, updated_at)
+             VALUES (?1, ?2, COALESCE(?3, datetime('now')))",
+            params![board_id, export.board.notes, export.board.notes_updated_at],
+        ).map_err(to_string_err)?;
+    }
+
+    // Пользовательские поля — через ту же `create_custom_field_in`, что и
+    // интерфейс: те же проверки имени, типа и вариантов. Поле, которое она
+    // не приняла (руками испорченный файл, повтор имени), пропускается вместе
+    // со своими значениями, а не роняет импорт — как метка, которой нет.
+    // Экспорт-локальный id поля → (новый id, тип).
+    let mut field_id_map: HashMap<i64, (i64, String)> = HashMap::new();
+    for field in &export.board.custom_fields {
+        match create_custom_field_in(&tx, board_id, &field.name, &field.field_type, field.select_options.clone()) {
+            Ok(created) => {
+                field_id_map.insert(field.id, (created.id, created.field_type));
+            }
+            Err(e) => log::warn!("импорт: поле «{}» пропущено: {}", field.name, e),
+        }
+    }
+
+    // Экспорт-локальный id карточки → новый id, для зависимостей в конце.
+    let mut card_id_map: HashMap<i64, i64> = HashMap::new();
+
     for (col_index, column) in export.board.columns.iter().enumerate() {
         tx.execute(
             "INSERT INTO columns (board_id, name, position, archived, is_final, is_required)
@@ -1584,18 +1705,69 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
             let author_id = card.author_id.and_then(|id| member_id_map.get(&id).copied());
             let priority = normalize_priority(card.priority.as_deref());
 
+            // Неизвестное правило повторения (руками поправленный файл) —
+            // «не повторять», а не отказ: `CHECK` схемы уронил бы весь импорт.
+            let recurrence = card.recurrence_rule.as_deref()
+                .filter(|r| RECURRENCE_RULES.contains(r));
+            // Пустое время создания — файл старой сборки: пусть его проставит
+            // база, как раньше.
+            let created_at = card.created_at.as_deref().filter(|c| !c.trim().is_empty());
+
             tx.execute(
                 "INSERT INTO cards (column_id, title, description, position, due_date, archived,
                                     is_mistake, mistake_marked_at, mistake_resolved_at,
-                                    assignee_id, author_id, priority, retry_count, archive_reason)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                    assignee_id, author_id, priority, retry_count, archive_reason,
+                                    created_at, completed_at, recurrence_rule)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                         COALESCE(?15, datetime('now')), ?16, ?17)",
                 params![
                     column_id, card.title, card.description, card_index as i64, card.due_date,
                     card.archived, card.is_mistake as i64, card.mistake_marked_at, card.mistake_resolved_at,
-                    assignee_id, author_id, priority, card.retry_count, card.archive_reason
+                    assignee_id, author_id, priority, card.retry_count, card.archive_reason,
+                    created_at, card.completed_at, recurrence
                 ],
             ).map_err(to_string_err)?;
             let card_id = tx.last_insert_rowid();
+            if let Some(old_id) = card.id {
+                card_id_map.insert(old_id, card_id);
+            }
+
+            // Значения полей — через ту же проверку, что и окно карточки.
+            // Исключение — выбор из списка: вариант могли убрать уже после
+            // того, как его выбрали, а значение по решению §31.4 остаётся
+            // текстом как было. В исходной базе оно так и лежало, значит и в
+            // перенесённой должно.
+            for fv in &card.field_values {
+                let Some((new_field_id, field_type)) = field_id_map.get(&fv.field_id) else { continue };
+                let value = fv.value.trim();
+                if value.is_empty() {
+                    continue;
+                }
+                if set_custom_field_value_in(&tx, card_id, *new_field_id, Some(value.to_string())).is_err()
+                    && field_type == "select"
+                {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO custom_field_values (card_id, field_def_id, value) VALUES (?1, ?2, ?3)",
+                        params![card_id, new_field_id, value],
+                    ).map_err(to_string_err)?;
+                }
+            }
+
+            // Законченные сессии времени. Без начала или конца сессия —
+            // обрывок руками поправленного файла: пропускается. Идущих в файле
+            // не бывает, а вставить такую значило бы запустить таймер.
+            for entry in &card.time_entries {
+                if entry.started_at.trim().is_empty() || entry.ended_at.trim().is_empty() {
+                    continue;
+                }
+                let member_id = entry.member_id.and_then(|id| member_id_map.get(&id).copied());
+                tx.execute(
+                    "INSERT INTO time_entries (card_id, member_id, started_at, ended_at, duration_seconds, note)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![card_id, member_id, entry.started_at, entry.ended_at,
+                            entry.duration_seconds.max(0), entry.note],
+                ).map_err(to_string_err)?;
+            }
 
             for old_label_id in &card.label_ids {
                 // A card referencing a label missing from the file is skipped
@@ -1649,6 +1821,19 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
                     params![card_id, text, item.is_done as i64, item_index as i64],
                 ).map_err(to_string_err)?;
             }
+        }
+    }
+
+    // Зависимости — когда все карточки уже на месте. Через ту же
+    // `create_dependency`, что и интерфейс: она отвергает петлю на себя,
+    // повтор и цикл. Отвергнутое ребро (или ссылка на карточку, которой в
+    // файле нет) пропускается — как недостающая метка.
+    for dep in &export.board.dependencies {
+        let (Some(&blocker), Some(&blocked)) = (card_id_map.get(&dep.blocker_id), card_id_map.get(&dep.blocked_id)) else {
+            continue;
+        };
+        if let Err(e) = create_dependency(&tx, blocker, blocked) {
+            log::warn!("импорт: зависимость {} → {} пропущена: {}", dep.blocker_id, dep.blocked_id, e);
         }
     }
 

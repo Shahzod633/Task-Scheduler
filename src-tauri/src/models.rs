@@ -555,7 +555,7 @@ pub struct BoardExport {
     pub board: BoardExportBody,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BoardExportBody {
     pub name: String,
     #[serde(default)]
@@ -571,6 +571,64 @@ pub struct BoardExportBody {
     pub members: Vec<MemberExport>,
     #[serde(default)]
     pub columns: Vec<ColumnExport>,
+    // ─── Добавлено 2026-09-27 (§37) ───
+    // Всё ниже — через `default`, версия формата не поднималась (§15): старая
+    // сборка прочтёт такой файл без этих данных, а файл старой сборки —
+    // доска без заметок, полей и связей, а не ошибка.
+    /// Markdown-заметки доски (§26). Пустая строка — заметок не было.
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub notes_updated_at: Option<String>,
+    /// Пользовательские поля доски (§30) — с экспорт-локальными id, на них
+    /// ссылаются `CardExport::field_values`.
+    #[serde(default)]
+    pub custom_fields: Vec<CustomFieldExport>,
+    /// Зависимости между карточками **этой** доски (§28) — по
+    /// `CardExport::id`. Связь с карточкой на другой доске в файл не попадает:
+    /// второго конца в нём нет, и восстановить её было бы не к чему.
+    #[serde(default)]
+    pub dependencies: Vec<DependencyExport>,
+}
+
+/// Пользовательское поле доски в файле экспорта. `id` — экспорт-локальный.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CustomFieldExport {
+    pub id: i64,
+    pub name: String,
+    pub field_type: String,
+    #[serde(default)]
+    pub select_options: Vec<String>,
+}
+
+/// Значение пользовательского поля на карточке: `field_id` —
+/// экспорт-локальный id из `BoardExportBody::custom_fields`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FieldValueExport {
+    pub field_id: i64,
+    pub value: String,
+}
+
+/// Законченная сессия учёта времени (§29). Идущая в файл не попадает: у неё
+/// ещё нет длительности, а в другой установке она стала бы чужим таймером.
+/// `member_id` — экспорт-локальный, как у исполнителя.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimeEntryExport {
+    #[serde(default)]
+    pub member_id: Option<i64>,
+    pub started_at: String,
+    pub ended_at: String,
+    #[serde(default)]
+    pub duration_seconds: i64,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Ребро «`blocker_id` блокирует `blocked_id`» по `CardExport::id`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DependencyExport {
+    pub blocker_id: i64,
+    pub blocked_id: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -645,7 +703,7 @@ pub struct CommentExport {
     pub author_id: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CardExport {
     pub title: String,
     #[serde(default)]
@@ -692,6 +750,25 @@ pub struct CardExport {
     /// сборка должна прочитать файл без комментариев, а не отвергнуть его.
     #[serde(default)]
     pub comments: Vec<CommentExport>,
+    // ─── Добавлено 2026-09-27 (§37), всё через `default` ───
+    /// Экспорт-локальный id карточки — на него ссылаются
+    /// `BoardExportBody::dependencies`. `None` в файлах старых сборок.
+    #[serde(default)]
+    pub id: Option<i64>,
+    /// Когда задачу завели и когда закрыли (UTC, как в базе). Без них
+    /// перенесённая доска выглядела бы в сводке продуктивности (§35) целиком
+    /// «созданной сегодня».
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    /// Правило повторения (§36): daily / weekly / monthly.
+    #[serde(default)]
+    pub recurrence_rule: Option<String>,
+    #[serde(default)]
+    pub field_values: Vec<FieldValueExport>,
+    #[serde(default)]
+    pub time_entries: Vec<TimeEntryExport>,
 }
 
 /// Result of a full database export, so the Settings screen can confirm what

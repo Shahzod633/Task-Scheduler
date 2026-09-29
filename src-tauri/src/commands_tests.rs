@@ -188,6 +188,7 @@ fn import_rejects_a_newer_format_and_writes_nothing() {
             labels: vec![],
             members: vec![],
             columns: vec![],
+            ..Default::default()
         },
     };
 
@@ -210,6 +211,7 @@ fn import_rejects_a_board_without_a_name() {
             labels: vec![],
             members: vec![],
             columns: vec![],
+            ..Default::default()
         },
     };
     assert!(import_board_into(&mut conn, 1, export).is_err());
@@ -253,8 +255,10 @@ fn import_skips_label_links_the_file_does_not_define() {
                     priority: None,
                     checklist: Vec::new(),
                     comments: Vec::new(),
+                    ..Default::default()
                 }],
             }],
+            ..Default::default()
         },
     };
 
@@ -5188,4 +5192,220 @@ fn a_late_recurring_card_is_not_born_overdue() {
     let due = spawn.due_date.unwrap();
     assert!(due >= local_day(&conn, 0), "{due}");
     assert!(due < local_day(&conn, 7), "первый не прошедший, а не на неделю дальше: {due}");
+}
+
+// ─── Экспорт доски: заметки, поля, зависимости, время (§37) ───
+
+/// Доска со всем, что добавилось в экспорт: заметки, четыре поля (одно с
+/// устаревшим вариантом выбора), зависимость внутри доски и через доски,
+/// законченная и идущая сессии, повторение, дата завершения.
+struct RichBoard {
+    board: i64,
+    report: i64,
+    data: i64,
+    colleague: i64,
+}
+
+fn rich_board(conn: &mut Connection) -> RichBoard {
+    let board = create_board_in(conn, 1, "Богатая доска", "").unwrap().id;
+    let first = column_id_by_name(conn, board, "Новые");
+    let final_col = column_id_by_name(conn, board, "Закрыто");
+    let colleague = add_member(conn, "Бухгалтер");
+
+    conn.execute(
+        "INSERT INTO board_notes (board_id, content, updated_at) VALUES (?1, '# План\n- пункт', '2026-09-01 10:00:00')",
+        params![board],
+    ).unwrap();
+
+    let report = assigned_card(conn, first, "Отчёт", None, "High");
+    let data = assigned_card(conn, first, "Данные", None, "Medium");
+    let done = assigned_card(conn, final_col, "Сдано", None, "Low");
+    conn.execute("UPDATE cards SET created_at = '2026-08-01 09:00:00', recurrence_rule = 'monthly' WHERE id = ?1", params![report]).unwrap();
+    conn.execute("UPDATE cards SET completed_at = '2026-09-20 12:00:00' WHERE id = ?1", params![done]).unwrap();
+
+    let client = create_custom_field_in(conn, board, "Клиент", "text", vec![]).unwrap().id;
+    let hours = create_custom_field_in(conn, board, "Часы", "number", vec![]).unwrap().id;
+    let meeting = create_custom_field_in(conn, board, "Созвон", "date", vec![]).unwrap().id;
+    let stage = create_custom_field_in(conn, board, "Этап", "select", vec!["Черновик".into(), "Готов".into()]).unwrap().id;
+    set_custom_field_value_in(conn, report, client, Some("ООО Ромашка".into())).unwrap();
+    set_custom_field_value_in(conn, report, hours, Some("3,5".into())).unwrap();
+    set_custom_field_value_in(conn, report, meeting, Some("2026-10-01".into())).unwrap();
+    set_custom_field_value_in(conn, report, stage, Some("Черновик".into())).unwrap();
+    // Вариант «Черновик» убрали после того, как его выбрали, — значение
+    // остаётся текстом (§31.4).
+    update_custom_field_options_in(conn, stage, vec!["Готов".into(), "Сдан".into()]).unwrap();
+
+    create_dependency(conn, data, report).unwrap();
+    // Связь с карточкой другой доски в файл не попадает.
+    let other_board = create_board_in(conn, 1, "Чужая", "").unwrap().id;
+    let outsider = assigned_card(conn, column_id_by_name(conn, other_board, "Новые"), "Снаружи", None, "Low");
+    create_dependency(conn, outsider, report).unwrap();
+
+    conn.execute(
+        "INSERT INTO time_entries (card_id, member_id, started_at, ended_at, duration_seconds, note)
+         VALUES (?1, ?2, '2026-09-10 08:00:00', '2026-09-10 10:30:00', 9000, 'сверка')",
+        params![report, colleague],
+    ).unwrap();
+    let me = self_member_id(conn);
+    start_timer_in(conn, data, me).unwrap();
+
+    RichBoard { board, report, data, colleague }
+}
+
+fn round_trip(conn: &mut Connection, board: i64) -> (BoardExport, i64) {
+    let json = serde_json::to_string(&build_board_export(conn, board).unwrap()).unwrap();
+    let parsed: BoardExport = serde_json::from_str(&json).unwrap();
+    let export = serde_json::from_str(&json).unwrap();
+    (export, import_board_into(conn, 1, parsed).unwrap())
+}
+
+fn card_by_title(conn: &Connection, board: i64, title: &str) -> i64 {
+    conn.query_row(
+        "SELECT c.id FROM cards c JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1 AND c.title = ?2",
+        params![board, title],
+        |r| r.get(0),
+    ).unwrap()
+}
+
+#[test]
+fn the_export_carries_notes_fields_dependencies_and_time() {
+    let mut conn = test_db();
+    let rich = rich_board(&mut conn);
+    let export = build_board_export(&conn, rich.board).unwrap();
+    let body = &export.board;
+
+    assert_eq!(body.notes, "# План\n- пункт");
+    assert_eq!(body.notes_updated_at.as_deref(), Some("2026-09-01 10:00:00"));
+    assert_eq!(body.custom_fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Клиент", "Часы", "Созвон", "Этап"]);
+    assert_eq!(body.dependencies.len(), 1, "связь с чужой доской в файл не идёт");
+    assert_eq!((body.dependencies[0].blocker_id, body.dependencies[0].blocked_id), (rich.data, rich.report));
+
+    let report = body.columns.iter().flat_map(|c| &c.cards).find(|c| c.title == "Отчёт").unwrap();
+    assert_eq!(report.id, Some(rich.report));
+    assert_eq!(report.recurrence_rule.as_deref(), Some("monthly"));
+    assert_eq!(report.created_at.as_deref(), Some("2026-08-01 09:00:00"));
+    assert_eq!(report.field_values.len(), 4);
+    assert_eq!(report.time_entries.len(), 1);
+    assert_eq!(report.time_entries[0].duration_seconds, 9000);
+    // Участник, на которого ссылается только сессия, тоже в файле.
+    let member_ids: Vec<i64> = body.members.iter().map(|m| m.id).collect();
+    assert!(member_ids.contains(&rich.colleague));
+
+    let data = body.columns.iter().flat_map(|c| &c.cards).find(|c| c.title == "Данные").unwrap();
+    assert!(data.time_entries.is_empty(), "идущая сессия в файл не попадает");
+}
+
+#[test]
+fn a_rich_board_survives_the_round_trip() {
+    let mut conn = test_db();
+    let rich = rich_board(&mut conn);
+    let (_file, new_board) = round_trip(&mut conn, rich.board);
+
+    let (notes, updated): (String, String) = conn.query_row(
+        "SELECT content, updated_at FROM board_notes WHERE board_id = ?1", params![new_board], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!((notes.as_str(), updated.as_str()), ("# План\n- пункт", "2026-09-01 10:00:00"));
+
+    let report = card_by_title(&conn, new_board, "Отчёт");
+    let data = card_by_title(&conn, new_board, "Данные");
+    let done = card_by_title(&conn, new_board, "Сдано");
+    assert_ne!(report, rich.report);
+
+    let (created, rule): (String, Option<String>) = conn.query_row(
+        "SELECT created_at, recurrence_rule FROM cards WHERE id = ?1", params![report], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!((created.as_str(), rule.as_deref()), ("2026-08-01 09:00:00", Some("monthly")));
+    let completed: Option<String> = conn.query_row("SELECT completed_at FROM cards WHERE id = ?1", params![done], |r| r.get(0)).unwrap();
+    assert_eq!(completed.as_deref(), Some("2026-09-20 12:00:00"));
+
+    // Поля — новые, свои для новой доски, со всеми значениями, включая
+    // устаревший вариант выбора.
+    let fields = custom_fields_in(&conn, new_board).unwrap();
+    assert_eq!(fields.len(), 4);
+    let value_of = |name: &str| -> Option<String> {
+        fields.iter().find(|f| f.name == name).unwrap()
+            .values.iter().find(|v| v.card_id == report).map(|v| v.value.clone())
+    };
+    assert_eq!(value_of("Клиент").as_deref(), Some("ООО Ромашка"));
+    assert_eq!(value_of("Часы").as_deref(), Some("3.5"));
+    assert_eq!(value_of("Созвон").as_deref(), Some("2026-10-01"));
+    assert_eq!(value_of("Этап").as_deref(), Some("Черновик"), "устаревший вариант остаётся текстом, как в исходной базе");
+
+    // Зависимость — между новыми карточками.
+    let deps = read_dependencies(&conn, report).unwrap();
+    assert_eq!(deps.blocked_by.iter().map(|d| d.card_id).collect::<Vec<_>>(), vec![data]);
+
+    // Время — законченная сессия с тем же участником по имени.
+    let (who, secs, note): (i64, i64, Option<String>) = conn.query_row(
+        "SELECT member_id, duration_seconds, note FROM time_entries WHERE card_id = ?1", params![report], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).unwrap();
+    assert_eq!((who, secs, note.as_deref()), (rich.colleague, 9000, Some("сверка")));
+    let running_on_copy: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM time_entries WHERE card_id = ?1", params![data], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(running_on_copy, 0, "идущий таймер не переезжает");
+
+    // И повторный экспорт новой доски совпадает с исходным по содержанию.
+    let again = build_board_export(&conn, new_board).unwrap();
+    assert_eq!(again.board.dependencies.len(), 1);
+    assert_eq!(again.board.custom_fields.len(), 4);
+}
+
+#[test]
+fn a_file_written_before_these_fields_still_imports() {
+    let mut conn = test_db();
+    let json = r#"{"taskflow_export_version":1,"exported_at":"2026-08-27 10:00:00","board":{
+        "name":"Старая","columns":[{"name":"Новые","cards":[{"title":"Задача","position":0}]}]}}"#;
+    let export: BoardExport = serde_json::from_str(json).unwrap();
+    let board = import_board_into(&mut conn, 1, export).unwrap();
+    let card = card_by_title(&conn, board, "Задача");
+    let (created, rule): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT created_at, recurrence_rule FROM cards WHERE id = ?1", params![card], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert!(created.is_some(), "без даты в файле её ставит база");
+    assert!(rule.is_none());
+    let notes: i64 = conn.query_row("SELECT COUNT(*) FROM board_notes WHERE board_id = ?1", params![board], |r| r.get(0)).unwrap();
+    assert_eq!(notes, 0);
+}
+
+#[test]
+fn a_hand_edited_file_loses_only_its_broken_parts() {
+    let mut conn = test_db();
+    let json = r#"{"taskflow_export_version":1,"exported_at":"","board":{
+        "name":"Поправленная руками",
+        "custom_fields":[
+            {"id":1,"name":"Непонятное","field_type":"rainbow"},
+            {"id":2,"name":"Часы","field_type":"number"}
+        ],
+        "dependencies":[
+            {"blocker_id":10,"blocked_id":11},
+            {"blocker_id":11,"blocked_id":10},
+            {"blocker_id":10,"blocked_id":999}
+        ],
+        "columns":[{"name":"Новые","cards":[
+            {"id":10,"title":"А","recurrence_rule":"hourly",
+             "field_values":[{"field_id":1,"value":"x"},{"field_id":2,"value":"не число"}],
+             "time_entries":[{"started_at":"2026-09-01 10:00:00","ended_at":""}]},
+            {"id":11,"title":"Б","field_values":[{"field_id":2,"value":"7"}]}
+        ]}]}}"#;
+    let export: BoardExport = serde_json::from_str(json).unwrap();
+    let board = import_board_into(&mut conn, 1, export).expect("битые куски не роняют импорт");
+
+    let a = card_by_title(&conn, board, "А");
+    let b = card_by_title(&conn, board, "Б");
+    let rule: Option<String> = conn.query_row("SELECT recurrence_rule FROM cards WHERE id = ?1", params![a], |r| r.get(0)).unwrap();
+    assert!(rule.is_none(), "неизвестное правило — не повторять");
+
+    let fields = custom_fields_in(&conn, board).unwrap();
+    assert_eq!(fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Часы"], "поле неизвестного типа пропущено");
+    assert_eq!(fields[0].values.iter().map(|v| (v.card_id, v.value.as_str())).collect::<Vec<_>>(), [(b, "7")],
+               "«не число» пропущено, число — нет");
+
+    let edges: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM card_dependencies WHERE blocker_card_id IN (?1, ?2)", params![a, b], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(edges, 1, "второе ребро замкнуло бы цикл, третье ведёт в никуда");
+
+    let sessions: i64 = conn.query_row("SELECT COUNT(*) FROM time_entries WHERE card_id = ?1", params![a], |r| r.get(0)).unwrap();
+    assert_eq!(sessions, 0, "сессия без конца не превращается в идущий таймер");
 }
