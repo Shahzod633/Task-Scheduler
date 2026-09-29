@@ -849,6 +849,12 @@ body.is-dragging-card .card:hover {
     padding-left: var(--space-xl);
 }
 
+/* `reset.css` снимает маркеры со всех списков — для меню и панелей это
+   правильно, а в тексте «1. 2. 3.» без цифр читается как три несвязанные
+   строки. Заметки доски так и жили до 2026-09-26. */
+.markdown-body ul { list-style: disc; }
+.markdown-body ol { list-style: decimal; }
+
 .markdown-body li { margin-bottom: var(--space-2xs); }
 
 .markdown-body a {

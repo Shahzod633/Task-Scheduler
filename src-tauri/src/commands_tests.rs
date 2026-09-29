@@ -4592,6 +4592,44 @@ fn archiving_a_card_stops_its_running_timer() {
 }
 
 #[test]
+fn archiving_a_column_stops_the_timers_of_its_cards() {
+    let mut conn = test_db();
+    let board = board_of(&conn, timer_column(&conn));
+    // Обязательную колонку в архив не убрать — нужна своя.
+    let col = create_column_in(&mut conn, board, "Лишняя").unwrap().id;
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+    started_ago(&conn, entry, 300);
+
+    archive_column_in(&conn, col).unwrap();
+
+    assert!(read_active_timer(&conn, me).unwrap().is_none());
+    assert!((300..=305).contains(&read_time_entry(&conn, entry).unwrap().duration_seconds.unwrap()));
+}
+
+#[test]
+fn archiving_a_board_stops_the_timers_of_its_cards_only() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+
+    // Таймер на другой доске архивация этой не трогает. Второй человек —
+    // потому что у одного таймер идёт только один.
+    let other_col = workload_board(&conn, 1, "Другая").0;
+    let other = assigned_card(&conn, other_col, "Чужая", None, "Medium");
+    let colleague = add_member(&conn, "Коллега");
+    let other_entry = start_timer_in(&mut conn, other, colleague).unwrap().timer.entry_id;
+
+    archive_board_in(&conn, board_of(&conn, col)).unwrap();
+
+    assert!(read_time_entry(&conn, entry).unwrap().ended_at.is_some());
+    assert!(read_time_entry(&conn, other_entry).unwrap().ended_at.is_none());
+}
+
+#[test]
 fn the_automatic_archive_keeps_dependencies_and_stops_the_timer() {
     let mut conn = test_db();
     let (_board, first) = board_for_retries(&mut conn);
@@ -4733,6 +4771,10 @@ fn the_workspace_list_brings_the_fields_of_its_visible_boards() {
 
 // ─── ИИ-ассистент: настройки и история ───
 
+fn ai(url: &str, model: &str, context_length: i64, timeout_seconds: i64) -> AiSettings {
+    AiSettings { ollama_url: url.into(), model: model.into(), context_length, timeout_seconds }
+}
+
 #[test]
 fn ai_settings_default_to_local_ollama_without_a_model() {
     let conn = test_db();
@@ -4740,33 +4782,31 @@ fn ai_settings_default_to_local_ollama_without_a_model() {
     assert_eq!(s.ollama_url, crate::ollama::DEFAULT_OLLAMA_URL);
     assert_eq!(s.model, "");
     assert_eq!(s.context_length, DEFAULT_AI_CONTEXT_LENGTH);
+    assert_eq!(s.timeout_seconds, 180);
 }
 
 #[test]
 fn ai_settings_are_saved_trimmed_and_clamped() {
     let conn = test_db();
-    let saved = write_ai_settings(&conn, &AiSettings {
-        ollama_url: " http://127.0.0.1:8080/ ".into(),
-        model: " qwen2.5:7b ".into(),
-        context_length: 5000,
-    }).unwrap();
+    let saved = write_ai_settings(&conn, &ai(" http://127.0.0.1:8080/ ", " qwen2.5:7b ", 5000, 5000)).unwrap();
     assert_eq!(saved.ollama_url, "http://127.0.0.1:8080");
     assert_eq!(saved.model, "qwen2.5:7b");
     assert_eq!(saved.context_length, AI_CONTEXT_LENGTH_MAX);
+    assert_eq!(saved.timeout_seconds, crate::ollama::CHAT_TIMEOUT_MAX_SECS);
     assert_eq!(read_ai_settings(&conn).unwrap(), saved);
 
-    let saved = write_ai_settings(&conn, &AiSettings { context_length: 0, ..saved }).unwrap();
+    let saved = write_ai_settings(&conn, &AiSettings { context_length: 0, timeout_seconds: 1, ..saved }).unwrap();
     assert_eq!(saved.context_length, AI_CONTEXT_LENGTH_MIN);
+    assert_eq!(saved.timeout_seconds, crate::ollama::CHAT_TIMEOUT_MIN_SECS);
+
+    let saved = write_ai_settings(&conn, &AiSettings { timeout_seconds: 240, ..saved }).unwrap();
+    assert_eq!(saved.timeout_seconds, 240);
 }
 
 #[test]
 fn a_remote_ollama_address_is_not_saved() {
     let conn = test_db();
-    let err = write_ai_settings(&conn, &AiSettings {
-        ollama_url: "http://192.168.1.5:11434".into(),
-        model: "x".into(),
-        context_length: 20,
-    }).unwrap_err();
+    let err = write_ai_settings(&conn, &ai("http://192.168.1.5:11434", "x", 20, 180)).unwrap_err();
     assert_eq!(err, crate::ollama::ERR_NOT_LOCAL);
     // Ничего не легло — осталось значение по умолчанию.
     let s = read_ai_settings(&conn).unwrap();
@@ -4777,19 +4817,40 @@ fn a_remote_ollama_address_is_not_saved() {
 #[test]
 fn chat_exchange_is_saved_as_a_pair_in_order() {
     let mut conn = test_db();
-    let saved = save_chat_exchange(&mut conn, 1, "Привет", "Здравствуйте!").unwrap();
+    let saved = save_chat_exchange(&mut conn, 1, "Привет", "Здравствуйте!", &[]).unwrap();
     assert_eq!(saved.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect::<Vec<_>>(),
                [("user", "Привет"), ("assistant", "Здравствуйте!")]);
     assert!(saved.iter().all(|m| m.workspace_id == 1 && !m.created_at.is_empty()));
+    assert!(saved.iter().all(|m| m.tools_used.is_empty()));
     assert_eq!(read_chat_history(&conn, 1, None).unwrap(), saved);
+}
+
+#[test]
+fn the_tools_behind_an_answer_are_kept_with_it() {
+    let mut conn = test_db();
+    let tools = vec!["get_boards".to_string(), "get_board_columns".to_string()];
+    let saved = save_chat_exchange(&mut conn, 1, "Сколько досок?", "Две.", &tools).unwrap();
+    assert!(saved[0].tools_used.is_empty(), "у вопроса человека инструментов нет");
+    assert_eq!(saved[1].tools_used, tools);
+    assert_eq!(read_chat_history(&conn, 1, None).unwrap()[1].tools_used, tools);
+}
+
+#[test]
+fn a_broken_tools_column_does_not_break_the_history() {
+    let mut conn = test_db();
+    save_chat_exchange(&mut conn, 1, "q", "a", &["get_boards".to_string()]).unwrap();
+    conn.execute("UPDATE chat_history SET tools_used = 'не json'", ()).unwrap();
+    let history = read_chat_history(&conn, 1, None).unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(history[1].tools_used.is_empty());
 }
 
 #[test]
 fn chat_history_belongs_to_its_workspace() {
     let mut conn = test_db();
     let other = second_workspace(&conn);
-    save_chat_exchange(&mut conn, 1, "a", "b").unwrap();
-    save_chat_exchange(&mut conn, other, "c", "d").unwrap();
+    save_chat_exchange(&mut conn, 1, "a", "b", &[]).unwrap();
+    save_chat_exchange(&mut conn, other, "c", "d", &[]).unwrap();
 
     assert_eq!(read_chat_history(&conn, other, None).unwrap().iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["c", "d"]);
 
@@ -4802,7 +4863,7 @@ fn chat_history_belongs_to_its_workspace() {
 fn the_context_window_takes_the_latest_messages_oldest_first() {
     let mut conn = test_db();
     for i in 0..5 {
-        save_chat_exchange(&mut conn, 1, &format!("q{i}"), &format!("a{i}")).unwrap();
+        save_chat_exchange(&mut conn, 1, &format!("q{i}"), &format!("a{i}"), &[]).unwrap();
     }
     let last = read_chat_history(&conn, 1, Some(3)).unwrap();
     assert_eq!(last.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["a3", "q4", "a4"]);
@@ -4812,7 +4873,7 @@ fn the_context_window_takes_the_latest_messages_oldest_first() {
 fn system_rows_never_reach_the_history() {
     let mut conn = test_db();
     conn.execute("INSERT INTO chat_history (workspace_id, role, content) VALUES (1, 'system', 'старый промпт')", ()).unwrap();
-    save_chat_exchange(&mut conn, 1, "q", "a").unwrap();
+    save_chat_exchange(&mut conn, 1, "q", "a", &[]).unwrap();
     assert_eq!(read_chat_history(&conn, 1, None).unwrap().len(), 2);
 }
 
@@ -4823,12 +4884,23 @@ fn unknown_roles_are_refused_by_the_schema() {
 }
 
 #[test]
-fn the_request_starts_with_the_fixed_system_prompt() {
+fn the_request_starts_with_the_system_prompt() {
     let mut conn = test_db();
-    save_chat_exchange(&mut conn, 1, "q", "a").unwrap();
+    save_chat_exchange(&mut conn, 1, "q", "a", &[]).unwrap();
     let history = read_chat_history(&conn, 1, None).unwrap();
-    let request = build_chat_request(&history, "новый вопрос");
+    let request = build_chat_request("ПРОМПТ", &history, "новый вопрос");
     assert_eq!(request.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(), ["system", "user", "assistant", "user"]);
-    assert_eq!(request[0].content, AI_SYSTEM_PROMPT);
+    assert_eq!(request[0].content, "ПРОМПТ");
     assert_eq!(request[3].content, "новый вопрос");
+}
+
+#[test]
+fn the_system_prompt_names_today_and_the_workspace() {
+    let conn = test_db();
+    let today: String = conn.query_row("SELECT date('now', 'localtime')", [], |r| r.get(0)).unwrap();
+    let prompt = system_prompt(&conn, 1).unwrap();
+    assert!(prompt.starts_with(AI_SYSTEM_PROMPT));
+    assert!(prompt.contains(&format!("Сегодня {}", today)), "{prompt}");
+    assert!(prompt.contains("«Тест»"), "{prompt}");
+    assert!(system_prompt(&conn, 999).is_err());
 }

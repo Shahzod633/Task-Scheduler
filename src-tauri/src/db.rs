@@ -582,6 +582,14 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
     if !table_has_column(conn, "user_profile", "ai_context_length") {
         conn.execute("ALTER TABLE user_profile ADD COLUMN ai_context_length INTEGER", ())?;
     }
+    if !table_has_column(conn, "user_profile", "ai_timeout_seconds") {
+        conn.execute("ALTER TABLE user_profile ADD COLUMN ai_timeout_seconds INTEGER", ())?;
+    }
+    // Инструменты, вызванные ради ответа ассистента, — JSON-массив имён.
+    // Колонка появилась позже таблицы (Фаза 2), отсюда ALTER, а не CREATE.
+    if !table_has_column(conn, "chat_history", "tools_used") {
+        conn.execute("ALTER TABLE chat_history ADD COLUMN tools_used TEXT", ())?;
+    }
 
     // Ensure the singleton user profile row exists
     conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1)", ())?;

@@ -31,9 +31,14 @@ use serde::{Deserialize, Serialize};
 /// Адрес по умолчанию — тот, на котором Ollama слушает после установки.
 pub const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
-/// Сколько ждать ответа модели. Локальная модель на слабом железе думает и по
-/// полминуты; дольше двух минут ждать бессмысленно — человек уже ушёл.
-pub const CHAT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Сколько ждать один ответ модели, если в настройках не задано иное.
+/// 180 с, а не 120: холодная загрузка 7B-модели на машине пользователя —
+/// 53 с, и с инструментами запросов к модели на один вопрос уже два-три
+/// (решение пользователя от 2026-09-26). Предел действует на **каждый** запрос
+/// к Ollama, а не на весь вопрос целиком.
+pub const DEFAULT_CHAT_TIMEOUT_SECS: i64 = 180;
+pub const CHAT_TIMEOUT_MIN_SECS: i64 = 30;
+pub const CHAT_TIMEOUT_MAX_SECS: i64 = 600;
 
 /// Сколько ждать список моделей. Ollama отвечает на него мгновенно, а
 /// «не запущена» при отказе в соединении приходит сразу; этот предел только
@@ -49,12 +54,45 @@ pub const ERR_BAD_URL: &str =
 pub const ERR_NOT_LOCAL: &str =
     "Адрес Ollama должен указывать на этот компьютер (localhost, 127.0.0.1 или [::1])";
 
-/// Одно сообщение в формате `/api/chat`: `role` — `system`, `user` или
-/// `assistant`.
+/// Одно сообщение в формате `/api/chat`: `role` — `system`, `user`,
+/// `assistant` или `tool`.
+///
+/// `tool_calls` бывает только у ответа модели: вместо текста она просит
+/// вызвать инструменты. `tool_name` — у сообщения с результатом инструмента,
+/// чтобы модель знала, на какой из вызовов это ответ.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
+    #[serde(default)]
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+}
+
+impl Message {
+    pub fn new(role: &str, content: impl Into<String>) -> Self {
+        Message { role: role.into(), content: content.into(), tool_calls: Vec::new(), tool_name: None }
+    }
+
+    pub fn tool_result(name: &str, content: impl Into<String>) -> Self {
+        Message { tool_name: Some(name.into()), ..Message::new("tool", content) }
+    }
+}
+
+/// Просьба модели вызвать инструмент. Формат OpenAI-совместимый; `arguments`
+/// Ollama отдаёт объектом, а не строкой JSON, как OpenAI.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FunctionCall {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
 }
 
 /// Модель из `/api/tags` — только то, что показывает интерфейс.
@@ -77,6 +115,8 @@ struct TagsResponse {
 struct ChatRequest<'a> {
     model: &'a str,
     messages: &'a [Message],
+    #[serde(skip_serializing_if = "<[serde_json::Value]>::is_empty")]
+    tools: &'a [serde_json::Value],
     stream: bool,
 }
 
@@ -196,17 +236,29 @@ pub(crate) fn parse_tags(body: &str) -> Result<Vec<ModelInfo>, String> {
     Ok(models)
 }
 
-/// Один вопрос модели без потоковой выдачи: ответ приходит целиком.
+/// Один запрос к модели без потоковой выдачи: ответ приходит целиком.
 ///
 /// `messages` уже собраны вызывающим — системный промпт первым, дальше
-/// история и новое сообщение.
-pub fn chat(base_url: &str, model: &str, messages: &[Message]) -> Result<String, String> {
+/// история, новое сообщение и, если модель уже просила инструменты, их
+/// результаты. `tools` — описания инструментов (JSON-схемы); пустой срез —
+/// запрос без инструментов.
+///
+/// Возвращает ответ модели: либо текст, либо `tool_calls` — тогда вызывающий
+/// выполняет инструменты и спрашивает снова.
+pub fn chat(
+    base_url: &str,
+    model: &str,
+    messages: &[Message],
+    tools: &[serde_json::Value],
+    timeout_secs: i64,
+) -> Result<Message, String> {
     if model.trim().is_empty() {
         return Err("Модель не выбрана — выберите её в Настройках → «ИИ-ассистент»".to_string());
     }
     let url = format!("{}/api/chat", normalize_url(base_url)?);
-    let request = ChatRequest { model, messages, stream: false };
-    let resp = client(CHAT_TIMEOUT)?
+    let request = ChatRequest { model, messages, tools, stream: false };
+    let timeout = timeout_secs.clamp(CHAT_TIMEOUT_MIN_SECS, CHAT_TIMEOUT_MAX_SECS) as u64;
+    let resp = client(Duration::from_secs(timeout))?
         .post(url)
         .json(&request)
         .send()
@@ -214,22 +266,34 @@ pub fn chat(base_url: &str, model: &str, messages: &[Message]) -> Result<String,
     let status = resp.status();
     let body = resp.text().map_err(describe)?;
     if !status.is_success() {
-        return Err(error_from_body(status, &body));
+        return Err(chat_error(status, &body, model));
     }
     parse_chat(&body)
 }
 
-pub(crate) fn parse_chat(body: &str) -> Result<String, String> {
+/// Ошибка `/api/chat`. Отдельно узнаётся модель без инструментов: Ollama
+/// отвечает на такое «does not support tools», и человеку нужен не этот текст,
+/// а что с ним делать.
+fn chat_error(status: reqwest::StatusCode, body: &str, model: &str) -> String {
+    if body.contains("does not support tools") {
+        return format!(
+            "Модель «{}» не умеет вызывать инструменты, а без них ассистент не видит ваших задач. \
+             Выберите в Настройках модель с поддержкой инструментов — например, qwen2.5 или llama3.1.",
+            model
+        );
+    }
+    error_from_body(status, body)
+}
+
+pub(crate) fn parse_chat(body: &str) -> Result<Message, String> {
     let parsed: ChatResponse = serde_json::from_str(body)
         .map_err(|_| "Не удалось разобрать ответ Ollama".to_string())?;
-    let content = parsed
-        .message
-        .map(|m| m.content.trim().to_string())
-        .unwrap_or_default();
-    if content.is_empty() {
+    let mut message = parsed.message.unwrap_or_else(|| Message::new("assistant", ""));
+    message.content = message.content.trim().to_string();
+    if message.content.is_empty() && message.tool_calls.is_empty() {
         return Err("Модель вернула пустой ответ — попробуйте переформулировать".to_string());
     }
-    Ok(content)
+    Ok(message)
 }
 
 #[cfg(test)]

@@ -204,6 +204,8 @@ pub struct AiSettings {
     pub model: String,
     /// Сколько последних сообщений истории уходит модели с каждым вопросом.
     pub context_length: i64,
+    /// Сколько ждать один ответ модели, в секундах (по умолчанию 180).
+    pub timeout_seconds: i64,
 }
 
 /// Сколько сообщений истории отправлять по умолчанию. У локальных моделей
@@ -225,6 +227,9 @@ pub struct ChatMessage {
     pub content: String,
     /// UTC, `datetime('now')` — как все отметки времени в базе.
     pub created_at: String,
+    /// Инструменты, которые модель вызвала ради этого ответа, по порядку.
+    /// У реплик человека и ответов без инструментов — пусто.
+    pub tools_used: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

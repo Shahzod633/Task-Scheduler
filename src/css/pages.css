@@ -150,7 +150,7 @@
 
 .workspace-option--active {
     background: var(--accent-soft);
-    color: var(--accent-100);
+    color: var(--accent-on-soft);
 }
 
 .workspace-option__icon {
@@ -250,7 +250,7 @@
 }
 
 .about-link:hover {
-    color: var(--accent-100);
+    color: var(--accent-on-soft);
     text-decoration: underline;
 }
 
@@ -702,7 +702,7 @@
 }
 
 .planner-cell--today .planner-cell__day {
-    color: var(--accent-100);
+    color: var(--accent-on-soft);
 }
 
 .planner-card-chip {
@@ -1220,17 +1220,17 @@
     border-bottom-left-radius: var(--radius-xs);
 }
 
-/* `reset.css` снимает маркеры со всех списков, а `.markdown-body` их не
-   возвращает. Модель нумерует шаги постоянно, и «1. 2. 3.» без цифр читаются
-   как три несвязанные строки. Возвращено только здесь — заметки доски пока
-   живут как жили. */
-.assistant__text.markdown-body ul { list-style: disc; }
-.assistant__text.markdown-body ol { list-style: decimal; }
-.assistant__text.markdown-body > :last-child { margin-bottom: 0; }
-
 /* Текст человека — как написан, с его переводами строк. */
 .assistant__bubble--user .assistant__text {
     white-space: pre-wrap;
+}
+
+.assistant__tools {
+    margin-top: var(--space-xs);
+    padding-top: var(--space-xs);
+    border-top: 1px solid var(--border-subtle);
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
 }
 
 .assistant__time {

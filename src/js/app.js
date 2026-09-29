@@ -37,7 +37,7 @@ const SIDEBAR_VIEWS = new Set(['hub', 'templates', 'home', 'settings', 'recent',
 // Views that show the floating dock (board working context)
 const DOCK_VIEWS = new Set(['board', 'inbox', 'planner', 'assistant']);
 // view name -> sidebar top-level item id
-const SIDEBAR_ITEM_IDS = { hub: 'sidebar-boards', list: 'sidebar-list', mistakes: 'sidebar-mistakes', templates: 'sidebar-templates', home: 'sidebar-home', settings: 'sidebar-settings' };
+const SIDEBAR_ITEM_IDS = { hub: 'sidebar-boards', list: 'sidebar-list', mistakes: 'sidebar-mistakes', assistant: 'sidebar-assistant', templates: 'sidebar-templates', home: 'sidebar-home', settings: 'sidebar-settings' };
 
 const ROUTES = {
     hub: (params) => renderHub(params.workspaceId || defaultWorkspaceId),
@@ -198,6 +198,10 @@ function renderLayout() {
                         <span class="sidebar__item-icon">${Icons.alertTriangle}</span>
                         <span class="sidebar__item-text">Требуют внимания</span>
                     </div>
+                    <div class="sidebar__item" id="sidebar-assistant">
+                        <span class="sidebar__item-icon">${Icons.sparkles}</span>
+                        <span class="sidebar__item-text">Ассистент</span>
+                    </div>
                     <div class="sidebar__item" id="sidebar-templates">
                         <span class="sidebar__item-icon">${Icons.template}</span>
                         <span class="sidebar__item-text">Шаблоны</span>
@@ -261,6 +265,12 @@ function renderLayout() {
         navigateTo('mistakes', { workspaceId: defaultWorkspaceId });
     });
 
+    // Та же страница, что у кнопки дока, но открытая отсюда остаётся в
+    // обрамлении сайдбара — см. `via` в navigateTo.
+    $('#sidebar-assistant').addEventListener('click', () => {
+        navigateTo('assistant', { workspaceId: defaultWorkspaceId, via: 'sidebar' });
+    });
+
     $('#sidebar-templates').addEventListener('click', () => {
         navigateTo('templates', { workspaceId: defaultWorkspaceId });
     });
@@ -305,10 +315,17 @@ async function navigateTo(view, params = {}) {
     // без размытия.
     $('#app').dataset.view = view;
 
-    const sidebar = $('#app-sidebar');
-    if (sidebar) sidebar.classList.toggle('sidebar--hidden', !SIDEBAR_VIEWS.has(view));
+    // Обрамление решает экран, а у ассистента — ещё и то, откуда пришли: он
+    // открывается и из сайдбара, и из дока, и человек остаётся в том
+    // обрамлении, из которого нажал.
+    const viaSidebar = params.via === 'sidebar';
+    const withSidebar = SIDEBAR_VIEWS.has(view) || viaSidebar;
+    const withDock = DOCK_VIEWS.has(view) && !viaSidebar;
 
-    if (SIDEBAR_VIEWS.has(view)) {
+    const sidebar = $('#app-sidebar');
+    if (sidebar) sidebar.classList.toggle('sidebar--hidden', !withSidebar);
+
+    if (withSidebar) {
         await renderWorkspaceSidebar(defaultWorkspaceId);
     }
 
@@ -317,7 +334,7 @@ async function navigateTo(view, params = {}) {
     // дожидаемся — оформление не должно задерживать отрисовку страницы.
     applyWorkspaceBackground(defaultWorkspaceId);
 
-    if (DOCK_VIEWS.has(view)) {
+    if (withDock) {
         renderDock(view);
         showDock();
     } else {

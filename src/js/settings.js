@@ -131,8 +131,8 @@ async function renderAiSection(container) {
 
     const modelSelect = createElement('select', { className: 'form-input' });
     container.appendChild(field('Модель', modelSelect,
-        'Лёгкая модель отвечает быстрее. Для будущих функций с доступом к задачам нужна модель ' +
-        'с поддержкой инструментов — например, qwen2.5 или llama3.1.'));
+        'Нужна модель с поддержкой инструментов — например, qwen2.5 или llama3.1: ' +
+        'через них ассистент видит ваши доски и задачи. Лёгкая модель отвечает быстрее.'));
 
     const contextInput = createElement('input', {
         className: 'form-input', type: 'number', min: '2', max: '200',
@@ -141,6 +141,14 @@ async function renderAiSection(container) {
     container.appendChild(field('Длина контекста', contextInput,
         'Сколько последних сообщений чата модель видит при каждом ответе. ' +
         'Больше — лучше помнит разговор, но отвечает медленнее.'));
+
+    const timeoutInput = createElement('input', {
+        className: 'form-input', type: 'number', min: '30', max: '600',
+    });
+    timeoutInput.value = String(settings.timeout_seconds);
+    container.appendChild(field('Таймаут ответа, секунд', timeoutInput,
+        'Сколько ждать модель, прежде чем сдаться. Первый вопрос после запуска Ollama ' +
+        'идёт дольше — модель загружается в память. От 30 до 600.'));
 
     const actions = createElement('div', { className: 'settings-ai__actions' });
     const saveBtn = createElement('button', { className: 'btn btn--primary' }, 'Сохранить');
@@ -222,12 +230,14 @@ async function renderAiSection(container) {
                 urlInput.value,
                 modelSelect.value,
                 Number(contextInput.value) || 0,
+                Number(timeoutInput.value) || 0,
             );
             // Бэкенд приводит адрес к виду без «/» и зажимает длину — показываем
             // то, что действительно сохранилось.
             settings = saved;
             urlInput.value = saved.ollama_url;
             contextInput.value = String(saved.context_length);
+            timeoutInput.value = String(saved.timeout_seconds);
             showToast('Настройки ассистента сохранены');
         } catch (e) {
             showResult(String(e), 'error');

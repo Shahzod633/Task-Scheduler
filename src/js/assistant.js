@@ -26,6 +26,19 @@ import { createElement, $, showToast, parseTimestamp, autoResize } from './utils
  */
 let pending = null;
 
+/** Инструменты бэкенда (`ai_tools.rs`) — человеческими словами. */
+const TOOL_LABELS = {
+    get_boards: 'доски',
+    get_board_columns: 'колонки доски',
+    get_cards_in_column: 'карточки колонки',
+    search_cards: 'поиск задач',
+    get_card_details: 'задача целиком',
+    get_workload: 'нагрузка',
+    get_overdue_cards: 'просроченные',
+    get_cards_by_deadline_range: 'сроки',
+    get_time_summary: 'учёт времени',
+};
+
 export async function renderAssistantPage(workspaceId) {
     const content = $('#content');
     content.innerHTML = '';
@@ -110,7 +123,8 @@ export async function renderAssistantPage(workspaceId) {
         if (history.length === 0 && !busy()) {
             list.appendChild(createElement('div', { className: 'assistant__empty' },
                 createElement('span', { className: 'assistant__empty-icon', innerHTML: Icons.sparkles }),
-                createElement('p', {}, 'Здесь пока пусто. Спросите что-нибудь — например, «Помоги спланировать неделю».'),
+                createElement('p', {}, 'Здесь пока пусто. Спросите о своих задачах — например, «Какие задачи просрочены?» ' +
+                'или «Сколько у меня задач со сроком на этой неделе?»'),
             ));
         }
         for (const message of history) list.appendChild(messageBubble(message));
@@ -276,6 +290,16 @@ function messageBubble(message) {
             className: 'assistant__text markdown-body',
             innerHTML: renderMarkdown(message.content),
         }));
+    }
+
+    // Откуда в ответе числа: какие данные модель запрашивала. Без этой строки
+    // не отличить ответ по базе от ответа «из головы».
+    const tools = [...new Set(message.tools_used || [])];
+    if (tools.length) {
+        bubble.appendChild(createElement('div', {
+            className: 'assistant__tools',
+            title: tools.join(', '),
+        }, `Смотрел: ${tools.map(t => TOOL_LABELS[t] || t).join(' · ')}`));
     }
 
     const time = formatTime(message.created_at);

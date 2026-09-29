@@ -674,8 +674,8 @@ export async function getAiSettings() {
  * (`localhost`, `127.0.0.1`, `[::1]`); длину контекста бэкенд зажимает в
  * допустимые границы.
  */
-export async function updateAiSettings(ollamaUrl, model, contextLength) {
-    return await invoke('update_ai_settings', { ollamaUrl, model, contextLength });
+export async function updateAiSettings(ollamaUrl, model, contextLength, timeoutSeconds) {
+    return await invoke('update_ai_settings', { ollamaUrl, model, contextLength, timeoutSeconds });
 }
 
 /**
@@ -699,9 +699,10 @@ export async function clearChatHistory(workspaceId) {
 }
 
 /**
- * Вопрос ассистенту. Ответ может идти десятки секунд. Возвращает обе
- * сохранённые реплики — вопрос и ответ; при отказе в историю не пишется
- * ничего.
+ * Вопрос ассистенту. Ответ может идти десятки секунд — модель по дороге
+ * вызывает инструменты. Возвращает обе сохранённые реплики — вопрос и ответ
+ * (у ответа `tools_used` — какие инструменты вызывались); при отказе в историю
+ * не пишется ничего.
  */
 export async function ollamaChat(workspaceId, content) {
     return await invoke('ollama_chat', { workspaceId, content });

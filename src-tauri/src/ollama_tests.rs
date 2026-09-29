@@ -81,7 +81,41 @@ fn foreign_server_is_reported() {
 #[test]
 fn chat_answer_is_extracted_and_trimmed() {
     let body = r#"{"model":"qwen2.5:7b","message":{"role":"assistant","content":"  Привет!\n"},"done":true}"#;
-    assert_eq!(parse_chat(body).unwrap(), "Привет!");
+    let message = parse_chat(body).unwrap();
+    assert_eq!(message.content, "Привет!");
+    assert!(message.tool_calls.is_empty());
+}
+
+#[test]
+fn tool_calls_are_parsed_with_object_arguments() {
+    // Так отвечает Ollama: текст пуст, аргументы — объект, а не строка JSON.
+    let body = r#"{"message":{"role":"assistant","content":"","tool_calls":[
+        {"function":{"name":"get_boards","arguments":{}}},
+        {"function":{"index":1,"name":"get_cards_in_column","arguments":{"column_id":7}}}
+    ]},"done":true}"#;
+    let message = parse_chat(body).unwrap();
+    assert_eq!(message.tool_calls.len(), 2);
+    assert_eq!(message.tool_calls[0].function.name, "get_boards");
+    assert_eq!(message.tool_calls[1].function.arguments["column_id"], 7);
+}
+
+#[test]
+fn tool_result_message_carries_the_tool_name_and_omits_empty_calls() {
+    let json = serde_json::to_value(Message::tool_result("get_boards", "[]")).unwrap();
+    assert_eq!(json, serde_json::json!({"role": "tool", "content": "[]", "tool_name": "get_boards"}));
+    let json = serde_json::to_value(Message::new("user", "Привет")).unwrap();
+    assert_eq!(json, serde_json::json!({"role": "user", "content": "Привет"}));
+}
+
+#[test]
+fn a_model_without_tools_is_explained() {
+    let text = chat_error(
+        reqwest::StatusCode::BAD_REQUEST,
+        r#"{"error":"registry.ollama.ai/library/gemma:2b does not support tools"}"#,
+        "gemma:2b",
+    );
+    assert!(text.contains("не умеет вызывать инструменты"), "{text}");
+    assert!(text.contains("gemma:2b"), "{text}");
 }
 
 #[test]
@@ -101,7 +135,7 @@ fn ollama_error_body_is_shown_to_the_user() {
 #[test]
 fn chat_without_model_fails_before_any_request() {
     // Порт 9 никто не слушает — но до соединения дело дойти не должно.
-    let err = chat("http://127.0.0.1:9", "  ", &[]).unwrap_err();
+    let err = chat("http://127.0.0.1:9", "  ", &[], &[], DEFAULT_CHAT_TIMEOUT_SECS).unwrap_err();
     assert!(err.contains("Модель не выбрана"), "{err}");
 }
 
@@ -125,9 +159,9 @@ fn ollama_live_round_trip_from_tauri_runtime() {
             let model = models.first().ok_or("нет моделей")?.name.clone();
             println!("модель: {model}");
             chat(DEFAULT_OLLAMA_URL, &model, &[
-                Message { role: "system".into(), content: "Отвечай одним словом.".into() },
-                Message { role: "user".into(), content: "Скажи «привет».".into() },
-            ])
+                Message::new("system", "Отвечай одним словом."),
+                Message::new("user", "Скажи «привет»."),
+            ], &[], DEFAULT_CHAT_TIMEOUT_SECS)
         })
         .await
         .unwrap()

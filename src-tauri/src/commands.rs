@@ -115,6 +115,11 @@ const BOARD_COLUMNS: &str = "id, workspace_id, name, gradient, is_starred, creat
 #[tauri::command]
 pub fn get_boards(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Board>> {
     let conn = state.conn.lock().unwrap();
+    boards_in(&conn, workspace_id)
+}
+
+/// Тело `get_boards` без `State` — его же зовёт инструмент ассистента.
+fn boards_in(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<Vec<Board>> {
     let sql = format!("SELECT {} FROM boards WHERE workspace_id = ?1 AND archived = 0 AND is_system = 0 ORDER BY is_starred DESC, id DESC", BOARD_COLUMNS);
     let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
 
@@ -191,7 +196,22 @@ pub fn update_board(id: i64, name: String, gradient: String, is_starred: bool, s
 #[tauri::command]
 pub fn archive_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
-    conn.execute("UPDATE boards SET archived = 1 WHERE id = ?1", params![id]).map_err(to_string_err)?;
+    archive_board_in(&conn, id)
+}
+
+/// Как и у карточки (§31.2), архивация доски останавливает идущие таймеры её
+/// карточек: сами карточки не архивируются, но с глаз убраны так же, и время
+/// на невидимой задаче сбивало бы с толку. Решение пользователя от 2026-09-26.
+fn archive_board_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<()> {
+    let tx = conn.unchecked_transaction().map_err(to_string_err)?;
+    tx.execute("UPDATE boards SET archived = 1 WHERE id = ?1", params![id]).map_err(to_string_err)?;
+    stop_running(
+        &tx,
+        "card_id IN (SELECT c.id FROM cards c JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1)",
+        id,
+    )
+    .map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)?;
     Ok(())
 }
 
@@ -279,6 +299,11 @@ fn final_column_of_board(
 #[tauri::command]
 pub fn get_columns(board_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Column>> {
     let conn = state.conn.lock().unwrap();
+    columns_in(&conn, board_id)
+}
+
+/// Тело `get_columns` без `State` — его же зовёт инструмент ассистента.
+fn columns_in(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<Vec<Column>> {
     let sql = format!(
         "SELECT {} FROM columns WHERE board_id = ?1 AND archived = 0 ORDER BY position ASC",
         COLUMN_COLUMNS
@@ -378,8 +403,14 @@ fn archive_column_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<()> {
     if column_is_required(conn, id)? {
         return Err(ERR_COLUMN_IS_REQUIRED.to_string());
     }
-    conn.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![id])
+    // Таймеры карточек колонки останавливаются в той же транзакции — как при
+    // архивации карточки и доски (решение от 2026-09-26).
+    let tx = conn.unchecked_transaction().map_err(to_string_err)?;
+    tx.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![id])
         .map_err(to_string_err)?;
+    stop_running(&tx, "card_id IN (SELECT id FROM cards WHERE column_id = ?1)", id)
+        .map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)?;
     Ok(())
 }
 
@@ -741,6 +772,11 @@ fn row_to_card_with_board(row: &rusqlite::Row) -> rusqlite::Result<Card> {
 #[tauri::command]
 pub fn get_cards(column_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Card>> {
     let conn = state.conn.lock().unwrap();
+    cards_in(&conn, column_id)
+}
+
+/// Тело `get_cards` без `State` — его же зовёт инструмент ассистента.
+fn cards_in(conn: &rusqlite::Connection, column_id: i64) -> CmdResult<Vec<Card>> {
     let sql = format!(
         "SELECT {}, {}, {} FROM cards WHERE column_id = ?1 AND archived = 0 ORDER BY position ASC",
         CARD_COLUMNS, CHECKLIST_COUNTS, BLOCKED_OPEN_COUNT
@@ -1382,6 +1418,11 @@ const CHECKLIST_COLUMNS: &str = "id, card_id, text, is_done, position";
 #[tauri::command]
 pub fn list_checklist_items(card_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<ChecklistItem>> {
     let conn = state.conn.lock().unwrap();
+    checklist_items_in(&conn, card_id)
+}
+
+/// Тело `list_checklist_items` без `State` — его же зовёт инструмент ассистента.
+fn checklist_items_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<Vec<ChecklistItem>> {
     // `id` breaks ties: without drag-reordering every item shares position 0
     // only if something went wrong, but a stable order still beats an arbitrary
     // one that shuffles between openings.
@@ -5203,16 +5244,31 @@ pub fn run_email_reminder_check(app: &tauri::AppHandle) {
 // потом разговор с моделью, потом второй короткий заход — записать ответ.
 
 /// Системный промпт. Зашит в коде и пользователем не редактируется; в историю
-/// не пишется — подставляется первым сообщением при каждом вопросе.
+/// не пишется — подставляется первым сообщением при каждом вопросе, вместе со
+/// строкой о сегодняшней дате и пространстве (`system_prompt`).
 const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри приложения TaskFlow (локальный таск-менеджер). \
-Отвечай кратко и по делу, на русском языке. Ты помогаешь пользователю управлять задачами, \
-анализировать продуктивность и отвечать на вопросы о его проектах. Пока у тебя нет доступа \
-к данным пользователя — просто веди диалог и помогай планировать.";
+Отвечай кратко и по делу, на русском языке.
+
+У тебя есть доступ к данным пользователя через инструменты. Используй их, чтобы отвечать \
+на вопросы конкретно, с реальными числами и названиями, а не общими фразами.
+
+Примеры того, что ты можешь:
+- «Сколько у меня задач с дедлайном до 5 октября?» → используй get_cards_by_deadline_range
+- «Какие задачи просрочены?» → используй get_overdue_cards
+- «Сколько времени я потратил на проект X?» → используй get_time_summary
+- «Покажи нагрузку по исполнителям» → используй get_workload
+
+Когда пользователь спрашивает о данных — всегда вызывай инструмент, не придумывай ответ из головы.";
 
 /// Предел длины одного сообщения человека. Не про безопасность, а про окно
 /// контекста: вставленный целиком лог на мегабайт модель всё равно обрежет, а
 /// ждать её придётся минуты.
 const AI_MAX_MESSAGE_CHARS: usize = 8000;
+
+/// Инструменты ассистента — дочерний модуль, чтобы звать внутренние функции
+/// команд (`boards_in`, `build_workspace_card_list`, …) без копий запросов.
+#[path = "ai_tools.rs"]
+mod ai_tools;
 
 #[tauri::command]
 pub fn get_ai_settings(state: State<'_, DbState>) -> CmdResult<AiSettings> {
@@ -5222,13 +5278,15 @@ pub fn get_ai_settings(state: State<'_, DbState>) -> CmdResult<AiSettings> {
 
 /// NULL в базе — «ещё не настраивали», подставляется значение по умолчанию.
 fn read_ai_settings(conn: &rusqlite::Connection) -> CmdResult<AiSettings> {
+    use crate::ollama::{CHAT_TIMEOUT_MAX_SECS, CHAT_TIMEOUT_MIN_SECS, DEFAULT_CHAT_TIMEOUT_SECS};
     conn.query_row(
-        "SELECT ai_ollama_url, ai_model, ai_context_length FROM user_profile WHERE id = 1",
+        "SELECT ai_ollama_url, ai_model, ai_context_length, ai_timeout_seconds FROM user_profile WHERE id = 1",
         [],
         |row| {
             let url: Option<String> = row.get(0)?;
             let model: Option<String> = row.get(1)?;
             let context: Option<i64> = row.get(2)?;
+            let timeout: Option<i64> = row.get(3)?;
             Ok(AiSettings {
                 ollama_url: url
                     .filter(|u| !u.trim().is_empty())
@@ -5237,6 +5295,9 @@ fn read_ai_settings(conn: &rusqlite::Connection) -> CmdResult<AiSettings> {
                 context_length: context
                     .unwrap_or(DEFAULT_AI_CONTEXT_LENGTH)
                     .clamp(AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX),
+                timeout_seconds: timeout
+                    .unwrap_or(DEFAULT_CHAT_TIMEOUT_SECS)
+                    .clamp(CHAT_TIMEOUT_MIN_SECS, CHAT_TIMEOUT_MAX_SECS),
             })
         },
     )
@@ -5248,21 +5309,26 @@ pub fn update_ai_settings(
     ollama_url: String,
     model: String,
     context_length: i64,
+    timeout_seconds: i64,
     state: State<'_, DbState>,
 ) -> CmdResult<AiSettings> {
     let conn = state.conn.lock().unwrap();
-    write_ai_settings(&conn, &AiSettings { ollama_url, model, context_length })
+    write_ai_settings(&conn, &AiSettings { ollama_url, model, context_length, timeout_seconds })
 }
 
 /// Сохраняет и возвращает то, что легло в базу. Неверный адрес отвергается
 /// целиком — в отличие от порта почты, «исправить» его молча нечем. Длина
-/// контекста зажимается в границы.
+/// контекста и таймаут зажимаются в границы.
 fn write_ai_settings(conn: &rusqlite::Connection, settings: &AiSettings) -> CmdResult<AiSettings> {
+    use crate::ollama::{CHAT_TIMEOUT_MAX_SECS, CHAT_TIMEOUT_MIN_SECS};
     let url = crate::ollama::normalize_url(&settings.ollama_url)?;
     let context = settings.context_length.clamp(AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX);
+    let timeout = settings.timeout_seconds.clamp(CHAT_TIMEOUT_MIN_SECS, CHAT_TIMEOUT_MAX_SECS);
     conn.execute(
-        "UPDATE user_profile SET ai_ollama_url = ?1, ai_model = ?2, ai_context_length = ?3 WHERE id = 1",
-        params![url, settings.model.trim(), context],
+        "UPDATE user_profile
+            SET ai_ollama_url = ?1, ai_model = ?2, ai_context_length = ?3, ai_timeout_seconds = ?4
+          WHERE id = 1",
+        params![url, settings.model.trim(), context, timeout],
     )
     .map_err(to_string_err)?;
     read_ai_settings(conn)
@@ -5318,13 +5384,21 @@ pub fn get_chat_history(workspace_id: i64, state: State<'_, DbState>) -> CmdResu
     read_chat_history(&conn, workspace_id, None)
 }
 
+const CHAT_SELECT: &str = "SELECT id, workspace_id, role, content, created_at, tools_used FROM chat_history";
+
 fn chat_message_from_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
+    let tools: Option<String> = row.get(5)?;
     Ok(ChatMessage {
         id: row.get(0)?,
         workspace_id: row.get(1)?,
         role: row.get(2)?,
         content: row.get(3)?,
         created_at: row.get(4)?,
+        // Испорченный JSON здесь не повод терять всю историю — это подпись
+        // под ответом, а не сам ответ.
+        tools_used: tools
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -5338,13 +5412,11 @@ fn read_chat_history(
     // Последние N берутся с конца по убыванию и переворачиваются: `LIMIT` без
     // `DESC` отдал бы первые N, то есть самое старое. `LIMIT -1` в SQLite —
     // «без предела».
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, workspace_id, role, content, created_at FROM chat_history
-              WHERE workspace_id = ?1 AND role IN ('user', 'assistant')
-              ORDER BY id DESC LIMIT ?2",
-        )
-        .map_err(to_string_err)?;
+    let sql = format!(
+        "{} WHERE workspace_id = ?1 AND role IN ('user', 'assistant') ORDER BY id DESC LIMIT ?2",
+        CHAT_SELECT
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
     let mut messages = stmt
         .query_map(params![workspace_id, last.unwrap_or(-1)], chat_message_from_row)
         .map_err(to_string_err)?
@@ -5361,41 +5433,80 @@ pub fn clear_chat_history(workspace_id: i64, state: State<'_, DbState>) -> CmdRe
         .map_err(to_string_err)
 }
 
-/// Что уходит модели: системный промпт, реплики истории, новое сообщение.
-fn build_chat_request(history: &[ChatMessage], user_text: &str) -> Vec<crate::ollama::Message> {
+/// Системный промпт целиком: постоянная часть плюс то, чего модель знать не
+/// может, — сегодняшняя дата (без неё «до 5 октября» не перевести в диапазон)
+/// и название пространства.
+fn system_prompt(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<String> {
+    const WEEKDAYS: [&str; 7] = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
+    let (today, weekday): (String, i64) = conn
+        .query_row(
+            "SELECT date('now', 'localtime'), CAST(strftime('%w', 'now', 'localtime') AS INTEGER)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(to_string_err)?;
+    let workspace: String = conn
+        .query_row("SELECT name FROM workspaces WHERE id = ?1", params![workspace_id], |row| row.get(0))
+        .optional()
+        .map_err(to_string_err)?
+        .ok_or_else(|| "Пространство не найдено".to_string())?;
+    Ok(format!(
+        "{}\n\nСегодня {}, {}. Текущее пространство — «{}»; инструменты видят только его.",
+        AI_SYSTEM_PROMPT,
+        today,
+        WEEKDAYS[weekday.rem_euclid(7) as usize],
+        workspace,
+    ))
+}
+
+/// Что уходит модели первым запросом: системный промпт, реплики истории,
+/// новое сообщение. Результаты инструментов в историю не попадают — к
+/// следующему вопросу данные могли измениться, и модель спросит их заново.
+fn build_chat_request(system: &str, history: &[ChatMessage], user_text: &str) -> Vec<crate::ollama::Message> {
+    use crate::ollama::Message;
     let mut messages = Vec::with_capacity(history.len() + 2);
-    messages.push(crate::ollama::Message { role: "system".into(), content: AI_SYSTEM_PROMPT.into() });
-    messages.extend(history.iter().map(|m| crate::ollama::Message {
-        role: m.role.clone(),
-        content: m.content.clone(),
-    }));
-    messages.push(crate::ollama::Message { role: "user".into(), content: user_text.into() });
+    messages.push(Message::new("system", system));
+    messages.extend(history.iter().map(|m| Message::new(&m.role, m.content.clone())));
+    messages.push(Message::new("user", user_text));
     messages
 }
 
 /// Обе реплики — вопрос и ответ — пишутся одной транзакцией и только после
 /// ответа модели. Не ответила — в истории не остаётся вопроса без ответа, а
 /// текст возвращается человеку в поле ввода (это делает интерфейс).
+///
+/// `tools_used` — имена инструментов, которые модель вызвала ради ответа, по
+/// порядку; хранятся при ответе, чтобы после перезапуска было видно, откуда
+/// взялись числа.
 fn save_chat_exchange(
     conn: &mut rusqlite::Connection,
     workspace_id: i64,
     user_text: &str,
     answer: &str,
+    tools_used: &[String],
 ) -> CmdResult<Vec<ChatMessage>> {
+    let tools_json = if tools_used.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(tools_used).map_err(to_string_err)?)
+    };
     let tx = conn.transaction().map_err(to_string_err)?;
-    let mut ids = Vec::with_capacity(2);
-    for (role, content) in [("user", user_text), ("assistant", answer)] {
-        tx.execute(
-            "INSERT INTO chat_history (workspace_id, role, content) VALUES (?1, ?2, ?3)",
-            params![workspace_id, role, content],
-        )
-        .map_err(to_string_err)?;
-        ids.push(tx.last_insert_rowid());
-    }
+    tx.execute(
+        "INSERT INTO chat_history (workspace_id, role, content) VALUES (?1, 'user', ?2)",
+        params![workspace_id, user_text],
+    )
+    .map_err(to_string_err)?;
+    let first = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO chat_history (workspace_id, role, content, tools_used) VALUES (?1, 'assistant', ?2, ?3)",
+        params![workspace_id, answer, tools_json],
+    )
+    .map_err(to_string_err)?;
+    let second = tx.last_insert_rowid();
     let saved = tx
-        .prepare("SELECT id, workspace_id, role, content, created_at FROM chat_history WHERE id IN (?1, ?2) ORDER BY id")
+        .prepare(&format!("{} WHERE id IN (?1, ?2) ORDER BY id", CHAT_SELECT))
         .map_err(to_string_err)?
-        .query_map(params![ids[0], ids[1]], chat_message_from_row)
+        .query_map(params![first, second], chat_message_from_row)
         .map_err(to_string_err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(to_string_err)?;
@@ -5409,6 +5520,11 @@ fn save_chat_exchange(
 /// Модель, адрес, системный промпт и окно истории берутся на бэкенде, а не
 /// приходят из интерфейса: промпт пользователем не редактируется, и
 /// передавать его из JS значило бы сделать его редактируемым через консоль.
+///
+/// Пока модель просит инструменты, они выполняются и результаты уходят ей
+/// обратно; первый ответ текстом — окончательный. Каждый круг — отдельный
+/// запрос к Ollama со своим таймаутом из настроек, замок базы берётся только
+/// на время самих инструментов.
 #[tauri::command]
 pub async fn ollama_chat(
     workspace_id: i64,
@@ -5425,23 +5541,67 @@ pub async fn ollama_chat(
         return Err(format!("Сообщение длиннее {} символов — сократите его", AI_MAX_MESSAGE_CHARS));
     }
 
-    let (settings, request) = {
+    let (settings, messages) = {
         let state = app.state::<DbState>();
         let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
         let settings = read_ai_settings(&conn)?;
+        let system = system_prompt(&conn, workspace_id)?;
         // «Последние 20» считаются вместе с новым сообщением — одно место
         // окна уходит под него.
         let history = read_chat_history(&conn, workspace_id, Some(settings.context_length - 1))?;
-        let request = build_chat_request(&history, &text);
-        (settings, request)
+        (settings, build_chat_request(&system, &history, &text))
     };
 
-    let answer = run_blocking(move || {
-        crate::ollama::chat(&settings.ollama_url, &settings.model, &request)
+    let (answer, tools_used) = converse(&settings, messages, |name, args| {
+        // Замок — только на время одного инструмента, не на весь разговор.
+        let state = app.state::<DbState>();
+        let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        Ok(ai_tools::run(&conn, workspace_id, name, args))
     })
     .await?;
 
     let state = app.state::<DbState>();
     let mut conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
-    save_chat_exchange(&mut conn, workspace_id, &text, &answer)
+    save_chat_exchange(&mut conn, workspace_id, &text, &answer, &tools_used)
+}
+
+/// Разговор с моделью до ответа текстом: пока она просит инструменты, они
+/// выполняются через `run_tool`, и результаты уходят ей обратно. Возвращает
+/// ответ и имена вызванных инструментов по порядку.
+///
+/// Отделено от `ollama_chat`, чтобы живой тест мог прогнать тот же цикл на
+/// базе в памяти, а не на настоящей базе пользователя.
+async fn converse<F>(
+    settings: &AiSettings,
+    mut messages: Vec<crate::ollama::Message>,
+    mut run_tool: F,
+) -> CmdResult<(String, Vec<String>)>
+where
+    F: FnMut(&str, &serde_json::Value) -> CmdResult<String>,
+{
+    let tools = ai_tools::definitions();
+    let mut tools_used = Vec::new();
+
+    for _ in 0..ai_tools::MAX_TOOL_ROUNDS {
+        let reply = {
+            let (settings, request, tools) = (settings.clone(), messages.clone(), tools.clone());
+            run_blocking(move || {
+                crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &tools, settings.timeout_seconds)
+            })
+            .await?
+        };
+        if reply.tool_calls.is_empty() {
+            return Ok((reply.content, tools_used));
+        }
+
+        let calls = reply.tool_calls.clone();
+        messages.push(reply);
+        for call in calls {
+            let result = run_tool(&call.function.name, &call.function.arguments)?;
+            log::info!("ассистент: инструмент {} → {} байт", call.function.name, result.len());
+            messages.push(crate::ollama::Message::tool_result(&call.function.name, result));
+            tools_used.push(call.function.name);
+        }
+    }
+    Err("Модель слишком долго перебирала инструменты и не дала ответа — попробуйте спросить конкретнее.".to_string())
 }
