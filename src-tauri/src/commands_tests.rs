@@ -4904,3 +4904,91 @@ fn the_system_prompt_names_today_and_the_workspace() {
     assert!(prompt.contains("«Тест»"), "{prompt}");
     assert!(system_prompt(&conn, 999).is_err());
 }
+
+// ─── Дата завершения и попытки (ассистент, Фаза 4) ───
+
+fn completed_at_of(conn: &Connection, card_id: i64) -> Option<String> {
+    conn.query_row("SELECT completed_at FROM cards WHERE id = ?1", params![card_id], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn moving_into_the_final_column_stamps_completion_once() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let board = board_of(&conn, first);
+    let final_col = column_id_by_name(&conn, board, "Закрыто");
+    let work = column_id_by_name(&conn, board, "В работе");
+    let card = overdue_card(&conn, first, "Отчёт", 0);
+
+    move_card_in(&mut conn, card, work, 0).unwrap();
+    assert!(completed_at_of(&conn, card).is_none(), "рабочая колонка — ещё не завершение");
+
+    move_card_in(&mut conn, card, final_col, 0).unwrap();
+    let stamp = completed_at_of(&conn, card).expect("въезд в «Закрыто» — завершение");
+    conn.execute("UPDATE cards SET completed_at = '2020-01-01 00:00:00' WHERE id = ?1", params![card]).unwrap();
+    // Перестановка внутри финальной колонки дату не переписывает.
+    move_card_in(&mut conn, card, final_col, 0).unwrap();
+    assert_eq!(completed_at_of(&conn, card).as_deref(), Some("2020-01-01 00:00:00"));
+    assert!(!stamp.is_empty());
+}
+
+#[test]
+fn a_card_created_straight_in_the_final_column_is_completed() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let final_col = column_id_by_name(&conn, board_of(&conn, first), "Закрыто");
+    let done = create_card_in(&conn, final_col, "Уже сделано".into(), String::new()).unwrap();
+    let open = create_card_in(&conn, first, "Ещё нет".into(), String::new()).unwrap();
+    assert!(completed_at_of(&conn, done.id).is_some());
+    assert!(completed_at_of(&conn, open.id).is_none());
+}
+
+#[test]
+fn every_retry_is_logged_and_deleting_the_card_clears_the_log() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Просрочена", 2);
+    request_card_retry_in(&conn, card).unwrap();
+    let logged: i64 = conn.query_row("SELECT COUNT(*) FROM card_retries WHERE card_id = ?1", params![card], |r| r.get(0)).unwrap();
+    assert_eq!(logged, 1);
+
+    // Внешний ключ настоящий: без очистки удаление упало бы.
+    delete_card_in(&mut conn, card).unwrap();
+    let left: i64 = conn.query_row("SELECT COUNT(*) FROM card_retries", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn deleting_a_column_or_a_board_clears_their_retries() {
+    let mut conn = test_db();
+    let (board, first) = board_for_retries(&mut conn);
+    let extra = create_column_in(&mut conn, board, "Лишняя").unwrap().id;
+    let a = overdue_card(&conn, extra, "А", 2);
+    request_card_retry_in(&conn, a).unwrap();
+    // Попытка возвращает карточку в первую рабочую колонку — вернём обратно,
+    // чтобы удалялась именно колонка с ней.
+    conn.execute("UPDATE cards SET column_id = ?1 WHERE id = ?2", params![extra, a]).unwrap();
+    delete_column_in(&mut conn, extra).unwrap();
+
+    let b = overdue_card(&conn, first, "Б", 2);
+    request_card_retry_in(&conn, b).unwrap();
+    delete_board_in(&mut conn, board).unwrap();
+
+    let left: i64 = conn.query_row("SELECT COUNT(*) FROM card_retries", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn the_greeting_carries_the_report_and_is_saved_alone() {
+    let conn = test_db();
+    let report = serde_json::json!({ "during_period": { "completed": 5 } });
+    let request = greeting_request("ПРОМПТ", &report);
+    assert_eq!(request.len(), 2);
+    assert!(request[0].content.starts_with("ПРОМПТ"));
+    assert!(request[0].content.contains(r#""completed":5"#), "{}", request[0].content);
+
+    let saved = save_assistant_message(&conn, 1, "Привет! За неделю…", &["get_productivity_report".to_string()]).unwrap();
+    assert_eq!(saved.role, "assistant");
+    assert_eq!(saved.tools_used, ["get_productivity_report"]);
+    assert_eq!(read_chat_history(&conn, 1, None).unwrap(), vec![saved]);
+}

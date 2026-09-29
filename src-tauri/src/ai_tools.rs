@@ -82,6 +82,11 @@ pub(super) fn definitions() -> Vec<Value> {
         tool("get_time_summary",
              "Сколько времени потрачено по таймеру на задачу или на всю доску. Укажи ровно одно: card_id или board_id.",
              json!({ "card_id": id("id задачи"), "board_id": id("id доски") }), &[]),
+        tool("get_productivity_report",
+             "Сводка продуктивности за последние N дней: сколько задач создано и завершено, сколько \
+              попыток запрошено, сколько времени по таймеру; и на сейчас — активные, просроченные, \
+              «требуют внимания», топ-3 доски по активным задачам.",
+             json!({ "period_days": id("за сколько последних дней, например 7 или 30") }), &["period_days"]),
 
         // ─── Изменения: каждое пользователь подтверждает в чате ───
         tool("create_card",
@@ -155,6 +160,8 @@ pub(super) fn run(conn: &rusqlite::Connection, workspace_id: i64, name: &str, ar
             .and_then(|from| arg_date(args, "to").map(|to| (from, to)))
             .and_then(|(from, to)| get_cards_by_deadline_range(conn, workspace_id, &from, &to)),
         "get_time_summary" => get_time_summary(conn, workspace_id, args),
+        "get_productivity_report" => arg_id(args, "period_days")
+            .and_then(|days| productivity_report(conn, workspace_id, days)),
         _ => Err(format!("Инструмента «{}» нет. Доступны: {}", name, tool_names().join(", "))),
     };
     match result {
@@ -485,6 +492,116 @@ pub(super) fn format_duration(seconds: i64) -> String {
     } else {
         format!("{} мин", m)
     }
+}
+
+// ─── Сводка продуктивности ───
+
+/// Самый длинный период отчёта. Год — уже не «продуктивность», а архив, и
+/// модели на таком отрезке нечего советовать.
+const MAX_REPORT_DAYS: i64 = 365;
+
+/// Сводка по пространству за последние `days` дней одним вызовом — чтобы
+/// модели не пришлось собирать её из пяти инструментов (и ошибиться в
+/// сложении).
+///
+/// Два вида чисел, и модель должна их различать:
+/// - **за период** — созданные, завершённые, попытки, время: события,
+///   случившиеся в окне;
+/// - **сейчас** — активные, просроченные, «требуют внимания»: состояние на
+///   момент вопроса. «Просрочено за неделю» не существует — просрочка есть
+///   или нет.
+pub(super) fn productivity_report(conn: &rusqlite::Connection, workspace_id: i64, days: i64) -> CmdResult<Value> {
+    if !(1..=MAX_REPORT_DAYS).contains(&days) {
+        return Err(format!("period_days должен быть от 1 до {}", MAX_REPORT_DAYS));
+    }
+    let since = format!("-{} days", days);
+    // Всё, что считается событием, — по доскам пространства, кроме архивных
+    // досок. Архивные **карточки** в счёт идут: задача была создана или
+    // закрыта, даже если её потом убрали с глаз.
+    let count = |sql: &str| -> CmdResult<i64> {
+        conn.query_row(sql, params![workspace_id, since], |r| r.get(0)).map_err(to_string_err)
+    };
+    const IN_WORKSPACE: &str = "FROM cards c
+        JOIN columns col ON col.id = c.column_id
+        JOIN boards b ON b.id = col.board_id
+       WHERE b.workspace_id = ?1 AND b.archived = 0";
+
+    let created = count(&format!("SELECT COUNT(*) {} AND c.created_at >= datetime('now', ?2)", IN_WORKSPACE))?;
+    let completed = count(&format!("SELECT COUNT(*) {} AND c.completed_at >= datetime('now', ?2)", IN_WORKSPACE))?;
+    let retries = count(&format!(
+        "SELECT COUNT(*) FROM card_retries r JOIN cards c ON c.id = r.card_id
+           JOIN columns col ON col.id = c.column_id
+           JOIN boards b ON b.id = col.board_id
+          WHERE b.workspace_id = ?1 AND b.archived = 0 AND r.requested_at >= datetime('now', ?2)"
+    ))?;
+    // Время — по сессиям, закончившимся в окне; идущая не в счёт, как и в
+    // `get_total_time`: её длительности ещё нет.
+    let seconds = count(&format!(
+        "SELECT COALESCE(SUM(t.duration_seconds), 0) FROM time_entries t JOIN cards c ON c.id = t.card_id
+           JOIN columns col ON col.id = c.column_id
+           JOIN boards b ON b.id = col.board_id
+          WHERE b.workspace_id = ?1 AND b.archived = 0 AND t.ended_at >= datetime('now', ?2)"
+    ))?;
+    // Закрытые до появления `completed_at` — дата неизвестна, в «за период»
+    // их не посчитать. Модель должна об этом знать, а не решить, что за
+    // неделю ничего не сделано.
+    let completed_undated = conn
+        .query_row(
+            &format!("SELECT COUNT(*) {} AND col.is_final = 1 AND c.completed_at IS NULL", IN_WORKSPACE),
+            params![workspace_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(to_string_err)?;
+
+    // Состояние «сейчас» — по тому же списку, что видит «Список».
+    let today = today_local(conn)?;
+    let list = build_workspace_card_list(conn, workspace_id, false)?;
+    let finals = final_columns(&list);
+    let open: Vec<&CardRow> = list.cards.iter().filter(|c| !finals.contains(&c.column_id)).collect();
+    let overdue = open.iter().filter(|c| c.due_date.as_deref().is_some_and(|d| d < today.as_str())).count();
+    // Тем же запросом, что и раздел «Требуют внимания», — иначе числа в
+    // сводке и в разделе разошлись бы на карточках из архивных колонок.
+    let attention = mistake_cards_in(conn, workspace_id)?.len();
+
+    let mut per_board: Vec<(String, usize)> = Vec::new();
+    for card in &open {
+        match per_board.iter_mut().find(|(name, _)| *name == card.board_name) {
+            Some((_, n)) => *n += 1,
+            None => per_board.push((card.board_name.clone(), 1)),
+        }
+    }
+    per_board.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let top_boards: Vec<Value> = per_board
+        .iter()
+        .take(3)
+        .map(|(name, n)| json!({ "board": name, "active_cards": n }))
+        .collect();
+
+    let mut report = json!({
+        "period_days": days,
+        "today": today,
+        "during_period": {
+            "created": created,
+            "completed": completed,
+            "retries_requested": retries,
+            "time_tracked": format_duration(seconds),
+            "time_tracked_seconds": seconds,
+        },
+        "right_now": {
+            "active": open.len(),
+            "overdue": overdue,
+            "needs_attention": attention,
+        },
+        "top_boards_by_active_cards": top_boards,
+    });
+    if completed_undated > 0 {
+        report["note"] = json!(format!(
+            "Ещё {} завершённых задач закрыты до того, как приложение начало запоминать дату завершения, — \
+             в «completed» за период они не входят.",
+            completed_undated
+        ));
+    }
+    Ok(report)
 }
 
 // ─── Изменения ───

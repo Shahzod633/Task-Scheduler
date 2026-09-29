@@ -818,6 +818,13 @@ fn create_card_in(conn: &rusqlite::Connection, column_id: i64, title: String, de
     ).map_err(to_string_err)?;
 
     let id = conn.last_insert_rowid();
+    // Карточка, заведённая сразу в финальной колонке, завершена в момент
+    // создания — иначе отчёт «завершено за период» её бы не увидел.
+    conn.execute(
+        "UPDATE cards SET completed_at = datetime('now')
+          WHERE id = ?1 AND (SELECT is_final FROM columns WHERE id = ?2) = 1",
+        params![id, column_id],
+    ).map_err(to_string_err)?;
     Ok(Card {
         id, column_id, title, description, position: pos, due_date: None, created_at: "".into(), archived: 0,
         is_mistake: false, mistake_marked_at: None, mistake_resolved_at: None, retry_count: 0,
@@ -997,6 +1004,14 @@ fn move_card_within(
         tx.execute(
             "UPDATE cards SET column_id = ?1, position = ?2 WHERE id = ?3",
             params![new_column_id, new_position, id],
+        ).map_err(to_string_err)?;
+        // Въезд в финальную колонку — момент завершения задачи. Выезда оттуда
+        // нет (проверка выше), так что отметка ставится ровно один раз.
+        tx.execute(
+            "UPDATE cards SET completed_at = datetime('now')
+              WHERE id = ?1 AND completed_at IS NULL
+                AND (SELECT is_final FROM columns WHERE id = ?2) = 1",
+            params![id, new_column_id],
         ).map_err(to_string_err)?;
     }
 
@@ -3463,6 +3478,7 @@ fn delete_card_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     tx.execute("DELETE FROM checklist_items WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM card_comments WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM time_entries WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
+    tx.execute("DELETE FROM card_retries WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM custom_field_values WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     drop_dependencies_of(&tx, id).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE id = ?1", params![id]).map_err(to_string_err)?;
@@ -3497,6 +3513,10 @@ fn delete_column_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     ).map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM time_entries WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM card_retries WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
         params![id],
     ).map_err(to_string_err)?;
     tx.execute(
@@ -3557,6 +3577,14 @@ fn delete_board_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     ).map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM time_entries WHERE card_id IN (
+            SELECT c.id FROM cards c
+            INNER JOIN columns col ON col.id = c.column_id
+            WHERE col.board_id = ?1
+        )",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM card_retries WHERE card_id IN (
             SELECT c.id FROM cards c
             INNER JOIN columns col ON col.id = c.column_id
             WHERE col.board_id = ?1
@@ -4141,6 +4169,12 @@ pub fn resolve_card_mistake(card_id: i64, state: State<'_, DbState>) -> CmdResul
 #[tauri::command]
 pub fn get_mistake_cards(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Card>> {
     let conn = state.conn.lock().unwrap();
+    mistake_cards_in(&conn, workspace_id)
+}
+
+/// Тело `get_mistake_cards` без `State` — по нему же сводка ассистента
+/// считает «Требуют внимания», чтобы число совпадало с разделом.
+fn mistake_cards_in(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<Vec<Card>> {
     let sql = format!(
         "SELECT {cols}, b.id, b.name, col.name
          FROM cards c
@@ -4645,6 +4679,9 @@ fn request_card_retry_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult
           WHERE id = ?2",
         params![format!("+{} days", RETRY_EXTENSION_DAYS), card_id],
     ).map_err(to_string_err)?;
+    // Отдельная строка на попытку — для отчёта «сколько попыток за период».
+    tx.execute("INSERT INTO card_retries (card_id) VALUES (?1)", params![card_id])
+        .map_err(to_string_err)?;
 
     // В начало первой рабочей колонки: задача возвращается в работу, а не
     // теряется в хвосте списка. Если она уже там — перенос всё равно нужен,
@@ -5292,7 +5329,17 @@ const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри п
 - Приоритет (если не указан — Medium)
 - Исполнитель (если не указан — текущий пользователь)
 
-Новая карточка всегда создаётся в первой рабочей колонке доски (не в финальной).";
+Новая карточка всегда создаётся в первой рабочей колонке доски (не в финальной).
+
+В начале разговора (когда в истории ещё нет ни одной реплики) начни с краткой сводки продуктивности \
+за неделю, используя get_productivity_report. Не перечисляй все числа — выдели 2-3 ключевых, особенно \
+если есть просроченные задачи или задачи в «Требуют внимания».
+
+Ты можешь давать рекомендации:
+- Если много просроченных — предложи пересмотреть приоритеты
+- Если нагрузка неравномерная — предложи перераспределить задачи
+- Если задача давно без движения — обрати внимание
+Но не навязывайся: если пользователь спрашивает конкретное — отвечай конкретно, без непрошеных советов.";
 
 /// Предел длины одного сообщения человека. Не про безопасность, а про окно
 /// контекста: вставленный целиком лог на мегабайт модель всё равно обрежет, а
@@ -5819,4 +5866,86 @@ pub fn get_pending_action(workspace_id: i64, assistant: State<'_, AssistantState
         description: p.prepared.description.clone(),
         warnings: p.prepared.warnings.clone(),
     }))
+}
+
+// ─── Приветственная сводка ───
+
+/// За сколько дней сводка при открытии пустого чата.
+const GREETING_REPORT_DAYS: i64 = 7;
+
+/// Запрос к модели на приветствие: тот же системный промпт, сводка за неделю
+/// прямо в нём (данные даются заранее — вызывать инструмент ради приветствия
+/// незачем) и короткая просьба поздороваться. Шаблона ответа нет: модель
+/// сама выбирает, что из чисел назвать.
+fn greeting_request(system: &str, report: &serde_json::Value) -> Vec<crate::ollama::Message> {
+    use crate::ollama::Message;
+    let system = format!(
+        "{}\n\nСводка продуктивности за последние {} дней (результат get_productivity_report):\n{}\n\n\
+         Пользователь только что открыл чат, и разговор ещё не начинался. Коротко поприветствуй его: \
+         выдели 2-3 ключевых числа из сводки — в первую очередь просроченные задачи и «Требуют внимания», \
+         если они есть, — и закончи вопросом, чем помочь. Не больше пяти строк.",
+        system, GREETING_REPORT_DAYS, report
+    );
+    vec![Message::new("system", system), Message::new("user", "(открыл чат)")]
+}
+
+/// Одна реплика ассистента без вопроса человека — так ложится приветствие.
+fn save_assistant_message(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+    content: &str,
+    tools_used: &[String],
+) -> CmdResult<ChatMessage> {
+    conn.execute(
+        "INSERT INTO chat_history (workspace_id, role, content, tools_used) VALUES (?1, 'assistant', ?2, ?3)",
+        params![workspace_id, content, serde_json::to_string(tools_used).map_err(to_string_err)?],
+    )
+    .map_err(to_string_err)?;
+    conn.query_row(
+        &format!("{} WHERE id = ?1", CHAT_SELECT),
+        params![conn.last_insert_rowid()],
+        chat_message_from_row,
+    )
+    .map_err(to_string_err)
+}
+
+/// Приветствие со сводкой за неделю — только для **пустой** истории: у
+/// начатого разговора есть что продолжать и без него. Возвращает записанную
+/// реплику или `None`, если история уже не пуста или ждёт подтверждение.
+///
+/// Реплика ложится в историю, как обычный ответ: следующий вопрос модель
+/// задаёт уже с ней в контексте, и повторять сводку ей незачем.
+#[tauri::command]
+pub async fn ollama_greeting(workspace_id: i64, app: tauri::AppHandle) -> CmdResult<Option<ChatMessage>> {
+    use tauri::Manager;
+
+    let prepared = {
+        if app.state::<AssistantState>().pending.lock().map_err(to_string_err)?.contains_key(&workspace_id) {
+            return Ok(None);
+        }
+        let state = app.state::<DbState>();
+        let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        if !read_chat_history(&conn, workspace_id, Some(1))?.is_empty() {
+            return Ok(None);
+        }
+        let settings = read_ai_settings(&conn)?;
+        let report = ai_tools::productivity_report(&conn, workspace_id, GREETING_REPORT_DAYS)?;
+        (settings.clone(), greeting_request(&system_prompt(&conn, workspace_id)?, &report))
+    };
+    let (settings, request) = prepared;
+
+    let text = run_blocking(move || {
+        crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &[], settings.timeout_seconds)
+    })
+    .await?
+    .content;
+
+    let state = app.state::<DbState>();
+    let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+    // Пока модель думала, человек мог успеть спросить своё — тогда
+    // приветствие уже не к месту.
+    if !read_chat_history(&conn, workspace_id, Some(1))?.is_empty() {
+        return Ok(None);
+    }
+    save_assistant_message(&conn, workspace_id, &text, &["get_productivity_report".to_string()]).map(Some)
 }

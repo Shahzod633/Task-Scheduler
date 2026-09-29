@@ -32,6 +32,16 @@ import { createElement, $, showToast, parseTimestamp, autoResize } from './utils
  */
 let inFlight = null;
 
+/**
+ * Приветствие со сводкой, которое модель ещё пишет: `{ workspaceId, promise }`.
+ *
+ * Отдельно от `inFlight`, потому что вопроса не блокирует: на холодной
+ * модели сводка пишется до минуты, и человек, начавший печатать сразу, не
+ * должен упираться в молчащий Enter. Спросил раньше, чем пришла сводка, —
+ * бэкенд её просто не запишет (история уже не пуста).
+ */
+let greeting = null;
+
 /** Инструменты бэкенда (`ai_tools.rs`) — человеческими словами. */
 const TOOL_LABELS = {
     get_boards: 'доски',
@@ -43,6 +53,7 @@ const TOOL_LABELS = {
     get_overdue_cards: 'просроченные',
     get_cards_by_deadline_range: 'сроки',
     get_time_summary: 'учёт времени',
+    get_productivity_report: 'сводка продуктивности',
 };
 
 /** Изменения, после которых стоит перечитать таймер в шапке. */
@@ -108,13 +119,14 @@ export async function renderAssistantPage(workspaceId) {
     let awaiting = null;
 
     const busy = () => inFlight !== null && inFlight.workspaceId === workspaceId;
+    const greeting_busy = () => greeting !== null && greeting.workspaceId === workspaceId;
 
     function syncControls() {
         input.disabled = !ready;
         // Пока ждём ответа на превью, новый вопрос не принимается: он
         // пришёлся бы посреди незаконченного ответа.
         sendBtn.disabled = !ready || busy() || awaiting !== null;
-        clearBtn.disabled = busy() || (history.length === 0 && awaiting === null);
+        clearBtn.disabled = busy() || greeting_busy() || (history.length === 0 && awaiting === null);
     }
 
     function showNotice(text, action) {
@@ -132,7 +144,7 @@ export async function renderAssistantPage(workspaceId) {
 
     function renderList() {
         list.innerHTML = '';
-        if (history.length === 0 && !busy() && !awaiting) {
+        if (history.length === 0 && !busy() && !awaiting && !greeting_busy()) {
             list.appendChild(createElement('div', { className: 'assistant__empty' },
                 createElement('span', { className: 'assistant__empty-icon', innerHTML: Icons.sparkles }),
                 createElement('p', {}, 'Здесь пока пусто. Спросите о своих задачах — например, «Какие задачи просрочены?» ' +
@@ -146,6 +158,9 @@ export async function renderAssistantPage(workspaceId) {
         } else if (awaiting) {
             list.appendChild(messageBubble({ role: 'user', content: awaiting.user_text }));
             list.appendChild(actionCard(awaiting, ready, confirm));
+        } else if (greeting_busy()) {
+            // У приветствия вопроса нет — только «печатает…».
+            list.appendChild(typingBubble());
         }
         list.scrollTop = list.scrollHeight;
         syncControls();
@@ -217,6 +232,34 @@ export async function renderAssistantPage(workspaceId) {
         track(text, api.ollamaChat(workspaceId, text));
     }
 
+    /**
+     * Приветствие со сводкой за неделю — когда история пуста. Числа модель
+     * берёт из отчёта, текст пишет сама. Не вышло — не беда: чат работает и
+     * без приветствия, поэтому ошибка тихая, строкой над полем.
+     */
+    async function greet() {
+        const request = { workspaceId, promise: api.ollamaGreeting(workspaceId) };
+        greeting = request;
+        renderList();
+        input.focus();
+        try {
+            // Бэкенд записывает сводку, только если к её приходу история
+            // пуста, — значит, в DOM она встаёт первой, перед вопросом,
+            // который человек, возможно, уже отправил.
+            const message = await request.promise;
+            if (message && page.isConnected) history.unshift(message);
+        } catch (e) {
+            // Сводка — не ответ на вопрос: если человек уже спросил своё,
+            // жаловаться на неё незачем.
+            if (page.isConnected && history.length === 0 && !busy()) {
+                showError(`Не удалось подготовить сводку: ${e}`);
+            }
+        } finally {
+            if (greeting === request) greeting = null;
+        }
+        if (page.isConnected) renderList();
+    }
+
     /** «Да» или «Отмена» на превью. */
     function confirm(approved) {
         const action = awaiting;
@@ -262,6 +305,7 @@ export async function renderAssistantPage(workspaceId) {
     // Вернулись, пока модель ещё думает над прошлым запросом, — дождаться и
     // перечитать. Сам `track()` того вызова уже не видит эту страницу.
     if (busy()) inFlight.promise.catch(() => {}).finally(reload);
+    if (greeting_busy()) greeting.promise.catch(() => {}).finally(reload);
 
     await checkReady();
 
@@ -317,7 +361,11 @@ export async function renderAssistantPage(workspaceId) {
         // Перерисовка, а не только кнопки: превью, нарисованное до проверки
         // связи, держало «Да» выключенной.
         renderList();
-        if (!busy() && !awaiting) input.focus();
+        if (history.length === 0 && !awaiting && !busy() && !greeting_busy()) {
+            greet();
+        } else if (!busy() && !awaiting) {
+            input.focus();
+        }
     }
 }
 

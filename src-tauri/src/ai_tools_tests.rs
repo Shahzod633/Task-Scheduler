@@ -81,7 +81,7 @@ fn every_defined_tool_has_a_handler_and_a_valid_schema() {
         }
         assert_eq!(is_write_tool(name), WRITE_TOOLS.contains(&name));
     }
-    assert_eq!(definitions().len(), 17);
+    assert_eq!(definitions().len(), 18);
     // Каждое изменение описано в схеме, иначе модель о нём не узнает.
     for w in WRITE_TOOLS {
         assert!(definitions().iter().any(|d| d["function"]["name"] == w), "{w}");
@@ -512,6 +512,96 @@ fn timers_start_and_stop_for_the_user_by_default() {
     assert_eq!(count(&f.conn, "SELECT COUNT(*) FROM time_entries"), 2);
 }
 
+
+// ─── Сводка продуктивности ───
+
+#[test]
+fn the_report_splits_period_events_from_the_current_state() {
+    let f = fixture();
+    let (second, second_open, _) = board(&f.conn, f.ws, "Учёба");
+    let yesterday = date_offset(&f.conn, -1);
+
+    // Созданы в периоде: три открытые + одна завершённая сегодня.
+    let a = card(&f.conn, f.open_col, "А", Some(&yesterday), None);        // просрочена
+    card(&f.conn, f.open_col, "Б", None, None);
+    card(&f.conn, second_open, "В", None, None);
+    let done = card(&f.conn, f.final_col, "Готово", None, None);
+    f.conn.execute("UPDATE cards SET completed_at = datetime('now', '-1 day') WHERE id = ?1", params![done]).unwrap();
+    // Создана и закрыта давно — не в периоде.
+    let old = card(&f.conn, f.final_col, "Старое", None, None);
+    f.conn.execute("UPDATE cards SET created_at = datetime('now', '-60 days'), completed_at = datetime('now', '-50 days') WHERE id = ?1", params![old]).unwrap();
+    // Закрыта до появления даты завершения.
+    card(&f.conn, f.final_col, "Без даты", None, None);
+    // «Требует внимания», попытка и время.
+    f.conn.execute("UPDATE cards SET is_mistake = 1 WHERE id = ?1", params![a]).unwrap();
+    f.conn.execute("INSERT INTO card_retries (card_id) VALUES (?1)", params![a]).unwrap();
+    f.conn.execute("INSERT INTO card_retries (card_id, requested_at) VALUES (?1, datetime('now', '-20 days'))", params![a]).unwrap();
+    f.conn.execute(
+        "INSERT INTO time_entries (card_id, member_id, started_at, ended_at, duration_seconds)
+         VALUES (?1, ?2, datetime('now', '-3 hours'), datetime('now', '-1 hours'), 7200)",
+        params![a, f.me],
+    ).unwrap();
+    // Чужое пространство не считается.
+    card(&f.conn, f.other_col, "Чужая", Some(&yesterday), None);
+
+    let v = call(&f, "get_productivity_report", json!({"period_days": 7}));
+    let p = &v["during_period"];
+    assert_eq!(p["created"], 5, "{v}"); // А, Б, В, Готово, Без даты
+    assert_eq!(p["completed"], 1);
+    assert_eq!(p["retries_requested"], 1);
+    assert_eq!(p["time_tracked"], "2 ч 00 мин");
+    let now = &v["right_now"];
+    assert_eq!(now["active"], 3);
+    assert_eq!(now["overdue"], 1);
+    assert_eq!(now["needs_attention"], 1);
+    assert_eq!(v["top_boards_by_active_cards"], json!([
+        {"board": "Shady's tasks", "active_cards": 2},
+        {"board": "Учёба", "active_cards": 1},
+    ]));
+    assert!(v["note"].as_str().unwrap().contains("Ещё 1 завершённых"), "{v}");
+    let _ = second;
+
+    // За 30 дней попадает и вторая попытка.
+    let v = call(&f, "get_productivity_report", json!({"period_days": 30}));
+    assert_eq!(v["during_period"]["retries_requested"], 2);
+}
+
+#[test]
+fn the_report_period_is_bounded() {
+    let f = fixture();
+    for bad in [json!({}), json!({"period_days": 0}), json!({"period_days": 366}), json!({"period_days": "неделя"})] {
+        assert!(call(&f, "get_productivity_report", bad.clone())["error"].is_string(), "{bad}");
+    }
+    assert!(call(&f, "get_productivity_report", json!({"period_days": "30"}))["error"].is_null());
+}
+
+#[test]
+fn an_empty_workspace_gets_zeros_not_errors() {
+    let f = fixture();
+    let v = call(&f, "get_productivity_report", json!({"period_days": 7}));
+    assert_eq!(v["during_period"]["created"], 0);
+    assert_eq!(v["right_now"]["active"], 0);
+    assert_eq!(v["top_boards_by_active_cards"], json!([]));
+    assert!(v.get("note").is_none());
+}
+
+
+#[test]
+fn needs_attention_matches_the_attention_section() {
+    let f = fixture();
+    let a = card(&f.conn, f.open_col, "А", None, None);
+    // Колонка ушла в архив, а карточка осталась помеченной — раздел
+    // «Требуют внимания» её показывает, значит и сводка считает.
+    f.conn.execute("INSERT INTO columns (board_id, name, position, archived) VALUES (?1, 'Старая', 5, 1)", params![f.board]).unwrap();
+    let old_col = f.conn.last_insert_rowid();
+    let b = card(&f.conn, old_col, "Б", None, None);
+    f.conn.execute("UPDATE cards SET is_mistake = 1 WHERE id IN (?1, ?2)", params![a, b]).unwrap();
+    let section = mistake_cards_in(&f.conn, f.ws).unwrap().len();
+    assert_eq!(section, 2);
+    let v = call(&f, "get_productivity_report", json!({"period_days": 7}));
+    assert_eq!(v["right_now"]["needs_attention"], section);
+}
+
 // ─── Живая проверка с настоящей моделью ───
 
 fn live_settings() -> AiSettings {
@@ -644,4 +734,50 @@ fn actions_are_kept_with_the_answer_in_history() {
     assert!(saved[0].actions.is_empty());
     assert_eq!(saved[1].actions, log);
     assert_eq!(read_chat_history(&f.conn, f.ws, None).unwrap()[1].actions, log);
+}
+
+/// «Проверка» Фазы 4: приветствие по сводке с реальными числами и вопрос о
+/// продуктивности за месяц — модель должна вызвать отчёт за 30 дней.
+///
+/// `cargo test --lib ai_tools_live_report -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn ai_tools_live_report_greeting_and_month_question() {
+    let f = fixture();
+    let yesterday = date_offset(&f.conn, -1);
+    let a = card(&f.conn, f.open_col, "Сдать отчёт по проекту", Some(&yesterday), Some(f.me));
+    card(&f.conn, f.open_col, "Позвонить подрядчику", Some(&yesterday), None);
+    card(&f.conn, f.open_col, "Обновить сайт", None, None);
+    let done = card(&f.conn, f.final_col, "Выпустить релиз", None, None);
+    f.conn.execute("UPDATE cards SET completed_at = datetime('now', '-2 days') WHERE id = ?1", params![done]).unwrap();
+    f.conn.execute("UPDATE cards SET is_mistake = 1 WHERE id = ?1", params![a]).unwrap();
+    let settings = live_settings();
+    let system = system_prompt(&f.conn, f.ws).unwrap();
+
+    let report = productivity_report(&f.conn, f.ws, 7).unwrap();
+    println!("СВОДКА: {report}");
+    let started = std::time::Instant::now();
+    let greeting = tauri::async_runtime::block_on(async {
+        let (settings, request) = (settings.clone(), greeting_request(&system, &report));
+        run_blocking(move || crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &[], settings.timeout_seconds)).await
+    }).unwrap().content;
+    println!("ПРИВЕТСТВИЕ ({:.1} с):\n{greeting}\n", started.elapsed().as_secs_f32());
+    assert!(greeting.contains('2'), "в приветствии должны быть реальные числа (2 просроченные)");
+
+    let question = "Как у меня дела с продуктивностью за месяц?";
+    let greeting_msg = ChatMessage {
+        id: 1, workspace_id: f.ws, role: "assistant".into(), content: greeting, created_at: String::new(),
+        tools_used: vec![], actions: vec![],
+    };
+    let mut turn = Turn::new(question.into(), build_chat_request(&system, &[greeting_msg], question));
+    let started = std::time::Instant::now();
+    let answer = match tauri::async_runtime::block_on(advance(&settings, &mut turn, |name, args| {
+        println!("    → {name}({args})");
+        Ok(step(&f.conn, f.ws, name, args))
+    })).unwrap() {
+        TurnStep::Answer(a) => a,
+        TurnStep::Confirm(p) => panic!("на вопрос о продуктивности модель предложила изменение: {}", p.description),
+    };
+    println!("ВОПРОС: {question}\nИНСТРУМЕНТЫ: {:?}\nОТВЕТ ({:.1} с): {answer}", turn.tools_used, started.elapsed().as_secs_f32());
+    assert!(turn.tools_used.iter().any(|t| t == "get_productivity_report"), "{:?}", turn.tools_used);
 }

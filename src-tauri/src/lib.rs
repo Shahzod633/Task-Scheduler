@@ -176,6 +176,7 @@ pub fn run() {
             commands::ollama_chat,
             commands::ollama_confirm_action,
             commands::get_pending_action,
+            commands::ollama_greeting,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

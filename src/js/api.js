@@ -721,6 +721,14 @@ export async function ollamaConfirmAction(workspaceId, actionId, approved) {
     return await invoke('ollama_confirm_action', { workspaceId, actionId, approved });
 }
 
+/**
+ * Приветствие со сводкой за неделю — только для пустой истории. Возвращает
+ * записанную реплику ассистента или null, если история уже не пуста.
+ */
+export async function ollamaGreeting(workspaceId) {
+    return await invoke('ollama_greeting', { workspaceId });
+}
+
 /** Изменение, ждущее подтверждения в пространстве, или null. */
 export async function getPendingAction(workspaceId) {
     return await invoke('get_pending_action', { workspaceId });

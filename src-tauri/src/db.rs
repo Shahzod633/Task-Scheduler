@@ -590,6 +590,28 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
     if !table_has_column(conn, "chat_history", "tools_used") {
         conn.execute("ALTER TABLE chat_history ADD COLUMN tools_used TEXT", ())?;
     }
+    // Когда карточка попала в финальную колонку — для отчёта «завершено за
+    // период» (ассистент, Фаза 4). Отметка ставится один раз: из финальной
+    // колонки карточка не уезжает (§20.3). У карточек, закрытых до появления
+    // колонки, её нет — и выдумывать её не из чего.
+    if !table_has_column(conn, "cards", "completed_at") {
+        conn.execute("ALTER TABLE cards ADD COLUMN completed_at TEXT", ())?;
+    }
+    // Каждая запрошенная попытка — отдельной строкой: `cards.retry_count`
+    // знает только «сколько всего», а отчёту нужно «сколько за неделю».
+    // Каскада нет по общему правилу базы: удаление карточки, колонки и доски
+    // снимает строки вручную.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS card_retries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            card_id INTEGER NOT NULL,
+            requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (card_id) REFERENCES cards(id)
+        )",
+        (),
+    )?;
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_card_retries_card ON card_retries(card_id)", ())?;
+
     // Изменения, предложенные ассистентом по ходу ответа, и их судьба
     // (выполнено / отменено / не вышло) — JSON-массив, Фаза 3.
     if !table_has_column(conn, "chat_history", "actions") {
