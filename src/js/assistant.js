@@ -9,22 +9,28 @@
 // История своя у каждого пространства (`chat_history.workspace_id`).
 // Системный промпт и окно контекста живут на бэкенде; отсюда уходит только
 // текст нового сообщения.
+//
+// Изменения ассистент молча не делает: предложенное изменение приходит
+// превью с кнопками «Да» / «Отмена», и ответ продолжается только после
+// выбора. Само ожидание хранит бэкенд — ушли на доску и вернулись, превью на
+// месте.
 
 import * as api from './api.js';
 import Icons from './icons.js';
 import { confirmDialog } from './dialog.js';
 import { renderMarkdown } from './markdown.js';
+import { refreshTimer } from './timer.js';
 import { createElement, $, showToast, parseTimestamp, autoResize } from './utils.js';
 
 /**
- * Вопрос, на который модель ещё думает: `{ workspaceId, text, promise }`.
+ * Запрос, на который модель ещё думает: `{ workspaceId, text, promise }`.
  *
- * Живёт на уровне модуля, а не страницы: ответ идёт до двух минут, и за это
- * время человек успевает уйти на доску и вернуться. Вернувшись, он должен
- * увидеть свой вопрос и «печатает…», а не пустое поле и соблазн спросить
- * второй раз.
+ * Живёт на уровне модуля, а не страницы: ответ идёт до нескольких минут, и
+ * за это время человек успевает уйти на доску и вернуться. Вернувшись, он
+ * должен увидеть свой вопрос и «печатает…», а не пустое поле и соблазн
+ * спросить второй раз.
  */
-let pending = null;
+let inFlight = null;
 
 /** Инструменты бэкенда (`ai_tools.rs`) — человеческими словами. */
 const TOOL_LABELS = {
@@ -38,6 +44,9 @@ const TOOL_LABELS = {
     get_cards_by_deadline_range: 'сроки',
     get_time_summary: 'учёт времени',
 };
+
+/** Изменения, после которых стоит перечитать таймер в шапке. */
+const TIMER_TOOLS = new Set(['start_timer', 'stop_timer']);
 
 export async function renderAssistantPage(workspaceId) {
     const content = $('#content');
@@ -95,14 +104,17 @@ export async function renderAssistantPage(workspaceId) {
     // ─── Состояние ───
     let ready = false;        // Ollama отвечает и модель на месте
     let history = [];
+    /** Изменение, ждущее «Да» / «Отмена» (`AiPendingAction`), или null. */
+    let awaiting = null;
 
-    const busy = () => pending !== null && pending.workspaceId === workspaceId;
+    const busy = () => inFlight !== null && inFlight.workspaceId === workspaceId;
 
     function syncControls() {
-        const blocked = !ready || busy();
         input.disabled = !ready;
-        sendBtn.disabled = blocked;
-        clearBtn.disabled = busy() || history.length === 0;
+        // Пока ждём ответа на превью, новый вопрос не принимается: он
+        // пришёлся бы посреди незаконченного ответа.
+        sendBtn.disabled = !ready || busy() || awaiting !== null;
+        clearBtn.disabled = busy() || (history.length === 0 && awaiting === null);
     }
 
     function showNotice(text, action) {
@@ -120,41 +132,66 @@ export async function renderAssistantPage(workspaceId) {
 
     function renderList() {
         list.innerHTML = '';
-        if (history.length === 0 && !busy()) {
+        if (history.length === 0 && !busy() && !awaiting) {
             list.appendChild(createElement('div', { className: 'assistant__empty' },
                 createElement('span', { className: 'assistant__empty-icon', innerHTML: Icons.sparkles }),
                 createElement('p', {}, 'Здесь пока пусто. Спросите о своих задачах — например, «Какие задачи просрочены?» ' +
-                'или «Сколько у меня задач со сроком на этой неделе?»'),
+                'или попросите: «Создай задачу „Подготовить отчёт“ на доске …»'),
             ));
         }
         for (const message of history) list.appendChild(messageBubble(message));
         if (busy()) {
-            list.appendChild(messageBubble({ role: 'user', content: pending.text }));
+            list.appendChild(messageBubble({ role: 'user', content: inFlight.text }));
             list.appendChild(typingBubble());
+        } else if (awaiting) {
+            list.appendChild(messageBubble({ role: 'user', content: awaiting.user_text }));
+            list.appendChild(actionCard(awaiting, ready, confirm));
         }
         list.scrollTop = list.scrollHeight;
         syncControls();
     }
 
-    // ─── Отправка ───
-    async function send() {
-        const text = input.value.trim();
-        if (!text || !ready || busy()) return;
+    /** Перечитать историю и ожидание — после ответа, пришедшего без нас. */
+    async function reload() {
+        try {
+            const [fresh, action] = await Promise.all([
+                api.getChatHistory(workspaceId),
+                api.getPendingAction(workspaceId),
+            ]);
+            history = fresh;
+            awaiting = action;
+        } catch (e) {
+            showToast('Не удалось загрузить историю чата', 'error');
+        }
+        if (page.isConnected) renderList();
+    }
 
+    /**
+     * Ведёт один запрос к ассистенту — вопрос или «Да»/«Отмена» — до итога:
+     * ответ ложится в историю, либо приходит следующее превью.
+     *
+     * При отказе в истории ничего не остаётся (бэкенд пишет пару только
+     * после ответа), поэтому вопрос возвращается в поле — переспросить.
+     */
+    async function track(text, promise) {
+        const request = { workspaceId, text, promise };
+        inFlight = request;
+        awaiting = null;
         showError('');
-        input.value = '';
-        autoResize(input);
-
-        const request = { workspaceId, text, promise: api.ollamaChat(workspaceId, text) };
-        pending = request;
         renderList();
 
         try {
-            const saved = await request.promise;
-            if (page.isConnected) history.push(...saved);
+            const turn = await promise;
+            // Таймер в шапке живёт своей жизнью — после изменения из чата его
+            // надо перечитать, даже если сам чат уже закрыли.
+            if (turn.messages.some(m => (m.tools_used || []).some(t => TIMER_TOOLS.has(t)))) {
+                refreshTimer();
+            }
+            if (page.isConnected) {
+                history.push(...turn.messages);
+                awaiting = turn.pending;
+            }
         } catch (e) {
-            // В истории ничего не осталось (бэкенд пишет пару только после
-            // ответа), поэтому текст возвращается в поле — переспросить.
             if (page.isConnected) {
                 if (!input.value.trim()) input.value = text;
                 autoResize(input);
@@ -163,13 +200,28 @@ export async function renderAssistantPage(workspaceId) {
                 showToast(String(e), 'error');
             }
         } finally {
-            if (pending === request) pending = null;
+            if (inFlight === request) inFlight = null;
         }
 
         if (page.isConnected) {
             renderList();
-            input.focus();
+            if (!awaiting) input.focus();
         }
+    }
+
+    function send() {
+        const text = input.value.trim();
+        if (!text || !ready || busy() || awaiting) return;
+        input.value = '';
+        autoResize(input);
+        track(text, api.ollamaChat(workspaceId, text));
+    }
+
+    /** «Да» или «Отмена» на превью. */
+    function confirm(approved) {
+        const action = awaiting;
+        if (!action || busy()) return;
+        track(action.user_text, api.ollamaConfirmAction(workspaceId, action.id, approved));
     }
 
     sendBtn.addEventListener('click', send);
@@ -187,7 +239,8 @@ export async function renderAssistantPage(workspaceId) {
         const ok = await confirmDialog({
             title: 'Очистить историю?',
             message: 'Вся переписка с ассистентом в этом пространстве будет удалена. ' +
-                     'Отменить это нельзя.',
+                     'Отменить это нельзя.' +
+                     (awaiting ? ' Предложенное изменение тоже отменится.' : ''),
             confirmText: 'Очистить',
             danger: true,
         });
@@ -195,6 +248,7 @@ export async function renderAssistantPage(workspaceId) {
         try {
             await api.clearChatHistory(workspaceId);
             history = [];
+            awaiting = null;
             renderList();
             showToast('История очищена');
         } catch (e) {
@@ -203,22 +257,11 @@ export async function renderAssistantPage(workspaceId) {
     });
 
     // ─── Загрузка ───
-    try {
-        history = await api.getChatHistory(workspaceId);
-    } catch (e) {
-        showToast('Не удалось загрузить историю чата', 'error');
-    }
-    renderList();
+    await reload();
 
-    // Вернулись, пока модель ещё думает над прошлым вопросом, — дождаться и
-    // перерисовать. Сам `send()` того вызова уже не видит эту страницу.
-    if (busy()) {
-        pending.promise
-            .then(() => api.getChatHistory(workspaceId))
-            .then((fresh) => { if (page.isConnected) { history = fresh; renderList(); } })
-            .catch(() => {})
-            .finally(() => { if (page.isConnected) renderList(); });
-    }
+    // Вернулись, пока модель ещё думает над прошлым запросом, — дождаться и
+    // перечитать. Сам `track()` того вызова уже не видит эту страницу.
+    if (busy()) inFlight.promise.catch(() => {}).finally(reload);
 
     await checkReady();
 
@@ -255,6 +298,7 @@ export async function renderAssistantPage(workspaceId) {
             const retry = createElement('button', { className: 'btn btn--secondary' }, 'Проверить снова');
             retry.addEventListener('click', checkReady);
             showNotice(String(e), retry);
+            renderList();
             return;
         }
         if (!page.isConnected) return;
@@ -263,14 +307,17 @@ export async function renderAssistantPage(workspaceId) {
             subtitle.textContent = `${settings.model} · не найдена`;
             showNotice(`Модели «${settings.model}» нет в Ollama — её могли удалить. ` +
                        'Выберите другую в Настройках → «ИИ-ассистент».', toSettings);
+            renderList();
             return;
         }
 
         subtitle.textContent = `${settings.model} · локально, через Ollama`;
         notice.hidden = true;
         ready = true;
-        syncControls();
-        if (!busy()) input.focus();
+        // Перерисовка, а не только кнопки: превью, нарисованное до проверки
+        // связи, держало «Да» выключенной.
+        renderList();
+        if (!busy() && !awaiting) input.focus();
     }
 }
 
@@ -292,20 +339,85 @@ function messageBubble(message) {
         }));
     }
 
-    // Откуда в ответе числа: какие данные модель запрашивала. Без этой строки
-    // не отличить ответ по базе от ответа «из головы».
-    const tools = [...new Set(message.tools_used || [])];
+    // Что ассистент менял по ходу ответа и что с этим стало — остаётся в
+    // истории навсегда, в отличие от превью.
+    const actions = message.actions || [];
+    if (actions.length) {
+        const box = createElement('ul', { className: 'assistant__actions' });
+        for (const a of actions) box.appendChild(actionLine(a));
+        bubble.appendChild(box);
+    }
+
+    // Откуда в ответе числа: какие данные модель запрашивала. Изменения здесь
+    // не повторяются — они уже перечислены выше.
+    const tools = [...new Set(message.tools_used || [])].filter(t => t in TOOL_LABELS);
     if (tools.length) {
         bubble.appendChild(createElement('div', {
             className: 'assistant__tools',
             title: tools.join(', '),
-        }, `Смотрел: ${tools.map(t => TOOL_LABELS[t] || t).join(' · ')}`));
+        }, `Смотрел: ${tools.map(t => TOOL_LABELS[t]).join(' · ')}`));
     }
 
     const time = formatTime(message.created_at);
     if (time) bubble.appendChild(createElement('span', { className: 'assistant__time' }, time));
 
     row.appendChild(bubble);
+    return row;
+}
+
+/** Строчка журнала действий: что предлагалось и чем кончилось. */
+function actionLine(action) {
+    const states = {
+        done: { icon: Icons.checkCircle, prefix: '' },
+        cancelled: { icon: Icons.x, prefix: 'Отменено: ' },
+        failed: { icon: Icons.alertTriangle, prefix: 'Не выполнено: ' },
+    };
+    const state = states[action.status] || states.failed;
+    const line = createElement('li', { className: `assistant__action-log assistant__action-log--${action.status}` });
+    line.appendChild(createElement('span', { className: 'assistant__action-log-icon', innerHTML: state.icon }));
+    const text = state.prefix + action.description + (action.error ? ` — ${action.error}` : '');
+    line.appendChild(createElement('span', {}, text));
+    return line;
+}
+
+/**
+ * Превью изменения с кнопками. «Да» стоит первой, но фокус не получает:
+ * случайный Enter, оставшийся от отправки вопроса, не должен ничего менять в
+ * базе.
+ */
+function actionCard(action, enabled, onChoice) {
+    const row = createElement('div', { className: 'assistant__row assistant__row--ai' });
+    const card = createElement('div', { className: 'assistant__bubble assistant__bubble--ai assistant__action' });
+
+    card.appendChild(createElement('p', { className: 'assistant__action-title' }, 'Ассистент хочет выполнить:'));
+    card.appendChild(createElement('p', { className: 'assistant__action-text' }, action.description));
+
+    if (action.warnings.length) {
+        const warn = createElement('ul', { className: 'assistant__action-warnings' });
+        for (const w of action.warnings) {
+            const li = createElement('li', {});
+            li.appendChild(createElement('span', { className: 'assistant__action-warning-icon', innerHTML: Icons.alertTriangle }));
+            li.appendChild(createElement('span', {}, w));
+            warn.appendChild(li);
+        }
+        card.appendChild(warn);
+    }
+
+    card.appendChild(createElement('p', { className: 'assistant__action-question' }, 'Подтвердить?'));
+    const buttons = createElement('div', { className: 'assistant__action-buttons' });
+    const yes = createElement('button', { className: 'btn btn--primary btn--sm' }, 'Да');
+    const no = createElement('button', { className: 'btn btn--secondary btn--sm' }, 'Отмена');
+    // Без связи с Ollama «Да» выполнило бы изменение, а ответить модель уже
+    // не смогла бы — пусть сначала вернётся связь.
+    yes.disabled = !enabled;
+    no.disabled = !enabled;
+    yes.addEventListener('click', () => onChoice(true));
+    no.addEventListener('click', () => onChoice(false));
+    buttons.appendChild(yes);
+    buttons.appendChild(no);
+    card.appendChild(buttons);
+
+    row.appendChild(card);
     return row;
 }
 

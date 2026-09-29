@@ -21,6 +21,9 @@ pub fn run() {
                 conn: std::sync::Mutex::new(conn),
                 app_dir,
             });
+            // Изменения, которые ассистент предложил и которые ждут «Да» или
+            // «Отмена», — в памяти, не в базе (см. `commands::AssistantState`).
+            app.manage(commands::AssistantState::default());
 
             // Проверка сроков живёт в отдельном потоке, а не в таймере на
             // фронтенде: напоминание должно приходить и тогда, когда окно
@@ -171,6 +174,8 @@ pub fn run() {
             commands::get_chat_history,
             commands::clear_chat_history,
             commands::ollama_chat,
+            commands::ollama_confirm_action,
+            commands::get_pending_action,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

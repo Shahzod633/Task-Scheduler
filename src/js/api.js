@@ -700,10 +700,28 @@ export async function clearChatHistory(workspaceId) {
 
 /**
  * Вопрос ассистенту. Ответ может идти десятки секунд — модель по дороге
- * вызывает инструменты. Возвращает обе сохранённые реплики — вопрос и ответ
- * (у ответа `tools_used` — какие инструменты вызывались); при отказе в историю
- * не пишется ничего.
+ * вызывает инструменты.
+ *
+ * Возвращает `{ messages, pending }`: либо ответ готов и записан
+ * (`messages` — вопрос и ответ, у ответа `tools_used` и `actions`), либо
+ * ассистент предлагает изменение и ждёт подтверждения (`pending` —
+ * `{ id, user_text, tool, description, warnings }`), и ничего ещё не
+ * записано. При отказе в историю не пишется ничего.
  */
 export async function ollamaChat(workspaceId, content) {
     return await invoke('ollama_chat', { workspaceId, content });
+}
+
+/**
+ * «Да» (`approved = true`) или «Отмена» на предложенное изменение — и
+ * продолжение того же ответа. Возвращает то же, что `ollamaChat`: ассистент
+ * может предложить следующее изменение.
+ */
+export async function ollamaConfirmAction(workspaceId, actionId, approved) {
+    return await invoke('ollama_confirm_action', { workspaceId, actionId, approved });
+}
+
+/** Изменение, ждущее подтверждения в пространстве, или null. */
+export async function getPendingAction(workspaceId) {
+    return await invoke('get_pending_action', { workspaceId });
 }

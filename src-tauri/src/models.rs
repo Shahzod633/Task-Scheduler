@@ -230,6 +230,46 @@ pub struct ChatMessage {
     /// Инструменты, которые модель вызвала ради этого ответа, по порядку.
     /// У реплик человека и ответов без инструментов — пусто.
     pub tools_used: Vec<String>,
+    /// Изменения, которые ассистент предлагал по ходу ответа, и что с ними
+    /// стало. Остаются в истории: по ним видно, что в базе поменялось и кто
+    /// это подтвердил.
+    pub actions: Vec<AiActionLog>,
+}
+
+/// Одно предложенное ассистентом изменение и его судьба.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AiActionLog {
+    /// То же описание, что человек видел в превью.
+    pub description: String,
+    /// `done` — выполнено, `cancelled` — человек отказался, `failed` —
+    /// подтвердил, но выполнить не вышло (данные успели измениться).
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Изменение, которое ждёт «Да» или «Отмена».
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AiPendingAction {
+    /// Номер ожидания: подтверждение со старым номером не выполнит новое
+    /// действие, если между ними что-то поменялось.
+    pub id: i64,
+    /// Вопрос человека, на который идёт ответ, — чат показывает его, пока ждёт.
+    pub user_text: String,
+    pub tool: String,
+    pub description: String,
+    /// О чём стоит знать до «Да»: необратимость, блокирующие задачи,
+    /// остановка другого таймера.
+    pub warnings: Vec<String>,
+}
+
+/// Итог одного обращения к ассистенту: либо ответ готов и записан в историю
+/// (`messages` — вопрос и ответ), либо ассистент ждёт подтверждения
+/// (`pending`), и ничего ещё не записано.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct ChatTurn {
+    pub messages: Vec<ChatMessage>,
+    pub pending: Option<AiPendingAction>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

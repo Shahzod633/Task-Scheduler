@@ -4817,7 +4817,7 @@ fn a_remote_ollama_address_is_not_saved() {
 #[test]
 fn chat_exchange_is_saved_as_a_pair_in_order() {
     let mut conn = test_db();
-    let saved = save_chat_exchange(&mut conn, 1, "Привет", "Здравствуйте!", &[]).unwrap();
+    let saved = save_chat_exchange(&mut conn, 1, "Привет", "Здравствуйте!", &[], &[]).unwrap();
     assert_eq!(saved.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect::<Vec<_>>(),
                [("user", "Привет"), ("assistant", "Здравствуйте!")]);
     assert!(saved.iter().all(|m| m.workspace_id == 1 && !m.created_at.is_empty()));
@@ -4829,7 +4829,7 @@ fn chat_exchange_is_saved_as_a_pair_in_order() {
 fn the_tools_behind_an_answer_are_kept_with_it() {
     let mut conn = test_db();
     let tools = vec!["get_boards".to_string(), "get_board_columns".to_string()];
-    let saved = save_chat_exchange(&mut conn, 1, "Сколько досок?", "Две.", &tools).unwrap();
+    let saved = save_chat_exchange(&mut conn, 1, "Сколько досок?", "Две.", &tools, &[]).unwrap();
     assert!(saved[0].tools_used.is_empty(), "у вопроса человека инструментов нет");
     assert_eq!(saved[1].tools_used, tools);
     assert_eq!(read_chat_history(&conn, 1, None).unwrap()[1].tools_used, tools);
@@ -4838,7 +4838,7 @@ fn the_tools_behind_an_answer_are_kept_with_it() {
 #[test]
 fn a_broken_tools_column_does_not_break_the_history() {
     let mut conn = test_db();
-    save_chat_exchange(&mut conn, 1, "q", "a", &["get_boards".to_string()]).unwrap();
+    save_chat_exchange(&mut conn, 1, "q", "a", &["get_boards".to_string()], &[]).unwrap();
     conn.execute("UPDATE chat_history SET tools_used = 'не json'", ()).unwrap();
     let history = read_chat_history(&conn, 1, None).unwrap();
     assert_eq!(history.len(), 2);
@@ -4849,8 +4849,8 @@ fn a_broken_tools_column_does_not_break_the_history() {
 fn chat_history_belongs_to_its_workspace() {
     let mut conn = test_db();
     let other = second_workspace(&conn);
-    save_chat_exchange(&mut conn, 1, "a", "b", &[]).unwrap();
-    save_chat_exchange(&mut conn, other, "c", "d", &[]).unwrap();
+    save_chat_exchange(&mut conn, 1, "a", "b", &[], &[]).unwrap();
+    save_chat_exchange(&mut conn, other, "c", "d", &[], &[]).unwrap();
 
     assert_eq!(read_chat_history(&conn, other, None).unwrap().iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["c", "d"]);
 
@@ -4863,7 +4863,7 @@ fn chat_history_belongs_to_its_workspace() {
 fn the_context_window_takes_the_latest_messages_oldest_first() {
     let mut conn = test_db();
     for i in 0..5 {
-        save_chat_exchange(&mut conn, 1, &format!("q{i}"), &format!("a{i}"), &[]).unwrap();
+        save_chat_exchange(&mut conn, 1, &format!("q{i}"), &format!("a{i}"), &[], &[]).unwrap();
     }
     let last = read_chat_history(&conn, 1, Some(3)).unwrap();
     assert_eq!(last.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["a3", "q4", "a4"]);
@@ -4873,7 +4873,7 @@ fn the_context_window_takes_the_latest_messages_oldest_first() {
 fn system_rows_never_reach_the_history() {
     let mut conn = test_db();
     conn.execute("INSERT INTO chat_history (workspace_id, role, content) VALUES (1, 'system', 'старый промпт')", ()).unwrap();
-    save_chat_exchange(&mut conn, 1, "q", "a", &[]).unwrap();
+    save_chat_exchange(&mut conn, 1, "q", "a", &[], &[]).unwrap();
     assert_eq!(read_chat_history(&conn, 1, None).unwrap().len(), 2);
 }
 
@@ -4886,7 +4886,7 @@ fn unknown_roles_are_refused_by_the_schema() {
 #[test]
 fn the_request_starts_with_the_system_prompt() {
     let mut conn = test_db();
-    save_chat_exchange(&mut conn, 1, "q", "a", &[]).unwrap();
+    save_chat_exchange(&mut conn, 1, "q", "a", &[], &[]).unwrap();
     let history = read_chat_history(&conn, 1, None).unwrap();
     let request = build_chat_request("ПРОМПТ", &history, "новый вопрос");
     assert_eq!(request.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(), ["system", "user", "assistant", "user"]);

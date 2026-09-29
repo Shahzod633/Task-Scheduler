@@ -12,7 +12,8 @@ use crate::models::{
     CustomField, CustomFieldValue, CUSTOM_FIELD_TYPES,
     EXPORT_FORMAT_VERSION, ReminderSettings, DueReminder,
     EmailSettings, EmailReminder, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, DEFAULT_EMAIL_RECIPIENT,
-    AiSettings, ChatMessage, DEFAULT_AI_CONTEXT_LENGTH, AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX,
+    AiSettings, ChatMessage, AiActionLog, AiPendingAction, ChatTurn,
+    DEFAULT_AI_CONTEXT_LENGTH, AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX,
 };
 
 #[cfg(test)]
@@ -793,7 +794,11 @@ fn cards_in(conn: &rusqlite::Connection, column_id: i64) -> CmdResult<Vec<Card>>
 #[tauri::command]
 pub fn create_card(column_id: i64, title: String, description: String, state: State<'_, DbState>) -> CmdResult<Card> {
     let conn = state.conn.lock().unwrap();
+    create_card_in(&conn, column_id, title, description)
+}
 
+/// Тело `create_card` без `State` — его же зовёт ассистент.
+fn create_card_in(conn: &rusqlite::Connection, column_id: i64, title: String, description: String) -> CmdResult<Card> {
     let pos: i64 = conn.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM cards WHERE column_id = ?1",
         params![column_id],
@@ -1441,7 +1446,11 @@ fn checklist_items_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<Ve
 #[tauri::command]
 pub fn create_checklist_item(card_id: i64, text: String, state: State<'_, DbState>) -> CmdResult<ChecklistItem> {
     let conn = state.conn.lock().unwrap();
+    create_checklist_item_in(&conn, card_id, &text)
+}
 
+/// Тело `create_checklist_item` без `State` — его же зовёт ассистент.
+fn create_checklist_item_in(conn: &rusqlite::Connection, card_id: i64, text: &str) -> CmdResult<ChecklistItem> {
     let text = text.trim().to_string();
     if text.is_empty() {
         return Err("Пункт чек-листа не может быть пустым".to_string());
@@ -1472,7 +1481,11 @@ pub fn create_checklist_item(card_id: i64, text: String, state: State<'_, DbStat
 #[tauri::command]
 pub fn toggle_checklist_item(id: i64, state: State<'_, DbState>) -> CmdResult<bool> {
     let conn = state.conn.lock().unwrap();
+    toggle_checklist_item_in(&conn, id)
+}
 
+/// Тело `toggle_checklist_item` без `State` — его же зовёт ассистент.
+fn toggle_checklist_item_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<bool> {
     let changed = conn.execute(
         "UPDATE checklist_items SET is_done = CASE is_done WHEN 0 THEN 1 ELSE 0 END WHERE id = ?1",
         params![id],
@@ -1667,6 +1680,11 @@ fn delete_member_from(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()>
 #[tauri::command]
 pub fn update_card_assignee(card_id: i64, member_id: Option<i64>, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
+    update_card_assignee_in(&conn, card_id, member_id)
+}
+
+/// Тело `update_card_assignee` без `State` — его же зовёт ассистент.
+fn update_card_assignee_in(conn: &rusqlite::Connection, card_id: i64, member_id: Option<i64>) -> CmdResult<()> {
     conn.execute(
         "UPDATE cards SET assignee_id = ?1 WHERE id = ?2",
         params![member_id, card_id],
@@ -1687,9 +1705,14 @@ pub fn update_card_author(card_id: i64, member_id: Option<i64>, state: State<'_,
 #[tauri::command]
 pub fn update_card_priority(card_id: i64, priority: String, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
+    update_card_priority_in(&conn, card_id, &priority)
+}
+
+/// Тело `update_card_priority` без `State` — его же зовёт ассистент.
+fn update_card_priority_in(conn: &rusqlite::Connection, card_id: i64, priority: &str) -> CmdResult<()> {
     conn.execute(
         "UPDATE cards SET priority = ?1 WHERE id = ?2",
-        params![normalize_priority(Some(priority.as_str())), card_id],
+        params![normalize_priority(Some(priority)), card_id],
     ).map_err(to_string_err)?;
     Ok(())
 }
@@ -5258,7 +5281,18 @@ const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри п
 - «Сколько времени я потратил на проект X?» → используй get_time_summary
 - «Покажи нагрузку по исполнителям» → используй get_workload
 
-Когда пользователь спрашивает о данных — всегда вызывай инструмент, не придумывай ответ из головы.";
+Когда пользователь спрашивает о данных — всегда вызывай инструмент, не придумывай ответ из головы.
+
+Ты также можешь создавать и редактировать задачи. Перед каждым изменением пользователь увидит превью и должен подтвердить.
+
+Когда пользователь говорит «создай задачу», уточни:
+- На какой доске? (предложи список, если не указано)
+- Название задачи
+- Дедлайн (если не указан — не ставь, пользователь добавит потом)
+- Приоритет (если не указан — Medium)
+- Исполнитель (если не указан — текущий пользователь)
+
+Новая карточка всегда создаётся в первой рабочей колонке доски (не в финальной).";
 
 /// Предел длины одного сообщения человека. Не про безопасность, а про окно
 /// контекста: вставленный целиком лог на мегабайт модель всё равно обрежет, а
@@ -5384,21 +5418,22 @@ pub fn get_chat_history(workspace_id: i64, state: State<'_, DbState>) -> CmdResu
     read_chat_history(&conn, workspace_id, None)
 }
 
-const CHAT_SELECT: &str = "SELECT id, workspace_id, role, content, created_at, tools_used FROM chat_history";
+const CHAT_SELECT: &str =
+    "SELECT id, workspace_id, role, content, created_at, tools_used, actions FROM chat_history";
 
 fn chat_message_from_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
     let tools: Option<String> = row.get(5)?;
+    let actions: Option<String> = row.get(6)?;
     Ok(ChatMessage {
         id: row.get(0)?,
         workspace_id: row.get(1)?,
         role: row.get(2)?,
         content: row.get(3)?,
         created_at: row.get(4)?,
-        // Испорченный JSON здесь не повод терять всю историю — это подпись
+        // Испорченный JSON здесь не повод терять всю историю — это подписи
         // под ответом, а не сам ответ.
-        tools_used: tools
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default(),
+        tools_used: tools.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default(),
+        actions: actions.and_then(|a| serde_json::from_str(&a).ok()).unwrap_or_default(),
     })
 }
 
@@ -5426,8 +5461,15 @@ fn read_chat_history(
     Ok(messages)
 }
 
+/// Очищает историю пространства. Ожидающее подтверждения действие тоже
+/// снимается: вопроса, ради которого оно предложено, больше нет.
 #[tauri::command]
-pub fn clear_chat_history(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<usize> {
+pub fn clear_chat_history(
+    workspace_id: i64,
+    state: State<'_, DbState>,
+    assistant: State<'_, AssistantState>,
+) -> CmdResult<usize> {
+    assistant.pending.lock().map_err(to_string_err)?.remove(&workspace_id);
     let conn = state.conn.lock().unwrap();
     conn.execute("DELETE FROM chat_history WHERE workspace_id = ?1", params![workspace_id])
         .map_err(to_string_err)
@@ -5475,21 +5517,26 @@ fn build_chat_request(system: &str, history: &[ChatMessage], user_text: &str) ->
 /// ответа модели. Не ответила — в истории не остаётся вопроса без ответа, а
 /// текст возвращается человеку в поле ввода (это делает интерфейс).
 ///
-/// `tools_used` — имена инструментов, которые модель вызвала ради ответа, по
-/// порядку; хранятся при ответе, чтобы после перезапуска было видно, откуда
-/// взялись числа.
+/// `tools_used` — имена вызванных инструментов по порядку, `actions` —
+/// предложенные изменения и их судьба. Хранятся при ответе, чтобы после
+/// перезапуска было видно, откуда взялись числа и что поменялось в базе.
 fn save_chat_exchange(
     conn: &mut rusqlite::Connection,
     workspace_id: i64,
     user_text: &str,
     answer: &str,
     tools_used: &[String],
+    actions: &[AiActionLog],
 ) -> CmdResult<Vec<ChatMessage>> {
-    let tools_json = if tools_used.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(tools_used).map_err(to_string_err)?)
-    };
+    fn as_json<T: serde::Serialize>(items: &[T]) -> CmdResult<Option<String>> {
+        if items.is_empty() {
+            Ok(None)
+        } else {
+            serde_json::to_string(items).map(Some).map_err(to_string_err)
+        }
+    }
+    let tools_json = as_json(tools_used)?;
+    let actions_json = as_json(actions)?;
     let tx = conn.transaction().map_err(to_string_err)?;
     tx.execute(
         "INSERT INTO chat_history (workspace_id, role, content) VALUES (?1, 'user', ?2)",
@@ -5498,8 +5545,9 @@ fn save_chat_exchange(
     .map_err(to_string_err)?;
     let first = tx.last_insert_rowid();
     tx.execute(
-        "INSERT INTO chat_history (workspace_id, role, content, tools_used) VALUES (?1, 'assistant', ?2, ?3)",
-        params![workspace_id, answer, tools_json],
+        "INSERT INTO chat_history (workspace_id, role, content, tools_used, actions)
+         VALUES (?1, 'assistant', ?2, ?3, ?4)",
+        params![workspace_id, answer, tools_json, actions_json],
     )
     .map_err(to_string_err)?;
     let second = tx.last_insert_rowid();
@@ -5514,23 +5562,181 @@ fn save_chat_exchange(
     Ok(saved)
 }
 
-/// Задать вопрос ассистенту. Возвращает обе сохранённые реплики — вопрос и
-/// ответ — с их id и временем.
+// ─── Ход разговора и подтверждение изменений ───
+//
+// Один вопрос человека — один «ход». Ход идёт, пока модель просит только
+// читающие инструменты; как только она просит изменение, ход **встаёт на
+// паузу**: превью уходит в чат, а всё состояние хода (сообщения, очередь
+// оставшихся вызовов, что уже сделано) ждёт в `AssistantState`. «Да» или
+// «Отмена» продолжают тот же ход с места остановки.
+//
+// Ожидание живёт в памяти, а не в базе: закрыли приложение, не ответив, — ход
+// пропал целиком, ничего не изменено и ничего не записано. Это честнее, чем
+// после перезапуска выполнить изменение, о котором человек уже забыл.
+
+/// Ход разговора: всё, что нужно, чтобы продолжить его после паузы.
+struct Turn {
+    user_text: String,
+    messages: Vec<crate::ollama::Message>,
+    /// Вызовы из последнего ответа модели, до которых ещё не дошла очередь.
+    queue: std::collections::VecDeque<crate::ollama::ToolCall>,
+    tools_used: Vec<String>,
+    actions: Vec<AiActionLog>,
+    /// Сколько раз уже спросили модель — предел `MAX_TOOL_ROUNDS` на весь ход,
+    /// включая паузы.
+    rounds: usize,
+}
+
+impl Turn {
+    fn new(user_text: String, messages: Vec<crate::ollama::Message>) -> Self {
+        Turn { user_text, messages, queue: Default::default(), tools_used: Vec::new(), actions: Vec::new(), rounds: 0 }
+    }
+
+    fn executed_anything(&self) -> bool {
+        self.actions.iter().any(|a| a.status == "done")
+    }
+}
+
+/// Ход, который ждёт «Да» или «Отмена».
+struct PendingTurn {
+    action_id: i64,
+    turn: Turn,
+    prepared: ai_tools::Prepared,
+}
+
+/// Ожидающие подтверждения ходы — по одному на пространство.
+#[derive(Default)]
+pub struct AssistantState {
+    pending: std::sync::Mutex<HashMap<i64, PendingTurn>>,
+    next_action_id: std::sync::atomic::AtomicI64,
+}
+
+enum TurnStep {
+    Answer(String),
+    Confirm(ai_tools::Prepared),
+}
+
+/// Ведёт ход, пока модель не ответит текстом или не попросит изменение.
+///
+/// `step_tool` решает судьбу каждого вызова: читающий выполняет сразу,
+/// изменение проверяет и возвращает на подтверждение. Отделено от команд,
+/// чтобы живой тест гонял тот же цикл на базе в памяти.
+async fn advance<F>(settings: &AiSettings, turn: &mut Turn, mut step_tool: F) -> CmdResult<TurnStep>
+where
+    F: FnMut(&str, &serde_json::Value) -> CmdResult<ai_tools::ToolStep>,
+{
+    let tools = ai_tools::definitions();
+    loop {
+        while let Some(call) = turn.queue.pop_front() {
+            match step_tool(&call.function.name, &call.function.arguments)? {
+                ai_tools::ToolStep::Result(result) => {
+                    log::info!("ассистент: инструмент {} → {} байт", call.function.name, result.len());
+                    turn.messages.push(crate::ollama::Message::tool_result(&call.function.name, result));
+                    turn.tools_used.push(call.function.name);
+                }
+                ai_tools::ToolStep::Confirm(prepared) => return Ok(TurnStep::Confirm(prepared)),
+            }
+        }
+
+        if turn.rounds >= ai_tools::MAX_TOOL_ROUNDS {
+            return Err("Модель слишком долго перебирала инструменты и не дала ответа — попробуйте спросить конкретнее.".to_string());
+        }
+        turn.rounds += 1;
+        let reply = {
+            let (settings, request, tools) = (settings.clone(), turn.messages.clone(), tools.clone());
+            run_blocking(move || {
+                crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &tools, settings.timeout_seconds)
+            })
+            .await?
+        };
+        if reply.tool_calls.is_empty() {
+            return Ok(TurnStep::Answer(reply.content));
+        }
+        turn.queue.extend(reply.tool_calls.iter().cloned());
+        turn.messages.push(reply);
+    }
+}
+
+/// Записывает исход подтверждения в ход: результат уходит модели сообщением
+/// `tool`, строчка — в журнал действий.
+fn resolve_action(turn: &mut Turn, prepared: &ai_tools::Prepared, outcome: Result<serde_json::Value, String>, approved: bool) {
+    let (result, log) = match (approved, outcome) {
+        (false, _) => (
+            serde_json::json!({ "cancelled": "Пользователь отменил действие" }),
+            AiActionLog { description: prepared.description.clone(), status: "cancelled".into(), error: None },
+        ),
+        (true, Ok(value)) => (
+            value,
+            AiActionLog { description: prepared.description.clone(), status: "done".into(), error: None },
+        ),
+        (true, Err(e)) => (
+            serde_json::json!({ "error": e }),
+            AiActionLog { description: prepared.description.clone(), status: "failed".into(), error: Some(e) },
+        ),
+    };
+    turn.messages.push(crate::ollama::Message::tool_result(&prepared.tool, result.to_string()));
+    turn.tools_used.push(prepared.tool.clone());
+    turn.actions.push(log);
+}
+
+/// Продолжает ход и доводит его до итога для интерфейса: либо ответ записан
+/// в историю, либо ход снова встал на паузу.
+///
+/// Если модель упала **после** выполненного изменения, ход всё равно
+/// записывается — с текстом ошибки вместо ответа: изменение в базе уже есть,
+/// и в истории должно остаться, откуда оно взялось.
+async fn drive_turn(app: &tauri::AppHandle, workspace_id: i64, settings: AiSettings, mut turn: Turn) -> CmdResult<ChatTurn> {
+    use tauri::Manager;
+
+    let step = advance(&settings, &mut turn, |name, args| {
+        // Замок — только на время одного инструмента, не на весь разговор.
+        let state = app.state::<DbState>();
+        let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        Ok(ai_tools::step(&conn, workspace_id, name, args))
+    })
+    .await;
+
+    let answer = match step {
+        Ok(TurnStep::Answer(text)) => text,
+        Ok(TurnStep::Confirm(prepared)) => {
+            let assistant = app.state::<AssistantState>();
+            let action_id = assistant.next_action_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let pending = AiPendingAction {
+                id: action_id,
+                user_text: turn.user_text.clone(),
+                tool: prepared.tool.clone(),
+                description: prepared.description.clone(),
+                warnings: prepared.warnings.clone(),
+            };
+            assistant
+                .pending
+                .lock()
+                .map_err(to_string_err)?
+                .insert(workspace_id, PendingTurn { action_id, turn, prepared });
+            return Ok(ChatTurn { messages: Vec::new(), pending: Some(pending) });
+        }
+        Err(e) if turn.executed_anything() => format!("Изменение выполнено, но ответить модель не смогла: {}", e),
+        Err(e) => return Err(e),
+    };
+
+    let state = app.state::<DbState>();
+    let mut conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+    let messages = save_chat_exchange(&mut conn, workspace_id, &turn.user_text, &answer, &turn.tools_used, &turn.actions)?;
+    Ok(ChatTurn { messages, pending: None })
+}
+
+/// Задать вопрос ассистенту.
 ///
 /// Модель, адрес, системный промпт и окно истории берутся на бэкенде, а не
 /// приходят из интерфейса: промпт пользователем не редактируется, и
 /// передавать его из JS значило бы сделать его редактируемым через консоль.
 ///
-/// Пока модель просит инструменты, они выполняются и результаты уходят ей
-/// обратно; первый ответ текстом — окончательный. Каждый круг — отдельный
-/// запрос к Ollama со своим таймаутом из настроек, замок базы берётся только
-/// на время самих инструментов.
+/// Пока модель просит читающие инструменты, они выполняются сразу; изменение
+/// ставит ход на паузу — итог тогда `pending`, и продолжает его
+/// `ollama_confirm_action`. Каждый запрос к Ollama — со своим таймаутом из
+/// настроек.
 #[tauri::command]
-pub async fn ollama_chat(
-    workspace_id: i64,
-    content: String,
-    app: tauri::AppHandle,
-) -> CmdResult<Vec<ChatMessage>> {
+pub async fn ollama_chat(workspace_id: i64, content: String, app: tauri::AppHandle) -> CmdResult<ChatTurn> {
     use tauri::Manager;
 
     let text = content.trim().to_string();
@@ -5539,6 +5745,9 @@ pub async fn ollama_chat(
     }
     if text.chars().count() > AI_MAX_MESSAGE_CHARS {
         return Err(format!("Сообщение длиннее {} символов — сократите его", AI_MAX_MESSAGE_CHARS));
+    }
+    if app.state::<AssistantState>().pending.lock().map_err(to_string_err)?.contains_key(&workspace_id) {
+        return Err("Сначала подтвердите или отмените предложенное изменение".to_string());
     }
 
     let (settings, messages) = {
@@ -5552,56 +5761,62 @@ pub async fn ollama_chat(
         (settings, build_chat_request(&system, &history, &text))
     };
 
-    let (answer, tools_used) = converse(&settings, messages, |name, args| {
-        // Замок — только на время одного инструмента, не на весь разговор.
-        let state = app.state::<DbState>();
-        let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
-        Ok(ai_tools::run(&conn, workspace_id, name, args))
-    })
-    .await?;
-
-    let state = app.state::<DbState>();
-    let mut conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
-    save_chat_exchange(&mut conn, workspace_id, &text, &answer, &tools_used)
+    drive_turn(&app, workspace_id, settings, Turn::new(text, messages)).await
 }
 
-/// Разговор с моделью до ответа текстом: пока она просит инструменты, они
-/// выполняются через `run_tool`, и результаты уходят ей обратно. Возвращает
-/// ответ и имена вызванных инструментов по порядку.
+/// «Да» или «Отмена» на предложенное изменение — и продолжение того же хода.
 ///
-/// Отделено от `ollama_chat`, чтобы живой тест мог прогнать тот же цикл на
-/// базе в памяти, а не на настоящей базе пользователя.
-async fn converse<F>(
-    settings: &AiSettings,
-    mut messages: Vec<crate::ollama::Message>,
-    mut run_tool: F,
-) -> CmdResult<(String, Vec<String>)>
-where
-    F: FnMut(&str, &serde_json::Value) -> CmdResult<String>,
-{
-    let tools = ai_tools::definitions();
-    let mut tools_used = Vec::new();
+/// `action_id` должен совпасть с ожидающим: подтверждение, пришедшее к уже
+/// снятому или заменённому ожиданию, ничего не выполнит.
+#[tauri::command]
+pub async fn ollama_confirm_action(
+    workspace_id: i64,
+    action_id: i64,
+    approved: bool,
+    app: tauri::AppHandle,
+) -> CmdResult<ChatTurn> {
+    use tauri::Manager;
 
-    for _ in 0..ai_tools::MAX_TOOL_ROUNDS {
-        let reply = {
-            let (settings, request, tools) = (settings.clone(), messages.clone(), tools.clone());
-            run_blocking(move || {
-                crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &tools, settings.timeout_seconds)
-            })
-            .await?
+    let PendingTurn { mut turn, prepared, .. } = {
+        let assistant = app.state::<AssistantState>();
+        let mut pending = assistant.pending.lock().map_err(to_string_err)?;
+        match pending.get(&workspace_id) {
+            Some(p) if p.action_id == action_id => pending.remove(&workspace_id).unwrap(),
+            _ => return Err("Это предложение уже неактуально — задайте вопрос заново".to_string()),
+        }
+    };
+
+    let (settings, outcome) = {
+        let state = app.state::<DbState>();
+        let mut conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        let settings = read_ai_settings(&conn)?;
+        let outcome = if approved {
+            let result = ai_tools::execute(&mut conn, workspace_id, &prepared);
+            match &result {
+                Ok(_) => log::info!("ассистент: выполнено {}", prepared.tool),
+                Err(e) => log::warn!("ассистент: {} не выполнено: {}", prepared.tool, e),
+            }
+            result
+        } else {
+            Ok(serde_json::Value::Null)
         };
-        if reply.tool_calls.is_empty() {
-            return Ok((reply.content, tools_used));
-        }
+        (settings, outcome)
+    };
+    resolve_action(&mut turn, &prepared, outcome, approved);
 
-        let calls = reply.tool_calls.clone();
-        messages.push(reply);
-        for call in calls {
-            let result = run_tool(&call.function.name, &call.function.arguments)?;
-            log::info!("ассистент: инструмент {} → {} байт", call.function.name, result.len());
-            messages.push(crate::ollama::Message::tool_result(&call.function.name, result));
-            tools_used.push(call.function.name);
-        }
-    }
-    Err("Модель слишком долго перебирала инструменты и не дала ответа — попробуйте спросить конкретнее.".to_string())
+    drive_turn(&app, workspace_id, settings, turn).await
+}
+
+/// Изменение, ждущее подтверждения в этом пространстве, если есть. Чат
+/// спрашивает при открытии: человек мог уйти на доску, не ответив.
+#[tauri::command]
+pub fn get_pending_action(workspace_id: i64, assistant: State<'_, AssistantState>) -> CmdResult<Option<AiPendingAction>> {
+    let pending = assistant.pending.lock().map_err(to_string_err)?;
+    Ok(pending.get(&workspace_id).map(|p| AiPendingAction {
+        id: p.action_id,
+        user_text: p.turn.user_text.clone(),
+        tool: p.prepared.tool.clone(),
+        description: p.prepared.description.clone(),
+        warnings: p.prepared.warnings.clone(),
+    }))
 }

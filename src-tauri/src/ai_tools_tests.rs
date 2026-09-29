@@ -76,10 +76,16 @@ fn every_defined_tool_has_a_handler_and_a_valid_schema() {
         let name = def["function"]["name"].as_str().unwrap();
         assert!(!def["function"]["description"].as_str().unwrap().is_empty());
         assert_eq!(def["function"]["parameters"]["type"], "object");
-        let out = run(&f.conn, f.ws, name, &json!({}));
-        assert!(!out.contains("нет. Доступны"), "{name} не подключён к run(): {out}");
+        if let ToolStep::Result(out) = step(&f.conn, f.ws, name, &json!({})) {
+            assert!(!out.contains("Инструмента «"), "{name} не подключён: {out}");
+        }
+        assert_eq!(is_write_tool(name), WRITE_TOOLS.contains(&name));
     }
-    assert_eq!(definitions().len(), 9);
+    assert_eq!(definitions().len(), 17);
+    // Каждое изменение описано в схеме, иначе модель о нём не узнает.
+    for w in WRITE_TOOLS {
+        assert!(definitions().iter().any(|d| d["function"]["name"] == w), "{w}");
+    }
 }
 
 #[test]
@@ -210,7 +216,9 @@ fn card_details_gather_checklist_time_and_dependencies() {
     let v = call(&f, "get_card_details", json!({"card_id": c}));
     assert_eq!(v["title"], "Отчёт");
     assert_eq!(v["description"], "описание");
-    assert_eq!(v["checklist"], json!([{"text": "Сбор", "done": true}, {"text": "Текст", "done": false}]));
+    let items = v["checklist"].as_array().unwrap();
+    assert_eq!(items.iter().map(|i| (i["text"].as_str().unwrap(), i["done"].as_bool().unwrap())).collect::<Vec<_>>(), [("Сбор", true), ("Текст", false)]);
+    assert!(items.iter().all(|i| i["id"].is_i64()), "id нужен, чтобы отметить пункт");
     assert_eq!(v["time_spent"], "2 ч 05 мин");
     assert_eq!(v["blocked_by"][0]["title"], "Данные");
     assert_eq!(v["done"], false);
@@ -301,10 +309,222 @@ fn durations_read_like_a_person_would_say_them() {
     assert_eq!(format_duration(-10), "0 мин");
 }
 
+// ─── Изменения: проверка до «Да» ───
+
+fn prepared(f: &Fixture, name: &str, args: Value) -> Prepared {
+    match step(&f.conn, f.ws, name, &args) {
+        ToolStep::Confirm(p) => p,
+        ToolStep::Result(r) => panic!("ждали превью {name}, пришло {r}"),
+    }
+}
+
+fn refused(f: &Fixture, name: &str, args: Value) -> String {
+    match step(&f.conn, f.ws, name, &args) {
+        ToolStep::Result(r) => {
+            let v: Value = serde_json::from_str(&r).unwrap();
+            v["error"].as_str().unwrap_or_else(|| panic!("ждали отказ, пришло {r}")).to_string()
+        }
+        ToolStep::Confirm(p) => panic!("ждали отказ {name}, пришло превью «{}»", p.description),
+    }
+}
+
+fn count(conn: &Connection, sql: &str) -> i64 {
+    conn.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn reading_tools_run_at_once_and_changes_wait() {
+    let f = fixture();
+    assert!(matches!(step(&f.conn, f.ws, "get_boards", &json!({})), ToolStep::Result(_)));
+    let before = count(&f.conn, "SELECT COUNT(*) FROM cards");
+    prepared(&f, "create_card", json!({"board_id": f.board, "title": "Отчёт"}));
+    assert_eq!(count(&f.conn, "SELECT COUNT(*) FROM cards"), before, "превью ничего не пишет");
+}
+
+#[test]
+fn create_card_preview_names_everything_and_uses_defaults() {
+    let f = fixture();
+    let due = date_offset(&f.conn, 14);
+    let p = prepared(&f, "create_card", json!({
+        "board_id": f.board, "title": " Подготовить отчёт ", "due_date": due, "priority": "высокий",
+    }));
+    assert_eq!(p.description, format!(
+        "Создать задачу «Подготовить отчёт» на доске «Shady's tasks» в колонке «В работе»: срок {}, приоритет высокий, исполнитель — Пользователь (вы)",
+        date_label(&due)));
+    assert_eq!(p.args["column_id"], f.open_col, "первая рабочая колонка, не финальная");
+    assert_eq!(p.args["priority"], "High");
+    assert_eq!(p.args["assignee_id"], f.me, "без исполнителя — сам пользователь");
+    assert_eq!(p.warnings.len(), 1, "про срок, который потом не поправить");
+
+    let p = prepared(&f, "create_card", json!({"board_id": f.board, "title": "Без всего"}));
+    assert!(p.description.contains("без срока, приоритет средний"), "{}", p.description);
+    assert!(p.warnings.is_empty());
+}
+
+#[test]
+fn create_card_refuses_bad_input() {
+    let f = fixture();
+    let yesterday = date_offset(&f.conn, -1);
+    assert!(refused(&f, "create_card", json!({"board_id": f.board, "title": "Х", "due_date": yesterday})).contains("уже прошёл"));
+    assert!(refused(&f, "create_card", json!({"board_id": f.board, "title": "Х", "due_date": "10 октября"})).contains("ГГГГ-ММ-ДД"));
+    assert!(refused(&f, "create_card", json!({"board_id": f.board, "title": "Х", "priority": "срочно"})).contains("неизвестен"));
+    assert!(refused(&f, "create_card", json!({"board_id": f.board, "title": "   "})).contains("title"));
+    assert!(refused(&f, "create_card", json!({"board_id": f.other_board, "title": "Х"})).contains("get_boards"));
+    assert!(refused(&f, "create_card", json!({"board_id": f.board, "title": "Х", "assignee_id": 9999})).contains("get_workload"));
+    assert!(refused(&f, "create_card", json!({"board_id": f.board, "title": "Х".repeat(201)})).contains("200"));
+}
+
+#[test]
+fn a_board_with_only_a_final_column_takes_no_new_cards() {
+    let f = fixture();
+    f.conn.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![f.open_col]).unwrap();
+    assert!(refused(&f, "create_card", json!({"board_id": f.board, "title": "Х"})).contains("рабочей колонки"));
+}
+
+#[test]
+fn confirmed_create_card_lands_with_every_field() {
+    let mut f = fixture();
+    let due = date_offset(&f.conn, 14);
+    let p = prepared(&f, "create_card", json!({
+        "board_id": f.board, "title": "Подготовить отчёт", "due_date": due, "priority": "High", "description": "к пятнице",
+    }));
+    let result = execute(&mut f.conn, f.ws, &p).unwrap();
+    let id = result["card_id"].as_i64().unwrap();
+    let (col, title, desc, d, prio, who, author): (i64, String, String, Option<String>, String, Option<i64>, Option<i64>) = f.conn.query_row(
+        "SELECT column_id, title, description, due_date, priority, assignee_id, author_id FROM cards WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+    ).unwrap();
+    assert_eq!((col, title.as_str(), desc.as_str(), d.as_deref(), prio.as_str()), (f.open_col, "Подготовить отчёт", "к пятнице", Some(due.as_str()), "High"));
+    assert_eq!((who, author), (Some(f.me), Some(f.me)));
+}
+
+#[test]
+fn nothing_happens_if_the_data_changed_while_waiting() {
+    let mut f = fixture();
+    let c = card(&f.conn, f.open_col, "Отчёт", None, None);
+    let p = prepared(&f, "update_card_priority", json!({"card_id": c, "priority": "Low"}));
+    // Пока человек думал, карточку убрали в архив.
+    f.conn.execute("UPDATE cards SET archived = 1 WHERE id = ?1", params![c]).unwrap();
+    assert!(execute(&mut f.conn, f.ws, &p).is_err());
+    let prio: String = f.conn.query_row("SELECT priority FROM cards WHERE id = ?1", params![c], |r| r.get(0)).unwrap();
+    assert_eq!(prio, "High");
+}
+
+#[test]
+fn a_changed_description_is_not_executed() {
+    let mut f = fixture();
+    let c = card(&f.conn, f.open_col, "Отчёт", None, None);
+    let p = prepared(&f, "move_card", json!({"card_id": c, "column_id": f.final_col}));
+    // Карточку переименовали — превью описывало уже не её.
+    f.conn.execute("UPDATE cards SET title = 'Другое' WHERE id = ?1", params![c]).unwrap();
+    let err = execute(&mut f.conn, f.ws, &p).unwrap_err();
+    assert!(err.contains("данные изменились"), "{err}");
+    let col: i64 = f.conn.query_row("SELECT column_id FROM cards WHERE id = ?1", params![c], |r| r.get(0)).unwrap();
+    assert_eq!(col, f.open_col);
+}
+
+#[test]
+fn moving_into_the_final_column_warns_and_out_of_it_is_refused() {
+    let mut f = fixture();
+    let c = card(&f.conn, f.open_col, "Отчёт", None, None);
+    let blocker = card(&f.conn, f.open_col, "Данные", None, None);
+    f.conn.execute("INSERT INTO card_dependencies (blocker_card_id, blocked_card_id) VALUES (?1, ?2)", params![blocker, c]).unwrap();
+
+    let p = prepared(&f, "move_card", json!({"card_id": c, "column_id": f.final_col}));
+    assert_eq!(p.description, "Перенести задачу «Отчёт» из «В работе» в «Закрыто»");
+    assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+    assert!(p.warnings[1].contains("«Данные»"));
+    execute(&mut f.conn, f.ws, &p).unwrap();
+
+    assert!(refused(&f, "move_card", json!({"card_id": c, "column_id": f.open_col})).contains("финальной"));
+    assert!(refused(&f, "move_card", json!({"card_id": blocker, "column_id": f.open_col})).contains("уже в колонке"));
+    assert!(refused(&f, "move_card", json!({"card_id": blocker, "column_id": f.other_col})).contains("get_board_columns"));
+}
+
+#[test]
+fn moving_between_boards_is_refused() {
+    let f = fixture();
+    let (_, second_open, _) = board(&f.conn, f.ws, "Вторая");
+    let c = card(&f.conn, f.open_col, "Отчёт", None, None);
+    assert!(refused(&f, "move_card", json!({"card_id": c, "column_id": second_open})).contains("другой доске"));
+}
+
+#[test]
+fn priority_and_assignee_changes_describe_before_and_after() {
+    let mut f = fixture();
+    let c = card(&f.conn, f.open_col, "Отчёт", None, None);
+    let p = prepared(&f, "update_card_priority", json!({"card_id": c, "priority": "low"}));
+    assert_eq!(p.description, "Сменить приоритет задачи «Отчёт»: высокий → низкий");
+    execute(&mut f.conn, f.ws, &p).unwrap();
+    assert!(refused(&f, "update_card_priority", json!({"card_id": c, "priority": "Low"})).contains("уже"));
+
+    let colleague: i64 = {
+        f.conn.execute("INSERT INTO members (name) VALUES ('Коллега')", ()).unwrap();
+        f.conn.last_insert_rowid()
+    };
+    let p = prepared(&f, "update_card_assignee", json!({"card_id": c, "member_id": colleague}));
+    assert_eq!(p.description, "Назначить исполнителем задачи «Отчёт»: Коллега вместо никого");
+    execute(&mut f.conn, f.ws, &p).unwrap();
+    let who: i64 = f.conn.query_row("SELECT assignee_id FROM cards WHERE id = ?1", params![c], |r| r.get(0)).unwrap();
+    assert_eq!(who, colleague);
+}
+
+#[test]
+fn checklist_items_are_added_and_toggled_only_in_this_workspace() {
+    let mut f = fixture();
+    let c = card(&f.conn, f.open_col, "Отчёт", None, None);
+    let p = prepared(&f, "add_checklist_item", json!({"card_id": c, "text": "Собрать данные"}));
+    let item = execute(&mut f.conn, f.ws, &p).unwrap()["item_id"].as_i64().unwrap();
+
+    let p = prepared(&f, "toggle_checklist_item", json!({"item_id": item}));
+    assert_eq!(p.description, "Отметить выполненным пункт «Собрать данные» в задаче «Отчёт»");
+    assert_eq!(execute(&mut f.conn, f.ws, &p).unwrap()["done"], true);
+    let p = prepared(&f, "toggle_checklist_item", json!({"item_id": item}));
+    assert!(p.description.starts_with("Снять отметку"));
+
+    let secret = card(&f.conn, f.other_col, "Секрет", None, None);
+    f.conn.execute("INSERT INTO checklist_items (card_id, text, position) VALUES (?1, 'чужой', 0)", params![secret]).unwrap();
+    let foreign = f.conn.last_insert_rowid();
+    assert!(refused(&f, "toggle_checklist_item", json!({"item_id": foreign})).contains("этом пространстве"));
+}
+
+#[test]
+fn timers_start_and_stop_for_the_user_by_default() {
+    let mut f = fixture();
+    let a = card(&f.conn, f.open_col, "А", None, None);
+    let b = card(&f.conn, f.open_col, "Б", None, None);
+    assert!(refused(&f, "stop_timer", json!({})).contains("не идёт"));
+
+    let p = prepared(&f, "start_timer", json!({"card_id": a}));
+    assert_eq!(p.description, "Запустить таймер на задаче «А»");
+    execute(&mut f.conn, f.ws, &p).unwrap();
+    assert!(refused(&f, "start_timer", json!({"card_id": a})).contains("уже идёт"));
+
+    let p = prepared(&f, "start_timer", json!({"card_id": b}));
+    assert_eq!(p.warnings, vec!["Идущий таймер на «А» остановится.".to_string()]);
+    execute(&mut f.conn, f.ws, &p).unwrap();
+
+    let p = prepared(&f, "stop_timer", json!({}));
+    assert_eq!(p.description, "Остановить таймер на задаче «Б»");
+    execute(&mut f.conn, f.ws, &p).unwrap();
+    assert_eq!(count(&f.conn, "SELECT COUNT(*) FROM time_entries WHERE ended_at IS NULL"), 0);
+    assert_eq!(count(&f.conn, "SELECT COUNT(*) FROM time_entries"), 2);
+}
+
 // ─── Живая проверка с настоящей моделью ───
 
-/// Вопросы из «Проверки» Фазы 2 — настоящей модели через тот же цикл
-/// `converse`, что у `ollama_chat`, но на базе в памяти.
+fn live_settings() -> AiSettings {
+    AiSettings {
+        ollama_url: crate::ollama::DEFAULT_OLLAMA_URL.into(),
+        model: std::env::var("TASKFLOW_AI_MODEL").unwrap_or_else(|_| "qwen2.5:7b-instruct-q4_K_M".into()),
+        context_length: 20,
+        timeout_seconds: 300,
+    }
+}
+
+/// Вопросы из «Проверки» Фазы 2 — настоящей модели через тот же `advance`,
+/// что у `ollama_chat`, но на базе в памяти.
 ///
 /// `cargo test --lib ai_tools_live -- --ignored --nocapture --test-threads=1`
 /// Модель — из `TASKFLOW_AI_MODEL`, по умолчанию qwen2.5:7b-instruct-q4_K_M.
@@ -317,28 +537,111 @@ fn ai_tools_live_questions_from_the_phase_check() {
     card(&f.conn, f.open_col, "Сдать отчёт по проекту", Some(&yesterday), Some(f.me));
     card(&f.conn, f.open_col, "Позвонить подрядчику", None, None);
     card(&f.conn, f.final_col, "Старая готовая задача", Some("2020-01-01"), None);
-
-    let model = std::env::var("TASKFLOW_AI_MODEL").unwrap_or_else(|_| "qwen2.5:7b-instruct-q4_K_M".into());
-    let settings = AiSettings {
-        ollama_url: crate::ollama::DEFAULT_OLLAMA_URL.into(),
-        model,
-        context_length: 20,
-        timeout_seconds: 300,
-    };
+    let settings = live_settings();
     let system = system_prompt(&f.conn, f.ws).unwrap();
 
     for (question, expected_tool) in [
         ("Сколько у меня досок?", "get_boards"),
         ("Какие задачи просрочены?", "get_overdue_cards"),
     ] {
-        let messages = build_chat_request(&system, &[], question);
+        let mut turn = Turn::new(question.into(), build_chat_request(&system, &[], question));
         let started = std::time::Instant::now();
-        let (answer, used) = tauri::async_runtime::block_on(converse(&settings, messages, |name, args| {
+        let answer = match tauri::async_runtime::block_on(advance(&settings, &mut turn, |name, args| {
             println!("    → {name}({args})");
-            Ok(run(&f.conn, f.ws, name, args))
-        }))
-        .unwrap();
-        println!("ВОПРОС: {question}\nИНСТРУМЕНТЫ: {used:?}\nОТВЕТ ({:.1} с): {answer}\n", started.elapsed().as_secs_f32());
-        assert!(used.iter().any(|t| t == expected_tool), "ждали {expected_tool}, вызваны {used:?}");
+            Ok(step(&f.conn, f.ws, name, args))
+        })).unwrap() {
+            TurnStep::Answer(a) => a,
+            TurnStep::Confirm(p) => panic!("на вопрос о данных модель предложила изменение: {}", p.description),
+        };
+        println!("ВОПРОС: {question}\nИНСТРУМЕНТЫ: {:?}\nОТВЕТ ({:.1} с): {answer}\n", turn.tools_used, started.elapsed().as_secs_f32());
+        assert!(turn.tools_used.iter().any(|t| t == expected_tool), "ждали {expected_tool}, вызваны {:?}", turn.tools_used);
     }
+}
+
+/// «Проверка» Фазы 3: модель должна предложить создание с правильными полями,
+/// а после «Да» карточка — появиться на доске.
+///
+/// `cargo test --lib ai_tools_live_create -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn ai_tools_live_create_card_from_the_phase_check() {
+    let mut f = fixture();
+    let settings = live_settings();
+    let system = system_prompt(&f.conn, f.ws).unwrap();
+    let question = "Создай задачу 'Подготовить отчёт' на доске Shady's tasks с дедлайном 10 октября, приоритет высокий";
+    let mut turn = Turn::new(question.into(), build_chat_request(&system, &[], question));
+    let started = std::time::Instant::now();
+
+    let mut confirmations = 0;
+    let answer = loop {
+        let step_result = {
+            let conn = &f.conn;
+            tauri::async_runtime::block_on(advance(&settings, &mut turn, |name, args| {
+                println!("    → {name}({args})");
+                Ok(step(conn, f.ws, name, args))
+            })).unwrap()
+        };
+        match step_result {
+            TurnStep::Answer(a) => break a,
+            TurnStep::Confirm(p) => {
+                confirmations += 1;
+                println!("ПРЕВЬЮ: {}\n  предупреждения: {:?}", p.description, p.warnings);
+                assert_eq!(p.tool, "create_card", "ждали create_card");
+                let outcome = execute(&mut f.conn, f.ws, &p);
+                resolve_action(&mut turn, &p, outcome, true);
+            }
+        }
+    };
+    println!("ОТВЕТ ({:.1} с): {answer}\nДЕЙСТВИЯ: {:?}", started.elapsed().as_secs_f32(), turn.actions);
+    assert_eq!(confirmations, 1);
+
+    let (title, due, prio, col): (String, Option<String>, String, i64) = f.conn.query_row(
+        "SELECT title, due_date, priority, column_id FROM cards ORDER BY id DESC LIMIT 1", [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).unwrap();
+    println!("В БАЗЕ: {title} | {due:?} | {prio} | колонка {col}");
+    assert_eq!(title, "Подготовить отчёт");
+    assert_eq!(due.as_deref().map(|d| &d[5..]), Some("10-10"));
+    assert_eq!(prio, "High");
+    assert_eq!(col, f.open_col);
+}
+
+// ─── Подтверждение: что уходит модели и что остаётся в истории ───
+
+fn sample_prepared() -> Prepared {
+    Prepared { tool: "update_card_priority".into(), args: json!({}), description: "Сменить приоритет".into(), warnings: vec![] }
+}
+
+#[test]
+fn a_cancelled_action_tells_the_model_and_is_logged() {
+    let mut turn = Turn::new("q".into(), vec![]);
+    resolve_action(&mut turn, &sample_prepared(), Ok(Value::Null), false);
+    let last = turn.messages.last().unwrap();
+    assert_eq!(last.role, "tool");
+    assert!(last.content.contains("Пользователь отменил действие"));
+    assert_eq!(turn.actions[0].status, "cancelled");
+    assert!(!turn.executed_anything());
+}
+
+#[test]
+fn done_and_failed_actions_are_told_apart() {
+    let mut turn = Turn::new("q".into(), vec![]);
+    resolve_action(&mut turn, &sample_prepared(), Err("данные изменились".into()), true);
+    assert_eq!(turn.actions[0].status, "failed");
+    assert_eq!(turn.actions[0].error.as_deref(), Some("данные изменились"));
+    assert!(!turn.executed_anything());
+    resolve_action(&mut turn, &sample_prepared(), Ok(json!({"ok": true})), true);
+    assert_eq!(turn.actions[1].status, "done");
+    assert!(turn.executed_anything());
+    assert_eq!(turn.tools_used, ["update_card_priority", "update_card_priority"]);
+}
+
+#[test]
+fn actions_are_kept_with_the_answer_in_history() {
+    let mut f = fixture();
+    let log = vec![AiActionLog { description: "Создать задачу «Отчёт»".into(), status: "done".into(), error: None }];
+    let saved = save_chat_exchange(&mut f.conn, f.ws, "Создай", "Готово", &["create_card".to_string()], &log).unwrap();
+    assert!(saved[0].actions.is_empty());
+    assert_eq!(saved[1].actions, log);
+    assert_eq!(read_chat_history(&f.conn, f.ws, None).unwrap()[1].actions, log);
 }

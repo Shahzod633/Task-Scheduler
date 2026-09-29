@@ -590,6 +590,11 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
     if !table_has_column(conn, "chat_history", "tools_used") {
         conn.execute("ALTER TABLE chat_history ADD COLUMN tools_used TEXT", ())?;
     }
+    // Изменения, предложенные ассистентом по ходу ответа, и их судьба
+    // (выполнено / отменено / не вышло) — JSON-массив, Фаза 3.
+    if !table_has_column(conn, "chat_history", "actions") {
+        conn.execute("ALTER TABLE chat_history ADD COLUMN actions TEXT", ())?;
+    }
 
     // Ensure the singleton user profile row exists
     conn.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1)", ())?;

@@ -1225,6 +1225,91 @@
     white-space: pre-wrap;
 }
 
+/* ─── Превью изменения: «Ассистент хочет выполнить…» ───
+   Выделено акцентной рамкой: это не ответ, а вопрос к человеку, и пропустить
+   его глазами среди обычных пузырей нельзя. */
+.assistant__action {
+    border-color: var(--accent-border);
+    box-shadow: inset 0 0 0 1px var(--accent-border);
+    max-width: 85%;
+}
+
+.assistant__action-title {
+    font-size: var(--font-size-xs);
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-caps);
+    margin-bottom: var(--space-2xs);
+}
+
+.assistant__action-text {
+    font-weight: var(--font-weight-semibold);
+}
+
+.assistant__action-warnings {
+    margin-top: var(--space-sm);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+    font-size: var(--font-size-sm);
+    color: var(--color-warning);
+}
+
+.assistant__action-warnings li {
+    display: flex;
+    gap: var(--space-xs);
+    align-items: flex-start;
+}
+
+.assistant__action-warning-icon,
+.assistant__action-log-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.assistant__action-warning-icon svg,
+.assistant__action-log-icon svg {
+    width: 14px;
+    height: 14px;
+}
+
+.assistant__action-question {
+    margin-top: var(--space-sm);
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+}
+
+.assistant__action-buttons {
+    display: flex;
+    gap: var(--space-sm);
+    margin-top: var(--space-xs);
+}
+
+.assistant__action-buttons .btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+/* Журнал действий под ответом — что менялось и чем кончилось. */
+.assistant__actions {
+    margin-top: var(--space-sm);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs);
+    font-size: var(--font-size-sm);
+}
+
+.assistant__action-log {
+    display: flex;
+    gap: var(--space-xs);
+    align-items: flex-start;
+}
+
+.assistant__action-log--done      { color: var(--color-success); }
+.assistant__action-log--cancelled { color: var(--text-secondary); }
+.assistant__action-log--failed    { color: var(--color-danger); }
+
 .assistant__tools {
     margin-top: var(--space-xs);
     padding-top: var(--space-xs);
