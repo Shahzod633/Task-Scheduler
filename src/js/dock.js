@@ -7,7 +7,7 @@ import { createElement, $ } from './utils.js';
 
 /**
  * Render the floating dock.
- * @param {string} activeView - which dock-driven view is currently active: 'board' | 'inbox' | 'planner'
+ * @param {string} activeView - which dock-driven view is currently active: 'board' | 'inbox' | 'planner' | 'assistant'
  */
 export function renderDock(activeView = 'board') {
     // Remove existing dock
@@ -25,6 +25,12 @@ export function renderDock(activeView = 'board') {
     dock.appendChild(createDockButton('planner', Icons.calendar, 'Планировщик', () => {
         window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'planner' } }));
     }, activeView === 'planner'));
+
+    // ИИ-ассистент — рядом с Inbox и Планировщиком: все три живут на уровне
+    // пространства, а не одной доски.
+    dock.appendChild(createDockButton('assistant', Icons.sparkles, 'Ассистент', () => {
+        window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'assistant' } }));
+    }, activeView === 'assistant'));
 
     // Separator
     dock.appendChild(createElement('div', { className: 'dock__separator' }));

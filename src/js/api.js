@@ -126,8 +126,26 @@ export async function updateCard(id, title, description, dueDate) {
     return await invoke('update_card', { id, title, description, dueDate });
 }
 
+/**
+ * Переносит карточку. Если это был въезд повторяющейся задачи в финальную
+ * колонку, возвращает созданную следующую карточку —
+ * `{ card_id, title, due_date, board_id, column_name, rule }`, иначе null.
+ * Показывать её — `announceRecurringSpawn` из board.js.
+ */
 export async function updateCardPosition(id, newColumnId, newPosition) {
     return await invoke('update_card_position', { id, newColumnId, newPosition });
+}
+
+/**
+ * Правило повторения карточки: 'daily' | 'weekly' | 'monthly' или null —
+ * не повторять. Можно менять когда угодно — это не срок.
+ */
+export async function setCardRecurrence(cardId, rule) {
+    return await invoke('set_card_recurrence', { cardId, rule });
+}
+
+export async function getCardRecurrence(cardId) {
+    return await invoke('get_card_recurrence', { cardId });
 }
 
 export async function archiveCard(id) {
@@ -660,4 +678,76 @@ export async function getMistakeCards(workspaceId) {
  */
 export async function requestCardRetry(cardId) {
     return await invoke('request_card_retry', { cardId });
+}
+
+// ─── ИИ-ассистент (Ollama) ───
+
+/** Адрес Ollama, выбранная модель и длина контекста — одни на приложение. */
+export async function getAiSettings() {
+    return await invoke('get_ai_settings');
+}
+
+/**
+ * Сохраняет настройки ассистента. Отклоняется, если адрес не петлевой
+ * (`localhost`, `127.0.0.1`, `[::1]`); длину контекста бэкенд зажимает в
+ * допустимые границы.
+ */
+export async function updateAiSettings(ollamaUrl, model, contextLength, timeoutSeconds) {
+    return await invoke('update_ai_settings', { ollamaUrl, model, contextLength, timeoutSeconds });
+}
+
+/**
+ * Модели Ollama по адресу `url` (или по сохранённому, если `url` пуст) —
+ * `[{ name, size }]`. Отказ — готовый текст для человека.
+ */
+export async function ollamaCheckStatus(url = null) {
+    return await invoke('ollama_check_status', { url });
+}
+
+export async function ollamaListModels(url = null) {
+    return await invoke('ollama_list_models', { url });
+}
+
+export async function getChatHistory(workspaceId) {
+    return await invoke('get_chat_history', { workspaceId });
+}
+
+export async function clearChatHistory(workspaceId) {
+    return await invoke('clear_chat_history', { workspaceId });
+}
+
+/**
+ * Вопрос ассистенту. Ответ может идти десятки секунд — модель по дороге
+ * вызывает инструменты.
+ *
+ * Возвращает `{ messages, pending }`: либо ответ готов и записан
+ * (`messages` — вопрос и ответ, у ответа `tools_used` и `actions`), либо
+ * ассистент предлагает изменение и ждёт подтверждения (`pending` —
+ * `{ id, user_text, tool, description, warnings }`), и ничего ещё не
+ * записано. При отказе в историю не пишется ничего.
+ */
+export async function ollamaChat(workspaceId, content) {
+    return await invoke('ollama_chat', { workspaceId, content });
+}
+
+/**
+ * «Да» (`approved = true`) или «Отмена» на предложенное изменение — и
+ * продолжение того же ответа. Возвращает то же, что `ollamaChat`: ассистент
+ * может предложить следующее изменение.
+ */
+export async function ollamaConfirmAction(workspaceId, actionId, approved) {
+    return await invoke('ollama_confirm_action', { workspaceId, actionId, approved });
+}
+
+/**
+ * Приветствие со сводкой за неделю — только для пустой истории. Возвращает
+ * записанную реплику ассистента или null, если история уже не пуста.
+ */
+export async function ollamaGreeting(workspaceId) {
+    return await invoke('ollama_greeting', { workspaceId });
+}
+
+/** Изменение, ждущее подтверждения в пространстве, или null. */
+export async function getPendingAction(workspaceId) {
+    return await invoke('get_pending_action', { workspaceId });
 }

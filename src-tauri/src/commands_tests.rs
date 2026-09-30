@@ -188,6 +188,7 @@ fn import_rejects_a_newer_format_and_writes_nothing() {
             labels: vec![],
             members: vec![],
             columns: vec![],
+            ..Default::default()
         },
     };
 
@@ -210,6 +211,7 @@ fn import_rejects_a_board_without_a_name() {
             labels: vec![],
             members: vec![],
             columns: vec![],
+            ..Default::default()
         },
     };
     assert!(import_board_into(&mut conn, 1, export).is_err());
@@ -253,8 +255,10 @@ fn import_skips_label_links_the_file_does_not_define() {
                     priority: None,
                     checklist: Vec::new(),
                     comments: Vec::new(),
+                    ..Default::default()
                 }],
             }],
+            ..Default::default()
         },
     };
 
@@ -4592,6 +4596,44 @@ fn archiving_a_card_stops_its_running_timer() {
 }
 
 #[test]
+fn archiving_a_column_stops_the_timers_of_its_cards() {
+    let mut conn = test_db();
+    let board = board_of(&conn, timer_column(&conn));
+    // Обязательную колонку в архив не убрать — нужна своя.
+    let col = create_column_in(&mut conn, board, "Лишняя").unwrap().id;
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+    started_ago(&conn, entry, 300);
+
+    archive_column_in(&conn, col).unwrap();
+
+    assert!(read_active_timer(&conn, me).unwrap().is_none());
+    assert!((300..=305).contains(&read_time_entry(&conn, entry).unwrap().duration_seconds.unwrap()));
+}
+
+#[test]
+fn archiving_a_board_stops_the_timers_of_its_cards_only() {
+    let mut conn = test_db();
+    let col = timer_column(&conn);
+    let card = assigned_card(&conn, col, "Отчёт", None, "Medium");
+    let me = self_member_id(&conn);
+    let entry = start_timer_in(&mut conn, card, me).unwrap().timer.entry_id;
+
+    // Таймер на другой доске архивация этой не трогает. Второй человек —
+    // потому что у одного таймер идёт только один.
+    let other_col = workload_board(&conn, 1, "Другая").0;
+    let other = assigned_card(&conn, other_col, "Чужая", None, "Medium");
+    let colleague = add_member(&conn, "Коллега");
+    let other_entry = start_timer_in(&mut conn, other, colleague).unwrap().timer.entry_id;
+
+    archive_board_in(&conn, board_of(&conn, col)).unwrap();
+
+    assert!(read_time_entry(&conn, entry).unwrap().ended_at.is_some());
+    assert!(read_time_entry(&conn, other_entry).unwrap().ended_at.is_none());
+}
+
+#[test]
 fn the_automatic_archive_keeps_dependencies_and_stops_the_timer() {
     let mut conn = test_db();
     let (_board, first) = board_for_retries(&mut conn);
@@ -4729,4 +4771,641 @@ fn the_workspace_list_brings_the_fields_of_its_visible_boards() {
     assert_eq!(names, vec!["Оценка"], "поля убранных досок и чужих пространств не приезжают");
     assert_eq!(list.fields[0].values.len(), 1);
     assert_eq!((list.fields[0].values[0].card_id, list.fields[0].values[0].value.as_str()), (card, "7"));
+}
+
+// ─── ИИ-ассистент: настройки и история ───
+
+fn ai(url: &str, model: &str, context_length: i64, timeout_seconds: i64) -> AiSettings {
+    AiSettings { ollama_url: url.into(), model: model.into(), context_length, timeout_seconds }
+}
+
+#[test]
+fn ai_settings_default_to_local_ollama_without_a_model() {
+    let conn = test_db();
+    let s = read_ai_settings(&conn).unwrap();
+    assert_eq!(s.ollama_url, crate::ollama::DEFAULT_OLLAMA_URL);
+    assert_eq!(s.model, "");
+    assert_eq!(s.context_length, DEFAULT_AI_CONTEXT_LENGTH);
+    assert_eq!(s.timeout_seconds, 180);
+}
+
+#[test]
+fn ai_settings_are_saved_trimmed_and_clamped() {
+    let conn = test_db();
+    let saved = write_ai_settings(&conn, &ai(" http://127.0.0.1:8080/ ", " qwen2.5:7b ", 5000, 5000)).unwrap();
+    assert_eq!(saved.ollama_url, "http://127.0.0.1:8080");
+    assert_eq!(saved.model, "qwen2.5:7b");
+    assert_eq!(saved.context_length, AI_CONTEXT_LENGTH_MAX);
+    assert_eq!(saved.timeout_seconds, crate::ollama::CHAT_TIMEOUT_MAX_SECS);
+    assert_eq!(read_ai_settings(&conn).unwrap(), saved);
+
+    let saved = write_ai_settings(&conn, &AiSettings { context_length: 0, timeout_seconds: 1, ..saved }).unwrap();
+    assert_eq!(saved.context_length, AI_CONTEXT_LENGTH_MIN);
+    assert_eq!(saved.timeout_seconds, crate::ollama::CHAT_TIMEOUT_MIN_SECS);
+
+    let saved = write_ai_settings(&conn, &AiSettings { timeout_seconds: 240, ..saved }).unwrap();
+    assert_eq!(saved.timeout_seconds, 240);
+}
+
+#[test]
+fn a_remote_ollama_address_is_not_saved() {
+    let conn = test_db();
+    let err = write_ai_settings(&conn, &ai("http://192.168.1.5:11434", "x", 20, 180)).unwrap_err();
+    assert_eq!(err, crate::ollama::ERR_NOT_LOCAL);
+    // Ничего не легло — осталось значение по умолчанию.
+    let s = read_ai_settings(&conn).unwrap();
+    assert_eq!(s.ollama_url, crate::ollama::DEFAULT_OLLAMA_URL);
+    assert_eq!(s.model, "");
+}
+
+#[test]
+fn chat_exchange_is_saved_as_a_pair_in_order() {
+    let mut conn = test_db();
+    let saved = save_chat_exchange(&mut conn, 1, "Привет", "Здравствуйте!", &[], &[]).unwrap();
+    assert_eq!(saved.iter().map(|m| (m.role.as_str(), m.content.as_str())).collect::<Vec<_>>(),
+               [("user", "Привет"), ("assistant", "Здравствуйте!")]);
+    assert!(saved.iter().all(|m| m.workspace_id == 1 && !m.created_at.is_empty()));
+    assert!(saved.iter().all(|m| m.tools_used.is_empty()));
+    assert_eq!(read_chat_history(&conn, 1, None).unwrap(), saved);
+}
+
+#[test]
+fn the_tools_behind_an_answer_are_kept_with_it() {
+    let mut conn = test_db();
+    let tools = vec!["get_boards".to_string(), "get_board_columns".to_string()];
+    let saved = save_chat_exchange(&mut conn, 1, "Сколько досок?", "Две.", &tools, &[]).unwrap();
+    assert!(saved[0].tools_used.is_empty(), "у вопроса человека инструментов нет");
+    assert_eq!(saved[1].tools_used, tools);
+    assert_eq!(read_chat_history(&conn, 1, None).unwrap()[1].tools_used, tools);
+}
+
+#[test]
+fn a_broken_tools_column_does_not_break_the_history() {
+    let mut conn = test_db();
+    save_chat_exchange(&mut conn, 1, "q", "a", &["get_boards".to_string()], &[]).unwrap();
+    conn.execute("UPDATE chat_history SET tools_used = 'не json'", ()).unwrap();
+    let history = read_chat_history(&conn, 1, None).unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(history[1].tools_used.is_empty());
+}
+
+#[test]
+fn chat_history_belongs_to_its_workspace() {
+    let mut conn = test_db();
+    let other = second_workspace(&conn);
+    save_chat_exchange(&mut conn, 1, "a", "b", &[], &[]).unwrap();
+    save_chat_exchange(&mut conn, other, "c", "d", &[], &[]).unwrap();
+
+    assert_eq!(read_chat_history(&conn, other, None).unwrap().iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["c", "d"]);
+
+    conn.execute("DELETE FROM chat_history WHERE workspace_id = ?1", params![1]).unwrap();
+    assert!(read_chat_history(&conn, 1, None).unwrap().is_empty());
+    assert_eq!(read_chat_history(&conn, other, None).unwrap().len(), 2);
+}
+
+#[test]
+fn the_context_window_takes_the_latest_messages_oldest_first() {
+    let mut conn = test_db();
+    for i in 0..5 {
+        save_chat_exchange(&mut conn, 1, &format!("q{i}"), &format!("a{i}"), &[], &[]).unwrap();
+    }
+    let last = read_chat_history(&conn, 1, Some(3)).unwrap();
+    assert_eq!(last.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["a3", "q4", "a4"]);
+}
+
+#[test]
+fn system_rows_never_reach_the_history() {
+    let mut conn = test_db();
+    conn.execute("INSERT INTO chat_history (workspace_id, role, content) VALUES (1, 'system', 'старый промпт')", ()).unwrap();
+    save_chat_exchange(&mut conn, 1, "q", "a", &[], &[]).unwrap();
+    assert_eq!(read_chat_history(&conn, 1, None).unwrap().len(), 2);
+}
+
+#[test]
+fn unknown_roles_are_refused_by_the_schema() {
+    let conn = test_db();
+    assert!(conn.execute("INSERT INTO chat_history (workspace_id, role, content) VALUES (1, 'tool', 'x')", ()).is_err());
+}
+
+#[test]
+fn the_request_starts_with_the_system_prompt() {
+    let mut conn = test_db();
+    save_chat_exchange(&mut conn, 1, "q", "a", &[], &[]).unwrap();
+    let history = read_chat_history(&conn, 1, None).unwrap();
+    let request = build_chat_request("ПРОМПТ", &history, "новый вопрос");
+    assert_eq!(request.iter().map(|m| m.role.as_str()).collect::<Vec<_>>(), ["system", "user", "assistant", "user"]);
+    assert_eq!(request[0].content, "ПРОМПТ");
+    assert_eq!(request[3].content, "новый вопрос");
+}
+
+#[test]
+fn the_system_prompt_names_today_and_the_workspace() {
+    let conn = test_db();
+    let today: String = conn.query_row("SELECT date('now', 'localtime')", [], |r| r.get(0)).unwrap();
+    let prompt = system_prompt(&conn, 1).unwrap();
+    assert!(prompt.starts_with(AI_SYSTEM_PROMPT));
+    assert!(prompt.contains(&format!("Сегодня {}", today)), "{prompt}");
+    assert!(prompt.contains("«Тест»"), "{prompt}");
+    assert!(system_prompt(&conn, 999).is_err());
+}
+
+// ─── Дата завершения и попытки (ассистент, Фаза 4) ───
+
+fn completed_at_of(conn: &Connection, card_id: i64) -> Option<String> {
+    conn.query_row("SELECT completed_at FROM cards WHERE id = ?1", params![card_id], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn moving_into_the_final_column_stamps_completion_once() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let board = board_of(&conn, first);
+    let final_col = column_id_by_name(&conn, board, "Закрыто");
+    let work = column_id_by_name(&conn, board, "В работе");
+    let card = overdue_card(&conn, first, "Отчёт", 0);
+
+    move_card_in(&mut conn, card, work, 0).unwrap();
+    assert!(completed_at_of(&conn, card).is_none(), "рабочая колонка — ещё не завершение");
+
+    move_card_in(&mut conn, card, final_col, 0).unwrap();
+    let stamp = completed_at_of(&conn, card).expect("въезд в «Закрыто» — завершение");
+    conn.execute("UPDATE cards SET completed_at = '2020-01-01 00:00:00' WHERE id = ?1", params![card]).unwrap();
+    // Перестановка внутри финальной колонки дату не переписывает.
+    move_card_in(&mut conn, card, final_col, 0).unwrap();
+    assert_eq!(completed_at_of(&conn, card).as_deref(), Some("2020-01-01 00:00:00"));
+    assert!(!stamp.is_empty());
+}
+
+#[test]
+fn a_card_created_straight_in_the_final_column_is_completed() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let final_col = column_id_by_name(&conn, board_of(&conn, first), "Закрыто");
+    let done = create_card_in(&conn, final_col, "Уже сделано".into(), String::new()).unwrap();
+    let open = create_card_in(&conn, first, "Ещё нет".into(), String::new()).unwrap();
+    assert!(completed_at_of(&conn, done.id).is_some());
+    assert!(completed_at_of(&conn, open.id).is_none());
+}
+
+#[test]
+fn every_retry_is_logged_and_deleting_the_card_clears_the_log() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = overdue_card(&conn, first, "Просрочена", 2);
+    request_card_retry_in(&conn, card).unwrap();
+    let logged: i64 = conn.query_row("SELECT COUNT(*) FROM card_retries WHERE card_id = ?1", params![card], |r| r.get(0)).unwrap();
+    assert_eq!(logged, 1);
+
+    // Внешний ключ настоящий: без очистки удаление упало бы.
+    delete_card_in(&mut conn, card).unwrap();
+    let left: i64 = conn.query_row("SELECT COUNT(*) FROM card_retries", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn deleting_a_column_or_a_board_clears_their_retries() {
+    let mut conn = test_db();
+    let (board, first) = board_for_retries(&mut conn);
+    let extra = create_column_in(&mut conn, board, "Лишняя").unwrap().id;
+    let a = overdue_card(&conn, extra, "А", 2);
+    request_card_retry_in(&conn, a).unwrap();
+    // Попытка возвращает карточку в первую рабочую колонку — вернём обратно,
+    // чтобы удалялась именно колонка с ней.
+    conn.execute("UPDATE cards SET column_id = ?1 WHERE id = ?2", params![extra, a]).unwrap();
+    delete_column_in(&mut conn, extra).unwrap();
+
+    let b = overdue_card(&conn, first, "Б", 2);
+    request_card_retry_in(&conn, b).unwrap();
+    delete_board_in(&mut conn, board).unwrap();
+
+    let left: i64 = conn.query_row("SELECT COUNT(*) FROM card_retries", [], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn the_greeting_carries_the_report_and_is_saved_alone() {
+    let conn = test_db();
+    let report = serde_json::json!({ "during_period": { "completed": 5 } });
+    let request = greeting_request("ПРОМПТ", &report);
+    assert_eq!(request.len(), 2);
+    assert!(request[0].content.starts_with("ПРОМПТ"));
+    assert!(request[0].content.contains(r#""completed":5"#), "{}", request[0].content);
+
+    let saved = save_assistant_message(&conn, 1, "Привет! За неделю…", &["get_productivity_report".to_string()]).unwrap();
+    assert_eq!(saved.role, "assistant");
+    assert_eq!(saved.tools_used, ["get_productivity_report"]);
+    assert_eq!(read_chat_history(&conn, 1, None).unwrap(), vec![saved]);
+}
+
+// ─── Повторяющиеся задачи (Фаза 6 пакета из шести функций) ───
+
+#[test]
+fn civil_day_arithmetic_round_trips() {
+    assert_eq!(days_from_civil(1970, 1, 1), 0);
+    assert_eq!(days_from_civil(2000, 3, 1), 11017);
+    assert_eq!(civil_from_days(0), (1970, 1, 1));
+    let mut z = days_from_civil(1999, 12, 25);
+    for _ in 0..2000 {
+        let (y, m, d) = civil_from_days(z);
+        assert_eq!(days_from_civil(y, m, d), z);
+        assert!(is_calendar_date(&format_day((y, m, d))));
+        z += 17;
+    }
+}
+
+#[test]
+fn next_due_steps_from_the_old_due_date() {
+    let today = "2026-09-27";
+    assert_eq!(next_due_date("2026-09-29", "daily", today).as_deref(), Some("2026-09-30"));
+    assert_eq!(next_due_date("2026-09-29", "weekly", today).as_deref(), Some("2026-10-06"));
+    assert_eq!(next_due_date("2026-09-29", "monthly", today).as_deref(), Some("2026-10-29"));
+    // Через границу года.
+    assert_eq!(next_due_date("2026-12-30", "weekly", today).as_deref(), Some("2027-01-06"));
+    assert_eq!(next_due_date("2026-12-15", "monthly", today).as_deref(), Some("2027-01-15"));
+    // Срок сегодня — следующий через шаг, а не сегодня же.
+    assert_eq!(next_due_date(today, "daily", today).as_deref(), Some("2026-09-28"));
+}
+
+#[test]
+fn a_month_step_keeps_to_the_calendar() {
+    let today = "2026-01-01";
+    assert_eq!(next_due_date("2026-01-31", "monthly", today).as_deref(), Some("2026-02-28"));
+    assert_eq!(next_due_date("2028-01-31", "monthly", today).as_deref(), Some("2028-02-29"));
+    assert_eq!(next_due_date("2026-03-31", "monthly", today).as_deref(), Some("2026-04-30"));
+}
+
+#[test]
+fn a_late_close_skips_to_the_first_date_not_in_the_past() {
+    let today = "2026-09-27";
+    // Срок 1 сентября, закрыли 27-го: +7 дало бы 8 сентября — уже прошло.
+    assert_eq!(next_due_date("2026-09-01", "weekly", today).as_deref(), Some("2026-09-29"),
+               "тот же день недели, первый не прошедший");
+    assert_eq!(next_due_date("2026-09-01", "daily", today).as_deref(), Some("2026-09-27"));
+    // Месяц — от исходного дня: 31 мая → 30 сентября, первое не прошедшее.
+    assert_eq!(next_due_date("2026-05-31", "monthly", today).as_deref(), Some("2026-09-30"));
+}
+
+#[test]
+fn unknown_rules_and_broken_dates_give_no_date() {
+    assert!(next_due_date("2026-09-29", "yearly", "2026-09-27").is_none());
+    assert!(next_due_date("29.09.2026", "daily", "2026-09-27").is_none());
+}
+
+#[test]
+fn recurrence_is_set_cleared_and_validated() {
+    let mut conn = test_db();
+    let (_board, first) = board_for_retries(&mut conn);
+    let card = assigned_card(&conn, first, "Отчёт", None, "Medium");
+    set_card_recurrence_in(&conn, card, Some("weekly")).unwrap();
+    assert_eq!(card_recurrence_in(&conn, card).unwrap().as_deref(), Some("weekly"));
+    assert_eq!(set_card_recurrence_in(&conn, card, Some("yearly")).unwrap_err(), ERR_BAD_RECURRENCE);
+    assert_eq!(card_recurrence_in(&conn, card).unwrap().as_deref(), Some("weekly"), "отказ ничего не меняет");
+    set_card_recurrence_in(&conn, card, None).unwrap();
+    assert!(card_recurrence_in(&conn, card).unwrap().is_none());
+    set_card_recurrence_in(&conn, card, Some("  ")).unwrap();
+    assert!(card_recurrence_in(&conn, card).unwrap().is_none(), "пустая строка — не повторять");
+    assert!(set_card_recurrence_in(&conn, 99999, Some("daily")).is_err());
+    // И сама схема не пустит мусор мимо команды.
+    assert!(conn.execute("UPDATE cards SET recurrence_rule = 'hourly' WHERE id = ?1", params![card]).is_err());
+}
+
+/// Повторяющаяся карточка со всем, что копируется, и тем, что нет.
+fn recurring_card(conn: &mut Connection) -> (i64, i64, i64, i64) {
+    let (board, first) = board_for_retries(conn);
+    let final_col = column_id_by_name(conn, board, "Закрыто");
+    let work = column_id_by_name(conn, board, "В работе");
+    let colleague = add_member(conn, "Коллега");
+    let card = assigned_card(conn, work, "Недельный отчёт", Some(colleague), "High");
+    let due = local_day(conn, 2);
+    conn.execute("UPDATE cards SET description = 'Собрать цифры', due_date = ?1 WHERE id = ?2", params![due, card]).unwrap();
+    set_card_recurrence_in(conn, card, Some("weekly")).unwrap();
+
+    conn.execute("INSERT INTO checklist_items (card_id, text, is_done, position) VALUES (?1, 'Выгрузка', 1, 0)", params![card]).unwrap();
+    conn.execute("INSERT INTO checklist_items (card_id, text, is_done, position) VALUES (?1, 'Письмо', 0, 1)", params![card]).unwrap();
+    conn.execute("INSERT INTO labels (board_id, name, color) VALUES (?1, 'Отчёты', '#f00')", params![board]).unwrap();
+    let label = conn.last_insert_rowid();
+    conn.execute("INSERT INTO card_labels (card_id, label_id) VALUES (?1, ?2)", params![card, label]).unwrap();
+    let text_field = create_custom_field_in(conn, board, "Клиент", "text", vec![]).unwrap().id;
+    let date_field = create_custom_field_in(conn, board, "Созвон", "date", vec![]).unwrap().id;
+    set_custom_field_value_in(conn, card, text_field, Some("ООО Ромашка".into())).unwrap();
+    set_custom_field_value_in(conn, card, date_field, Some("2026-10-01".into())).unwrap();
+    conn.execute("INSERT INTO card_comments (card_id, body) VALUES (?1, 'сделал половину')", params![card]).unwrap();
+    let me = self_member_id(conn);
+    conn.execute(
+        "INSERT INTO time_entries (card_id, member_id, started_at, ended_at, duration_seconds)
+         VALUES (?1, ?2, datetime('now', '-1 hour'), datetime('now'), 3600)",
+        params![card, me],
+    ).unwrap();
+    (card, first, final_col, colleague)
+}
+
+fn count_where(conn: &Connection, sql: &str, id: i64) -> i64 {
+    conn.query_row(sql, params![id], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn closing_a_recurring_card_spawns_the_next_one() {
+    let mut conn = test_db();
+    let (card, first, final_col, colleague) = recurring_card(&mut conn);
+    let old_due: String = conn.query_row("SELECT due_date FROM cards WHERE id = ?1", params![card], |r| r.get(0)).unwrap();
+
+    let spawn = move_card_in(&mut conn, card, final_col, 0).unwrap().expect("следующая карточка");
+    let expected_due = next_due_date(&old_due, "weekly", &local_day(&conn, 0)).unwrap();
+    assert_eq!(expected_due, local_day(&conn, 9), "срок старой +7 дней");
+    assert_eq!(spawn.title, "Недельный отчёт");
+    assert_eq!(spawn.due_date.as_deref(), Some(expected_due.as_str()));
+    assert_eq!(spawn.column_name, "Новые");
+    assert_eq!(spawn.rule, "weekly");
+
+    let (col, desc, due, prio, who, rule, done): (i64, String, Option<String>, String, Option<i64>, Option<String>, Option<String>) = conn.query_row(
+        "SELECT column_id, description, due_date, priority, assignee_id, recurrence_rule, completed_at FROM cards WHERE id = ?1",
+        params![spawn.card_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+    ).unwrap();
+    assert_eq!(col, first, "в первую рабочую колонку — туда же, куда возвращает попытка");
+    assert_eq!((desc.as_str(), due.as_deref(), prio.as_str(), who), ("Собрать цифры", Some(expected_due.as_str()), "High", Some(colleague)));
+    assert_eq!(rule.as_deref(), Some("weekly"), "цикл продолжается");
+    assert!(done.is_none());
+
+    // Чек-лист — копия, все пункты непомеченные, в том же порядке.
+    let items: Vec<(String, bool)> = conn.prepare("SELECT text, is_done FROM checklist_items WHERE card_id = ?1 ORDER BY position")
+        .unwrap().query_map(params![spawn.card_id], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0))).unwrap()
+        .collect::<Result<_, _>>().unwrap();
+    assert_eq!(items, vec![("Выгрузка".to_string(), false), ("Письмо".to_string(), false)]);
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM card_labels WHERE card_id = ?1", spawn.card_id), 1);
+    let values: Vec<String> = conn.prepare("SELECT value FROM custom_field_values WHERE card_id = ?1").unwrap()
+        .query_map(params![spawn.card_id], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    assert_eq!(values, vec!["ООО Ромашка".to_string()], "поле-дата не копируется");
+    // Комментарии и время — история того выполнения.
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM card_comments WHERE card_id = ?1", spawn.card_id), 0);
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM time_entries WHERE card_id = ?1", spawn.card_id), 0);
+
+    // Исходная — в «Закрыто», нетронутая.
+    let (old_col, old_rule): (i64, Option<String>) = conn.query_row(
+        "SELECT column_id, recurrence_rule FROM cards WHERE id = ?1", params![card], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!((old_col, old_rule.as_deref()), (final_col, Some("weekly")));
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM checklist_items WHERE card_id = ?1 AND is_done = 1", card), 1);
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM card_comments WHERE card_id = ?1", card), 1);
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM time_entries WHERE card_id = ?1", card), 1);
+}
+
+#[test]
+fn a_card_without_a_rule_spawns_nothing() {
+    let mut conn = test_db();
+    let (card, _first, final_col, _) = recurring_card(&mut conn);
+    set_card_recurrence_in(&conn, card, None).unwrap();
+    let before = count_where(&conn, "SELECT COUNT(*) FROM cards WHERE id > ?1", 0);
+    assert!(move_card_in(&mut conn, card, final_col, 0).unwrap().is_none());
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM cards WHERE id > ?1", 0), before);
+}
+
+#[test]
+fn shuffling_inside_the_final_column_does_not_spawn_again() {
+    let mut conn = test_db();
+    let (card, _first, final_col, _) = recurring_card(&mut conn);
+    move_card_in(&mut conn, card, final_col, 0).unwrap().unwrap();
+    let after_close = count_where(&conn, "SELECT COUNT(*) FROM cards WHERE id > ?1", 0);
+    assert!(move_card_in(&mut conn, card, final_col, 0).unwrap().is_none());
+    assert_eq!(count_where(&conn, "SELECT COUNT(*) FROM cards WHERE id > ?1", 0), after_close);
+}
+
+#[test]
+fn a_recurring_card_without_a_due_date_spawns_one_without_it() {
+    let mut conn = test_db();
+    let (board, first) = board_for_retries(&mut conn);
+    let final_col = column_id_by_name(&conn, board, "Закрыто");
+    let card = assigned_card(&conn, first, "Полить цветы", None, "Low");
+    set_card_recurrence_in(&conn, card, Some("daily")).unwrap();
+    let spawn = move_card_in(&mut conn, card, final_col, 0).unwrap().unwrap();
+    assert!(spawn.due_date.is_none());
+}
+
+#[test]
+fn a_late_recurring_card_is_not_born_overdue() {
+    let mut conn = test_db();
+    let (board, first) = board_for_retries(&mut conn);
+    let final_col = column_id_by_name(&conn, board, "Закрыто");
+    let card = overdue_card(&conn, first, "Планёрка", 20);
+    set_card_recurrence_in(&conn, card, Some("weekly")).unwrap();
+    let spawn = move_card_in(&mut conn, card, final_col, 0).unwrap().unwrap();
+    let due = spawn.due_date.unwrap();
+    assert!(due >= local_day(&conn, 0), "{due}");
+    assert!(due < local_day(&conn, 7), "первый не прошедший, а не на неделю дальше: {due}");
+}
+
+// ─── Экспорт доски: заметки, поля, зависимости, время (§37) ───
+
+/// Доска со всем, что добавилось в экспорт: заметки, четыре поля (одно с
+/// устаревшим вариантом выбора), зависимость внутри доски и через доски,
+/// законченная и идущая сессии, повторение, дата завершения.
+struct RichBoard {
+    board: i64,
+    report: i64,
+    data: i64,
+    colleague: i64,
+}
+
+fn rich_board(conn: &mut Connection) -> RichBoard {
+    let board = create_board_in(conn, 1, "Богатая доска", "").unwrap().id;
+    let first = column_id_by_name(conn, board, "Новые");
+    let final_col = column_id_by_name(conn, board, "Закрыто");
+    let colleague = add_member(conn, "Бухгалтер");
+
+    conn.execute(
+        "INSERT INTO board_notes (board_id, content, updated_at) VALUES (?1, '# План\n- пункт', '2026-09-01 10:00:00')",
+        params![board],
+    ).unwrap();
+
+    let report = assigned_card(conn, first, "Отчёт", None, "High");
+    let data = assigned_card(conn, first, "Данные", None, "Medium");
+    let done = assigned_card(conn, final_col, "Сдано", None, "Low");
+    conn.execute("UPDATE cards SET created_at = '2026-08-01 09:00:00', recurrence_rule = 'monthly' WHERE id = ?1", params![report]).unwrap();
+    conn.execute("UPDATE cards SET completed_at = '2026-09-20 12:00:00' WHERE id = ?1", params![done]).unwrap();
+
+    let client = create_custom_field_in(conn, board, "Клиент", "text", vec![]).unwrap().id;
+    let hours = create_custom_field_in(conn, board, "Часы", "number", vec![]).unwrap().id;
+    let meeting = create_custom_field_in(conn, board, "Созвон", "date", vec![]).unwrap().id;
+    let stage = create_custom_field_in(conn, board, "Этап", "select", vec!["Черновик".into(), "Готов".into()]).unwrap().id;
+    set_custom_field_value_in(conn, report, client, Some("ООО Ромашка".into())).unwrap();
+    set_custom_field_value_in(conn, report, hours, Some("3,5".into())).unwrap();
+    set_custom_field_value_in(conn, report, meeting, Some("2026-10-01".into())).unwrap();
+    set_custom_field_value_in(conn, report, stage, Some("Черновик".into())).unwrap();
+    // Вариант «Черновик» убрали после того, как его выбрали, — значение
+    // остаётся текстом (§31.4).
+    update_custom_field_options_in(conn, stage, vec!["Готов".into(), "Сдан".into()]).unwrap();
+
+    create_dependency(conn, data, report).unwrap();
+    // Связь с карточкой другой доски в файл не попадает.
+    let other_board = create_board_in(conn, 1, "Чужая", "").unwrap().id;
+    let outsider = assigned_card(conn, column_id_by_name(conn, other_board, "Новые"), "Снаружи", None, "Low");
+    create_dependency(conn, outsider, report).unwrap();
+
+    conn.execute(
+        "INSERT INTO time_entries (card_id, member_id, started_at, ended_at, duration_seconds, note)
+         VALUES (?1, ?2, '2026-09-10 08:00:00', '2026-09-10 10:30:00', 9000, 'сверка')",
+        params![report, colleague],
+    ).unwrap();
+    let me = self_member_id(conn);
+    start_timer_in(conn, data, me).unwrap();
+
+    RichBoard { board, report, data, colleague }
+}
+
+fn round_trip(conn: &mut Connection, board: i64) -> (BoardExport, i64) {
+    let json = serde_json::to_string(&build_board_export(conn, board).unwrap()).unwrap();
+    let parsed: BoardExport = serde_json::from_str(&json).unwrap();
+    let export = serde_json::from_str(&json).unwrap();
+    (export, import_board_into(conn, 1, parsed).unwrap())
+}
+
+fn card_by_title(conn: &Connection, board: i64, title: &str) -> i64 {
+    conn.query_row(
+        "SELECT c.id FROM cards c JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1 AND c.title = ?2",
+        params![board, title],
+        |r| r.get(0),
+    ).unwrap()
+}
+
+#[test]
+fn the_export_carries_notes_fields_dependencies_and_time() {
+    let mut conn = test_db();
+    let rich = rich_board(&mut conn);
+    let export = build_board_export(&conn, rich.board).unwrap();
+    let body = &export.board;
+
+    assert_eq!(body.notes, "# План\n- пункт");
+    assert_eq!(body.notes_updated_at.as_deref(), Some("2026-09-01 10:00:00"));
+    assert_eq!(body.custom_fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Клиент", "Часы", "Созвон", "Этап"]);
+    assert_eq!(body.dependencies.len(), 1, "связь с чужой доской в файл не идёт");
+    assert_eq!((body.dependencies[0].blocker_id, body.dependencies[0].blocked_id), (rich.data, rich.report));
+
+    let report = body.columns.iter().flat_map(|c| &c.cards).find(|c| c.title == "Отчёт").unwrap();
+    assert_eq!(report.id, Some(rich.report));
+    assert_eq!(report.recurrence_rule.as_deref(), Some("monthly"));
+    assert_eq!(report.created_at.as_deref(), Some("2026-08-01 09:00:00"));
+    assert_eq!(report.field_values.len(), 4);
+    assert_eq!(report.time_entries.len(), 1);
+    assert_eq!(report.time_entries[0].duration_seconds, 9000);
+    // Участник, на которого ссылается только сессия, тоже в файле.
+    let member_ids: Vec<i64> = body.members.iter().map(|m| m.id).collect();
+    assert!(member_ids.contains(&rich.colleague));
+
+    let data = body.columns.iter().flat_map(|c| &c.cards).find(|c| c.title == "Данные").unwrap();
+    assert!(data.time_entries.is_empty(), "идущая сессия в файл не попадает");
+}
+
+#[test]
+fn a_rich_board_survives_the_round_trip() {
+    let mut conn = test_db();
+    let rich = rich_board(&mut conn);
+    let (_file, new_board) = round_trip(&mut conn, rich.board);
+
+    let (notes, updated): (String, String) = conn.query_row(
+        "SELECT content, updated_at FROM board_notes WHERE board_id = ?1", params![new_board], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!((notes.as_str(), updated.as_str()), ("# План\n- пункт", "2026-09-01 10:00:00"));
+
+    let report = card_by_title(&conn, new_board, "Отчёт");
+    let data = card_by_title(&conn, new_board, "Данные");
+    let done = card_by_title(&conn, new_board, "Сдано");
+    assert_ne!(report, rich.report);
+
+    let (created, rule): (String, Option<String>) = conn.query_row(
+        "SELECT created_at, recurrence_rule FROM cards WHERE id = ?1", params![report], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!((created.as_str(), rule.as_deref()), ("2026-08-01 09:00:00", Some("monthly")));
+    let completed: Option<String> = conn.query_row("SELECT completed_at FROM cards WHERE id = ?1", params![done], |r| r.get(0)).unwrap();
+    assert_eq!(completed.as_deref(), Some("2026-09-20 12:00:00"));
+
+    // Поля — новые, свои для новой доски, со всеми значениями, включая
+    // устаревший вариант выбора.
+    let fields = custom_fields_in(&conn, new_board).unwrap();
+    assert_eq!(fields.len(), 4);
+    let value_of = |name: &str| -> Option<String> {
+        fields.iter().find(|f| f.name == name).unwrap()
+            .values.iter().find(|v| v.card_id == report).map(|v| v.value.clone())
+    };
+    assert_eq!(value_of("Клиент").as_deref(), Some("ООО Ромашка"));
+    assert_eq!(value_of("Часы").as_deref(), Some("3.5"));
+    assert_eq!(value_of("Созвон").as_deref(), Some("2026-10-01"));
+    assert_eq!(value_of("Этап").as_deref(), Some("Черновик"), "устаревший вариант остаётся текстом, как в исходной базе");
+
+    // Зависимость — между новыми карточками.
+    let deps = read_dependencies(&conn, report).unwrap();
+    assert_eq!(deps.blocked_by.iter().map(|d| d.card_id).collect::<Vec<_>>(), vec![data]);
+
+    // Время — законченная сессия с тем же участником по имени.
+    let (who, secs, note): (i64, i64, Option<String>) = conn.query_row(
+        "SELECT member_id, duration_seconds, note FROM time_entries WHERE card_id = ?1", params![report], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).unwrap();
+    assert_eq!((who, secs, note.as_deref()), (rich.colleague, 9000, Some("сверка")));
+    let running_on_copy: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM time_entries WHERE card_id = ?1", params![data], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(running_on_copy, 0, "идущий таймер не переезжает");
+
+    // И повторный экспорт новой доски совпадает с исходным по содержанию.
+    let again = build_board_export(&conn, new_board).unwrap();
+    assert_eq!(again.board.dependencies.len(), 1);
+    assert_eq!(again.board.custom_fields.len(), 4);
+}
+
+#[test]
+fn a_file_written_before_these_fields_still_imports() {
+    let mut conn = test_db();
+    let json = r#"{"taskflow_export_version":1,"exported_at":"2026-08-27 10:00:00","board":{
+        "name":"Старая","columns":[{"name":"Новые","cards":[{"title":"Задача","position":0}]}]}}"#;
+    let export: BoardExport = serde_json::from_str(json).unwrap();
+    let board = import_board_into(&mut conn, 1, export).unwrap();
+    let card = card_by_title(&conn, board, "Задача");
+    let (created, rule): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT created_at, recurrence_rule FROM cards WHERE id = ?1", params![card], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert!(created.is_some(), "без даты в файле её ставит база");
+    assert!(rule.is_none());
+    let notes: i64 = conn.query_row("SELECT COUNT(*) FROM board_notes WHERE board_id = ?1", params![board], |r| r.get(0)).unwrap();
+    assert_eq!(notes, 0);
+}
+
+#[test]
+fn a_hand_edited_file_loses_only_its_broken_parts() {
+    let mut conn = test_db();
+    let json = r#"{"taskflow_export_version":1,"exported_at":"","board":{
+        "name":"Поправленная руками",
+        "custom_fields":[
+            {"id":1,"name":"Непонятное","field_type":"rainbow"},
+            {"id":2,"name":"Часы","field_type":"number"}
+        ],
+        "dependencies":[
+            {"blocker_id":10,"blocked_id":11},
+            {"blocker_id":11,"blocked_id":10},
+            {"blocker_id":10,"blocked_id":999}
+        ],
+        "columns":[{"name":"Новые","cards":[
+            {"id":10,"title":"А","recurrence_rule":"hourly",
+             "field_values":[{"field_id":1,"value":"x"},{"field_id":2,"value":"не число"}],
+             "time_entries":[{"started_at":"2026-09-01 10:00:00","ended_at":""}]},
+            {"id":11,"title":"Б","field_values":[{"field_id":2,"value":"7"}]}
+        ]}]}}"#;
+    let export: BoardExport = serde_json::from_str(json).unwrap();
+    let board = import_board_into(&mut conn, 1, export).expect("битые куски не роняют импорт");
+
+    let a = card_by_title(&conn, board, "А");
+    let b = card_by_title(&conn, board, "Б");
+    let rule: Option<String> = conn.query_row("SELECT recurrence_rule FROM cards WHERE id = ?1", params![a], |r| r.get(0)).unwrap();
+    assert!(rule.is_none(), "неизвестное правило — не повторять");
+
+    let fields = custom_fields_in(&conn, board).unwrap();
+    assert_eq!(fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Часы"], "поле неизвестного типа пропущено");
+    assert_eq!(fields[0].values.iter().map(|v| (v.card_id, v.value.as_str())).collect::<Vec<_>>(), [(b, "7")],
+               "«не число» пропущено, число — нет");
+
+    let edges: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM card_dependencies WHERE blocker_card_id IN (?1, ?2)", params![a, b], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(edges, 1, "второе ребро замкнуло бы цикл, третье ведёт в никуда");
+
+    let sessions: i64 = conn.query_row("SELECT COUNT(*) FROM time_entries WHERE card_id = ?1", params![a], |r| r.get(0)).unwrap();
+    assert_eq!(sessions, 0, "сессия без конца не превращается в идущий таймер");
 }

@@ -194,6 +194,84 @@ pub struct EmailReminder {
     pub days_left: i64,
 }
 
+// ─── ИИ-ассистент ───
+
+/// Настройки ассистента — одни на всё приложение, в `user_profile`, как и
+/// прочие. Модель — имя из `/api/tags` Ollama; пустая строка — «не выбрана».
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AiSettings {
+    pub ollama_url: String,
+    pub model: String,
+    /// Сколько последних сообщений истории уходит модели с каждым вопросом.
+    pub context_length: i64,
+    /// Сколько ждать один ответ модели, в секундах (по умолчанию 180).
+    pub timeout_seconds: i64,
+}
+
+/// Сколько сообщений истории отправлять по умолчанию. У локальных моделей
+/// окно в 4–8 тысяч токенов, и двадцать реплик в него помещаются с запасом.
+pub const DEFAULT_AI_CONTEXT_LENGTH: i64 = 20;
+/// Границы «Длины контекста». Меньше двух — модель не увидит даже своего
+/// прошлого ответа; больше двухсот — переполнит окно любой локальной модели.
+pub const AI_CONTEXT_LENGTH_MIN: i64 = 2;
+pub const AI_CONTEXT_LENGTH_MAX: i64 = 200;
+
+/// Реплика чата ассистента. История своя у каждого пространства.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct ChatMessage {
+    pub id: i64,
+    pub workspace_id: i64,
+    /// `user` или `assistant`. `system` схема допускает, но в историю его не
+    /// пишут: системный промпт зашит в коде и подставляется при каждом вопросе.
+    pub role: String,
+    pub content: String,
+    /// UTC, `datetime('now')` — как все отметки времени в базе.
+    pub created_at: String,
+    /// Инструменты, которые модель вызвала ради этого ответа, по порядку.
+    /// У реплик человека и ответов без инструментов — пусто.
+    pub tools_used: Vec<String>,
+    /// Изменения, которые ассистент предлагал по ходу ответа, и что с ними
+    /// стало. Остаются в истории: по ним видно, что в базе поменялось и кто
+    /// это подтвердил.
+    pub actions: Vec<AiActionLog>,
+}
+
+/// Одно предложенное ассистентом изменение и его судьба.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AiActionLog {
+    /// То же описание, что человек видел в превью.
+    pub description: String,
+    /// `done` — выполнено, `cancelled` — человек отказался, `failed` —
+    /// подтвердил, но выполнить не вышло (данные успели измениться).
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Изменение, которое ждёт «Да» или «Отмена».
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AiPendingAction {
+    /// Номер ожидания: подтверждение со старым номером не выполнит новое
+    /// действие, если между ними что-то поменялось.
+    pub id: i64,
+    /// Вопрос человека, на который идёт ответ, — чат показывает его, пока ждёт.
+    pub user_text: String,
+    pub tool: String,
+    pub description: String,
+    /// О чём стоит знать до «Да»: необратимость, блокирующие задачи,
+    /// остановка другого таймера.
+    pub warnings: Vec<String>,
+}
+
+/// Итог одного обращения к ассистенту: либо ответ готов и записан в историю
+/// (`messages` — вопрос и ответ), либо ассистент ждёт подтверждения
+/// (`pending`), и ничего ещё не записано.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct ChatTurn {
+    pub messages: Vec<ChatMessage>,
+    pub pending: Option<AiPendingAction>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserProfile {
     pub avatar_initials: String,
@@ -392,6 +470,23 @@ pub const ARCHIVE_REASON_MAX_RETRIES: &str = "incomplete_max_retries";
 /// schema. Stored in English; the interface renders its own Russian labels.
 pub const PRIORITIES: [&str; 3] = ["Low", "Medium", "High"];
 
+/// Допустимые значения `cards.recurrence_rule` — те же, что в `CHECK` схемы.
+/// NULL — задача не повторяется.
+pub const RECURRENCE_RULES: [&str; 3] = ["daily", "weekly", "monthly"];
+
+/// Следующая карточка повторяющейся задачи, созданная при переносе
+/// предыдущей в финальную колонку. Возвращается из `update_card_position`,
+/// чтобы экран сказал об этом тостом и дал её открыть.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct RecurringSpawn {
+    pub card_id: i64,
+    pub title: String,
+    pub due_date: Option<String>,
+    pub board_id: i64,
+    pub column_name: String,
+    pub rule: String,
+}
+
 // ─── Workspace-wide card list (the "Список" screen) ───
 
 /// One row of the list screen: a card plus everything needed to render and edit
@@ -460,7 +555,7 @@ pub struct BoardExport {
     pub board: BoardExportBody,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BoardExportBody {
     pub name: String,
     #[serde(default)]
@@ -476,6 +571,64 @@ pub struct BoardExportBody {
     pub members: Vec<MemberExport>,
     #[serde(default)]
     pub columns: Vec<ColumnExport>,
+    // ─── Добавлено 2026-09-27 (§37) ───
+    // Всё ниже — через `default`, версия формата не поднималась (§15): старая
+    // сборка прочтёт такой файл без этих данных, а файл старой сборки —
+    // доска без заметок, полей и связей, а не ошибка.
+    /// Markdown-заметки доски (§26). Пустая строка — заметок не было.
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub notes_updated_at: Option<String>,
+    /// Пользовательские поля доски (§30) — с экспорт-локальными id, на них
+    /// ссылаются `CardExport::field_values`.
+    #[serde(default)]
+    pub custom_fields: Vec<CustomFieldExport>,
+    /// Зависимости между карточками **этой** доски (§28) — по
+    /// `CardExport::id`. Связь с карточкой на другой доске в файл не попадает:
+    /// второго конца в нём нет, и восстановить её было бы не к чему.
+    #[serde(default)]
+    pub dependencies: Vec<DependencyExport>,
+}
+
+/// Пользовательское поле доски в файле экспорта. `id` — экспорт-локальный.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CustomFieldExport {
+    pub id: i64,
+    pub name: String,
+    pub field_type: String,
+    #[serde(default)]
+    pub select_options: Vec<String>,
+}
+
+/// Значение пользовательского поля на карточке: `field_id` —
+/// экспорт-локальный id из `BoardExportBody::custom_fields`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FieldValueExport {
+    pub field_id: i64,
+    pub value: String,
+}
+
+/// Законченная сессия учёта времени (§29). Идущая в файл не попадает: у неё
+/// ещё нет длительности, а в другой установке она стала бы чужим таймером.
+/// `member_id` — экспорт-локальный, как у исполнителя.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TimeEntryExport {
+    #[serde(default)]
+    pub member_id: Option<i64>,
+    pub started_at: String,
+    pub ended_at: String,
+    #[serde(default)]
+    pub duration_seconds: i64,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// Ребро «`blocker_id` блокирует `blocked_id`» по `CardExport::id`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DependencyExport {
+    pub blocker_id: i64,
+    pub blocked_id: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -550,7 +703,7 @@ pub struct CommentExport {
     pub author_id: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CardExport {
     pub title: String,
     #[serde(default)]
@@ -597,6 +750,25 @@ pub struct CardExport {
     /// сборка должна прочитать файл без комментариев, а не отвергнуть его.
     #[serde(default)]
     pub comments: Vec<CommentExport>,
+    // ─── Добавлено 2026-09-27 (§37), всё через `default` ───
+    /// Экспорт-локальный id карточки — на него ссылаются
+    /// `BoardExportBody::dependencies`. `None` в файлах старых сборок.
+    #[serde(default)]
+    pub id: Option<i64>,
+    /// Когда задачу завели и когда закрыли (UTC, как в базе). Без них
+    /// перенесённая доска выглядела бы в сводке продуктивности (§35) целиком
+    /// «созданной сегодня».
+    #[serde(default)]
+    pub created_at: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<String>,
+    /// Правило повторения (§36): daily / weekly / monthly.
+    #[serde(default)]
+    pub recurrence_rule: Option<String>,
+    #[serde(default)]
+    pub field_values: Vec<FieldValueExport>,
+    #[serde(default)]
+    pub time_entries: Vec<TimeEntryExport>,
 }
 
 /// Result of a full database export, so the Settings screen can confirm what

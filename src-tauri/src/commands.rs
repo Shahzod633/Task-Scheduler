@@ -7,11 +7,15 @@ use crate::models::{
     Workspace, Board, Column, Card, Notification, UserProfile, BoardNotes, BackupInfo,
     BoardExport, BoardExportBody, LabelExport, ColumnExport, CardExport, ChecklistItemExport,
     CommentExport, MemberExport, DatabaseExport,
+    CustomFieldExport, FieldValueExport, TimeEntryExport, DependencyExport,
     Member, ChecklistItem, CardComment, CardRow, CardDependencies, DependencyCard, BoardColumns, WorkspaceCardList, WorkloadRow, MEMBER_COLORS, PRIORITIES,
     TimeEntry, ActiveTimer, StoppedTimer, StartTimerResult,
     CustomField, CustomFieldValue, CUSTOM_FIELD_TYPES,
     EXPORT_FORMAT_VERSION, ReminderSettings, DueReminder,
     EmailSettings, EmailReminder, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, DEFAULT_EMAIL_RECIPIENT,
+    AiSettings, ChatMessage, AiActionLog, AiPendingAction, ChatTurn,
+    DEFAULT_AI_CONTEXT_LENGTH, AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX,
+    RecurringSpawn, RECURRENCE_RULES,
 };
 
 #[cfg(test)]
@@ -114,6 +118,11 @@ const BOARD_COLUMNS: &str = "id, workspace_id, name, gradient, is_starred, creat
 #[tauri::command]
 pub fn get_boards(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Board>> {
     let conn = state.conn.lock().unwrap();
+    boards_in(&conn, workspace_id)
+}
+
+/// Тело `get_boards` без `State` — его же зовёт инструмент ассистента.
+fn boards_in(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<Vec<Board>> {
     let sql = format!("SELECT {} FROM boards WHERE workspace_id = ?1 AND archived = 0 AND is_system = 0 ORDER BY is_starred DESC, id DESC", BOARD_COLUMNS);
     let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
 
@@ -190,7 +199,22 @@ pub fn update_board(id: i64, name: String, gradient: String, is_starred: bool, s
 #[tauri::command]
 pub fn archive_board(id: i64, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
-    conn.execute("UPDATE boards SET archived = 1 WHERE id = ?1", params![id]).map_err(to_string_err)?;
+    archive_board_in(&conn, id)
+}
+
+/// Как и у карточки (§31.2), архивация доски останавливает идущие таймеры её
+/// карточек: сами карточки не архивируются, но с глаз убраны так же, и время
+/// на невидимой задаче сбивало бы с толку. Решение пользователя от 2026-09-26.
+fn archive_board_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<()> {
+    let tx = conn.unchecked_transaction().map_err(to_string_err)?;
+    tx.execute("UPDATE boards SET archived = 1 WHERE id = ?1", params![id]).map_err(to_string_err)?;
+    stop_running(
+        &tx,
+        "card_id IN (SELECT c.id FROM cards c JOIN columns col ON col.id = c.column_id WHERE col.board_id = ?1)",
+        id,
+    )
+    .map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)?;
     Ok(())
 }
 
@@ -278,6 +302,11 @@ fn final_column_of_board(
 #[tauri::command]
 pub fn get_columns(board_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Column>> {
     let conn = state.conn.lock().unwrap();
+    columns_in(&conn, board_id)
+}
+
+/// Тело `get_columns` без `State` — его же зовёт инструмент ассистента.
+fn columns_in(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<Vec<Column>> {
     let sql = format!(
         "SELECT {} FROM columns WHERE board_id = ?1 AND archived = 0 ORDER BY position ASC",
         COLUMN_COLUMNS
@@ -377,8 +406,14 @@ fn archive_column_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<()> {
     if column_is_required(conn, id)? {
         return Err(ERR_COLUMN_IS_REQUIRED.to_string());
     }
-    conn.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![id])
+    // Таймеры карточек колонки останавливаются в той же транзакции — как при
+    // архивации карточки и доски (решение от 2026-09-26).
+    let tx = conn.unchecked_transaction().map_err(to_string_err)?;
+    tx.execute("UPDATE columns SET archived = 1 WHERE id = ?1", params![id])
         .map_err(to_string_err)?;
+    stop_running(&tx, "card_id IN (SELECT id FROM cards WHERE column_id = ?1)", id)
+        .map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)?;
     Ok(())
 }
 
@@ -740,6 +775,11 @@ fn row_to_card_with_board(row: &rusqlite::Row) -> rusqlite::Result<Card> {
 #[tauri::command]
 pub fn get_cards(column_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Card>> {
     let conn = state.conn.lock().unwrap();
+    cards_in(&conn, column_id)
+}
+
+/// Тело `get_cards` без `State` — его же зовёт инструмент ассистента.
+fn cards_in(conn: &rusqlite::Connection, column_id: i64) -> CmdResult<Vec<Card>> {
     let sql = format!(
         "SELECT {}, {}, {} FROM cards WHERE column_id = ?1 AND archived = 0 ORDER BY position ASC",
         CARD_COLUMNS, CHECKLIST_COUNTS, BLOCKED_OPEN_COUNT
@@ -756,7 +796,11 @@ pub fn get_cards(column_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Car
 #[tauri::command]
 pub fn create_card(column_id: i64, title: String, description: String, state: State<'_, DbState>) -> CmdResult<Card> {
     let conn = state.conn.lock().unwrap();
+    create_card_in(&conn, column_id, title, description)
+}
 
+/// Тело `create_card` без `State` — его же зовёт ассистент.
+fn create_card_in(conn: &rusqlite::Connection, column_id: i64, title: String, description: String) -> CmdResult<Card> {
     let pos: i64 = conn.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM cards WHERE column_id = ?1",
         params![column_id],
@@ -776,6 +820,13 @@ pub fn create_card(column_id: i64, title: String, description: String, state: St
     ).map_err(to_string_err)?;
 
     let id = conn.last_insert_rowid();
+    // Карточка, заведённая сразу в финальной колонке, завершена в момент
+    // создания — иначе отчёт «завершено за период» её бы не увидел.
+    conn.execute(
+        "UPDATE cards SET completed_at = datetime('now')
+          WHERE id = ?1 AND (SELECT is_final FROM columns WHERE id = ?2) = 1",
+        params![id, column_id],
+    ).map_err(to_string_err)?;
     Ok(Card {
         id, column_id, title, description, position: pos, due_date: None, created_at: "".into(), archived: 0,
         is_mistake: false, mistake_marked_at: None, mistake_resolved_at: None, retry_count: 0,
@@ -870,8 +921,16 @@ pub const ERR_CARD_IS_FINAL: &str = "Карточка в финальной ко
 
 /// Moves a card to `new_column_id` at `new_position`, renumbering only the
 /// neighboring cards actually affected by the move (not the whole board).
+///
+/// Если это был въезд повторяющейся задачи в финальную колонку, возвращает
+/// созданную следующую карточку — экран говорит о ней тостом (§36).
 #[tauri::command]
-pub fn update_card_position(id: i64, new_column_id: i64, new_position: i64, state: State<'_, DbState>) -> CmdResult<()> {
+pub fn update_card_position(
+    id: i64,
+    new_column_id: i64,
+    new_position: i64,
+    state: State<'_, DbState>,
+) -> CmdResult<Option<RecurringSpawn>> {
     let mut conn = state.conn.lock().unwrap();
     move_card_in(&mut conn, id, new_column_id, new_position)
 }
@@ -883,22 +942,28 @@ fn move_card_in(
     id: i64,
     new_column_id: i64,
     new_position: i64,
-) -> CmdResult<()> {
+) -> CmdResult<Option<RecurringSpawn>> {
     let tx = conn.transaction().map_err(to_string_err)?;
-    move_card_within(&tx, id, new_column_id, new_position)?;
+    let spawned = move_card_within(&tx, id, new_column_id, new_position)?;
     tx.commit().map_err(to_string_err)?;
-    Ok(())
+    Ok(spawned)
 }
 
 /// Тело переноса без собственной транзакции — чтобы вызвать его изнутри уже
 /// открытой (так делает продление ретрая, которое переносит карточку и правит
 /// её поля одним куском).
+///
+/// Въезд в финальную колонку — единственный момент, когда задача считается
+/// сделанной, поэтому именно здесь, в той же транзакции, ставится
+/// `completed_at` и рождается следующая карточка повторяющейся задачи. Все
+/// три двери в финальную колонку (доска, «Список», Inbox) и ассистент ходят
+/// через эту функцию — и спрашивают подтверждение до вызова.
 fn move_card_within(
     tx: &rusqlite::Connection,
     id: i64,
     new_column_id: i64,
     new_position: i64,
-) -> CmdResult<()> {
+) -> CmdResult<Option<RecurringSpawn>> {
     let (old_column_id, old_position): (i64, i64) = tx.query_row(
         "SELECT column_id, position FROM cards WHERE id = ?1",
         params![id],
@@ -956,9 +1021,246 @@ fn move_card_within(
             "UPDATE cards SET column_id = ?1, position = ?2 WHERE id = ?3",
             params![new_column_id, new_position, id],
         ).map_err(to_string_err)?;
+        // Въезд в финальную колонку — момент завершения задачи. Выезда оттуда
+        // нет (проверка выше), так что отметка ставится ровно один раз.
+        let entered_final = tx.execute(
+            "UPDATE cards SET completed_at = datetime('now')
+              WHERE id = ?1 AND completed_at IS NULL
+                AND (SELECT is_final FROM columns WHERE id = ?2) = 1",
+            params![id, new_column_id],
+        ).map_err(to_string_err)? > 0;
+        if entered_final {
+            return spawn_recurring_card(tx, id);
+        }
     }
 
+    Ok(None)
+}
+
+// ─── Повторяющиеся задачи ───
+//
+// Правило повторения — не защищённое поле, как срок (§20.2): его можно
+// поставить, сменить и снять когда угодно. Срок следующей карточки считает
+// система, а не человек, поэтому правило «срок задаётся один раз» он не
+// нарушает — у новой карточки это её первый и единственный срок.
+
+#[tauri::command]
+pub fn set_card_recurrence(card_id: i64, rule: Option<String>, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    set_card_recurrence_in(&conn, card_id, rule.as_deref())
+}
+
+pub const ERR_BAD_RECURRENCE: &str = "Неизвестное правило повторения";
+
+fn set_card_recurrence_in(conn: &rusqlite::Connection, card_id: i64, rule: Option<&str>) -> CmdResult<()> {
+    let rule = rule.map(str::trim).filter(|r| !r.is_empty());
+    if let Some(r) = rule {
+        if !RECURRENCE_RULES.contains(&r) {
+            return Err(ERR_BAD_RECURRENCE.to_string());
+        }
+    }
+    let changed = conn
+        .execute("UPDATE cards SET recurrence_rule = ?1 WHERE id = ?2", params![rule, card_id])
+        .map_err(to_string_err)?;
+    if changed == 0 {
+        return Err("Карточка не найдена".to_string());
+    }
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_card_recurrence(card_id: i64, state: State<'_, DbState>) -> CmdResult<Option<String>> {
+    let conn = state.conn.lock().unwrap();
+    card_recurrence_in(&conn, card_id)
+}
+
+fn card_recurrence_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<Option<String>> {
+    conn.query_row("SELECT recurrence_rule FROM cards WHERE id = ?1", params![card_id], |r| r.get(0))
+        .map_err(to_string_err)
+}
+
+/// Первая рабочая колонка доски — первая по `position` среди не финальных и
+/// не архивных. Туда возвращает задачу попытка (§23.4), туда встаёт
+/// следующая карточка повторяющейся задачи и задача, созданная ассистентом.
+fn first_working_column_in(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<Option<(i64, String)>> {
+    conn.query_row(
+        "SELECT id, name FROM columns
+          WHERE board_id = ?1 AND archived = 0 AND is_final = 0
+          ORDER BY position ASC, id ASC LIMIT 1",
+        params![board_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(to_string_err)
+}
+
+/// Дни от 1970-01-01 до календарной даты (пролептический григорианский
+/// календарь). Алгоритм Говарда Хиннанта `days_from_civil` — без внешних
+/// крейтов: `chrono` ради трёх сложений дат в зависимости не нужен.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Обратное к `days_from_civil`.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+fn parse_day(s: &str) -> Option<(i64, i64, i64)> {
+    if !is_calendar_date(s) {
+        return None;
+    }
+    Some((s[0..4].parse().ok()?, s[5..7].parse().ok()?, s[8..10].parse().ok()?))
+}
+
+fn format_day((y, m, d): (i64, i64, i64)) -> String {
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 => 29,
+        _ => 28,
+    }
+}
+
+/// Следующий срок повторяющейся задачи.
+///
+/// Шаг — день, неделя или месяц от **старого срока**, как просит задание.
+/// Месяц — календарный: 31 января + месяц = последний день февраля, а не
+/// 3 марта, как посчитал бы `date(…, '+1 month')` SQLite.
+///
+/// Если так посчитанный срок уже прошёл (задачу закрыли позже, чем через
+/// шаг), он сдвигается тем же шагом вперёд до первого не прошедшего дня —
+/// иначе следующая карточка рождалась бы просроченной и тут же попадала в
+/// «Требуют внимания». Пропущенные повторы не создаются: просроченная работа
+/// уже закрыта одной карточкой.
+fn next_due_date(old_due: &str, rule: &str, today: &str) -> Option<String> {
+    let (y, m, d) = parse_day(old_due)?;
+    let today = parse_day(today).map(|(y, m, d)| days_from_civil(y, m, d))?;
+    match rule {
+        "daily" | "weekly" => {
+            let step = if rule == "daily" { 1 } else { 7 };
+            let mut next = days_from_civil(y, m, d) + step;
+            if next < today {
+                next += (today - next + step - 1) / step * step;
+            }
+            Some(format_day(civil_from_days(next)))
+        }
+        "monthly" => {
+            // От исходного дня месяца, а не от уже подрезанного: у задачи на
+            // 31-е в апреле срок 30-е, но в мае снова 31-е.
+            let mut months = 1;
+            loop {
+                let total = y * 12 + (m - 1) + months;
+                let (ny, nm) = (total.div_euclid(12), total.rem_euclid(12) + 1);
+                let nd = d.min(days_in_month(ny, nm));
+                if days_from_civil(ny, nm, nd) >= today || months > 12 * 100 {
+                    return Some(format_day((ny, nm, nd)));
+                }
+                months += 1;
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Создаёт следующую карточку повторяющейся задачи — если у `card_id` есть
+/// правило. Вызывается из `move_card_within` при въезде в финальную колонку,
+/// в той же транзакции.
+///
+/// Копируется то, что описывает задачу: название, описание, исполнитель,
+/// приоритет, метки, пункты чек-листа (все непомеченными), правило (цикл
+/// продолжается) и значения пользовательских полей, **кроме полей-дат** —
+/// дата, как и срок, относится к конкретному выполнению. Не копируются
+/// комментарии и время: это история именно того выполнения.
+///
+/// Исходная карточка не меняется: она остаётся в финальной колонке как
+/// история.
+fn spawn_recurring_card(tx: &rusqlite::Connection, card_id: i64) -> CmdResult<Option<RecurringSpawn>> {
+    let (title, description, due, rule, assignee, priority, board_id): (
+        String, String, Option<String>, Option<String>, Option<i64>, String, i64,
+    ) = tx
+        .query_row(
+            "SELECT c.title, COALESCE(c.description, ''), c.due_date, c.recurrence_rule, c.assignee_id,
+                    COALESCE(c.priority, 'Medium'), col.board_id
+               FROM cards c JOIN columns col ON col.id = c.column_id
+              WHERE c.id = ?1",
+            params![card_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        )
+        .map_err(to_string_err)?;
+    let Some(rule) = rule else { return Ok(None) };
+
+    let Some((column_id, column_name)) = first_working_column_in(tx, board_id)? else {
+        // Доска без единой рабочей колонки — ставить следующую карточку
+        // некуда. Перенос при этом не отменяется: задачу закрыли законно.
+        log::warn!("повтор: у доски {} нет рабочей колонки — следующая карточка не создана", board_id);
+        return Ok(None);
+    };
+
+    let today: String = tx
+        .query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))
+        .map_err(to_string_err)?;
+    let next_due = due.as_deref().and_then(|d| next_due_date(d, &rule, &today));
+
+    let card = create_card_in(tx, column_id, title.clone(), description.clone())?;
+    if next_due.is_some() {
+        update_card_in(tx, card.id, &title, &description, next_due.as_deref())?;
+    }
+    update_card_priority_in(tx, card.id, &priority)?;
+    update_card_assignee_in(tx, card.id, assignee)?;
+    tx.execute(
+        "UPDATE cards SET recurrence_rule = ?1 WHERE id = ?2",
+        params![rule, card.id],
+    )
+    .map_err(to_string_err)?;
+    tx.execute(
+        "INSERT INTO checklist_items (card_id, text, is_done, position)
+         SELECT ?1, text, 0, position FROM checklist_items WHERE card_id = ?2 ORDER BY position, id",
+        params![card.id, card_id],
+    )
+    .map_err(to_string_err)?;
+    tx.execute(
+        "INSERT INTO card_labels (card_id, label_id) SELECT ?1, label_id FROM card_labels WHERE card_id = ?2",
+        params![card.id, card_id],
+    )
+    .map_err(to_string_err)?;
+    tx.execute(
+        "INSERT INTO custom_field_values (card_id, field_def_id, value)
+         SELECT ?1, v.field_def_id, v.value
+           FROM custom_field_values v JOIN custom_field_defs d ON d.id = v.field_def_id
+          WHERE v.card_id = ?2 AND d.field_type != 'date'",
+        params![card.id, card_id],
+    )
+    .map_err(to_string_err)?;
+
+    log::info!("повтор: карточка {} → следующая {} (срок {:?})", card_id, card.id, next_due);
+    Ok(Some(RecurringSpawn {
+        card_id: card.id,
+        title,
+        due_date: next_due,
+        board_id,
+        column_name,
+        rule,
+    }))
 }
 
 // ─── Export / import ───
@@ -1017,6 +1319,8 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
              JOIN cards c ON c.assignee_id = m.id
                           OR c.author_id = m.id
                           OR m.id IN (SELECT cc.author_id FROM card_comments cc WHERE cc.card_id = c.id)
+                          OR m.id IN (SELECT te.member_id FROM time_entries te
+                                       WHERE te.card_id = c.id AND te.ended_at IS NOT NULL)
              JOIN columns col ON col.id = c.column_id
              WHERE col.board_id = ?1
              ORDER BY m.id ASC",
@@ -1050,7 +1354,8 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .prepare(
             "SELECT id, title, description, position, due_date, archived,
                     is_mistake, mistake_marked_at, mistake_resolved_at,
-                    assignee_id, author_id, priority, retry_count, archive_reason
+                    assignee_id, author_id, priority, retry_count, archive_reason,
+                    created_at, completed_at, recurrence_rule
              FROM cards WHERE column_id = ?1 ORDER BY position ASC",
         )
         .map_err(to_string_err)?;
@@ -1071,6 +1376,24 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
         .prepare(
             "SELECT body, created_at, author_id FROM card_comments
              WHERE card_id = ?1 ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(to_string_err)?;
+    // Значения полей: `field_def_id` — настоящий id поля, он же
+    // экспорт-локальный в `custom_fields` ниже.
+    let mut field_value_stmt = conn
+        .prepare(
+            "SELECT field_def_id, value FROM custom_field_values
+             WHERE card_id = ?1 ORDER BY field_def_id ASC",
+        )
+        .map_err(to_string_err)?;
+    // Только законченные сессии: у идущей нет длительности, а в другой
+    // установке она стала бы чужим тикающим таймером.
+    let mut time_stmt = conn
+        .prepare(
+            "SELECT member_id, started_at, ended_at, COALESCE(duration_seconds, 0), note
+               FROM time_entries
+              WHERE card_id = ?1 AND ended_at IS NOT NULL
+              ORDER BY started_at ASC, id ASC",
         )
         .map_err(to_string_err)?;
 
@@ -1099,6 +1422,14 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
                         priority: row.get(11)?,
                         checklist: Vec::new(),
                         comments: Vec::new(),
+                        // Настоящий id карточки служит экспорт-локальным — как
+                        // у меток: на него ссылаются зависимости в файле.
+                        id: Some(row.get(0)?),
+                        created_at: row.get(14)?,
+                        completed_at: row.get(15)?,
+                        recurrence_rule: row.get(16)?,
+                        field_values: Vec::new(),
+                        time_entries: Vec::new(),
                     },
                 ))
             })
@@ -1135,6 +1466,26 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
                 .map_err(to_string_err)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(to_string_err)?;
+            card.field_values = field_value_stmt
+                .query_map(params![card_id], |row| {
+                    Ok(FieldValueExport { field_id: row.get(0)?, value: row.get(1)? })
+                })
+                .map_err(to_string_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(to_string_err)?;
+            card.time_entries = time_stmt
+                .query_map(params![card_id], |row| {
+                    Ok(TimeEntryExport {
+                        member_id: row.get(0)?,
+                        started_at: row.get(1)?,
+                        ended_at: row.get(2)?,
+                        duration_seconds: row.get(3)?,
+                        note: row.get(4)?,
+                    })
+                })
+                .map_err(to_string_err)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(to_string_err)?;
             cards.push(card);
         }
 
@@ -1145,6 +1496,45 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
             cards,
         });
     }
+
+    let (notes, notes_updated_at): (String, Option<String>) = conn
+        .query_row(
+            "SELECT content, updated_at FROM board_notes WHERE board_id = ?1",
+            params![board_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(to_string_err)?
+        .unwrap_or_default();
+
+    let custom_fields: Vec<CustomFieldExport> = custom_fields_in(conn, board_id)?
+        .into_iter()
+        .map(|f| CustomFieldExport {
+            id: f.id,
+            name: f.name,
+            field_type: f.field_type,
+            select_options: f.select_options,
+        })
+        .collect();
+
+    // Оба конца — карточки этой доски. Архивные тоже: они в файле есть
+    // (снимок целиком), и связь с ними переживает архив (§31.1).
+    let mut dependency_stmt = conn
+        .prepare(
+            "SELECT d.blocker_card_id, d.blocked_card_id FROM card_dependencies d
+               JOIN cards a ON a.id = d.blocker_card_id JOIN columns ac ON ac.id = a.column_id
+               JOIN cards b ON b.id = d.blocked_card_id JOIN columns bc ON bc.id = b.column_id
+              WHERE ac.board_id = ?1 AND bc.board_id = ?1
+              ORDER BY d.id ASC",
+        )
+        .map_err(to_string_err)?;
+    let dependencies: Vec<DependencyExport> = dependency_stmt
+        .query_map(params![board_id], |row| {
+            Ok(DependencyExport { blocker_id: row.get(0)?, blocked_id: row.get(1)? })
+        })
+        .map_err(to_string_err)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(to_string_err)?;
 
     let exported_at: String = conn
         .query_row("SELECT datetime('now', 'localtime')", [], |row| row.get(0))
@@ -1160,6 +1550,10 @@ fn build_board_export(conn: &rusqlite::Connection, board_id: i64) -> CmdResult<B
             labels,
             members,
             columns,
+            notes,
+            notes_updated_at,
+            custom_fields,
+            dependencies,
         },
     })
 }
@@ -1265,6 +1659,34 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
         member_id_map.insert(member.id, new_id);
     }
 
+    // Заметки доски — одна страница (§26). Время правки переносится как есть,
+    // как у комментариев.
+    if !export.board.notes.trim().is_empty() {
+        tx.execute(
+            "INSERT INTO board_notes (board_id, content, updated_at)
+             VALUES (?1, ?2, COALESCE(?3, datetime('now')))",
+            params![board_id, export.board.notes, export.board.notes_updated_at],
+        ).map_err(to_string_err)?;
+    }
+
+    // Пользовательские поля — через ту же `create_custom_field_in`, что и
+    // интерфейс: те же проверки имени, типа и вариантов. Поле, которое она
+    // не приняла (руками испорченный файл, повтор имени), пропускается вместе
+    // со своими значениями, а не роняет импорт — как метка, которой нет.
+    // Экспорт-локальный id поля → (новый id, тип).
+    let mut field_id_map: HashMap<i64, (i64, String)> = HashMap::new();
+    for field in &export.board.custom_fields {
+        match create_custom_field_in(&tx, board_id, &field.name, &field.field_type, field.select_options.clone()) {
+            Ok(created) => {
+                field_id_map.insert(field.id, (created.id, created.field_type));
+            }
+            Err(e) => log::warn!("импорт: поле «{}» пропущено: {}", field.name, e),
+        }
+    }
+
+    // Экспорт-локальный id карточки → новый id, для зависимостей в конце.
+    let mut card_id_map: HashMap<i64, i64> = HashMap::new();
+
     for (col_index, column) in export.board.columns.iter().enumerate() {
         tx.execute(
             "INSERT INTO columns (board_id, name, position, archived, is_final, is_required)
@@ -1283,18 +1705,69 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
             let author_id = card.author_id.and_then(|id| member_id_map.get(&id).copied());
             let priority = normalize_priority(card.priority.as_deref());
 
+            // Неизвестное правило повторения (руками поправленный файл) —
+            // «не повторять», а не отказ: `CHECK` схемы уронил бы весь импорт.
+            let recurrence = card.recurrence_rule.as_deref()
+                .filter(|r| RECURRENCE_RULES.contains(r));
+            // Пустое время создания — файл старой сборки: пусть его проставит
+            // база, как раньше.
+            let created_at = card.created_at.as_deref().filter(|c| !c.trim().is_empty());
+
             tx.execute(
                 "INSERT INTO cards (column_id, title, description, position, due_date, archived,
                                     is_mistake, mistake_marked_at, mistake_resolved_at,
-                                    assignee_id, author_id, priority, retry_count, archive_reason)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                                    assignee_id, author_id, priority, retry_count, archive_reason,
+                                    created_at, completed_at, recurrence_rule)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                         COALESCE(?15, datetime('now')), ?16, ?17)",
                 params![
                     column_id, card.title, card.description, card_index as i64, card.due_date,
                     card.archived, card.is_mistake as i64, card.mistake_marked_at, card.mistake_resolved_at,
-                    assignee_id, author_id, priority, card.retry_count, card.archive_reason
+                    assignee_id, author_id, priority, card.retry_count, card.archive_reason,
+                    created_at, card.completed_at, recurrence
                 ],
             ).map_err(to_string_err)?;
             let card_id = tx.last_insert_rowid();
+            if let Some(old_id) = card.id {
+                card_id_map.insert(old_id, card_id);
+            }
+
+            // Значения полей — через ту же проверку, что и окно карточки.
+            // Исключение — выбор из списка: вариант могли убрать уже после
+            // того, как его выбрали, а значение по решению §31.4 остаётся
+            // текстом как было. В исходной базе оно так и лежало, значит и в
+            // перенесённой должно.
+            for fv in &card.field_values {
+                let Some((new_field_id, field_type)) = field_id_map.get(&fv.field_id) else { continue };
+                let value = fv.value.trim();
+                if value.is_empty() {
+                    continue;
+                }
+                if set_custom_field_value_in(&tx, card_id, *new_field_id, Some(value.to_string())).is_err()
+                    && field_type == "select"
+                {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO custom_field_values (card_id, field_def_id, value) VALUES (?1, ?2, ?3)",
+                        params![card_id, new_field_id, value],
+                    ).map_err(to_string_err)?;
+                }
+            }
+
+            // Законченные сессии времени. Без начала или конца сессия —
+            // обрывок руками поправленного файла: пропускается. Идущих в файле
+            // не бывает, а вставить такую значило бы запустить таймер.
+            for entry in &card.time_entries {
+                if entry.started_at.trim().is_empty() || entry.ended_at.trim().is_empty() {
+                    continue;
+                }
+                let member_id = entry.member_id.and_then(|id| member_id_map.get(&id).copied());
+                tx.execute(
+                    "INSERT INTO time_entries (card_id, member_id, started_at, ended_at, duration_seconds, note)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![card_id, member_id, entry.started_at, entry.ended_at,
+                            entry.duration_seconds.max(0), entry.note],
+                ).map_err(to_string_err)?;
+            }
 
             for old_label_id in &card.label_ids {
                 // A card referencing a label missing from the file is skipped
@@ -1351,6 +1824,19 @@ fn import_board_into(conn: &mut rusqlite::Connection, workspace_id: i64, export:
         }
     }
 
+    // Зависимости — когда все карточки уже на месте. Через ту же
+    // `create_dependency`, что и интерфейс: она отвергает петлю на себя,
+    // повтор и цикл. Отвергнутое ребро (или ссылка на карточку, которой в
+    // файле нет) пропускается — как недостающая метка.
+    for dep in &export.board.dependencies {
+        let (Some(&blocker), Some(&blocked)) = (card_id_map.get(&dep.blocker_id), card_id_map.get(&dep.blocked_id)) else {
+            continue;
+        };
+        if let Err(e) = create_dependency(&tx, blocker, blocked) {
+            log::warn!("импорт: зависимость {} → {} пропущена: {}", dep.blocker_id, dep.blocked_id, e);
+        }
+    }
+
     tx.commit().map_err(to_string_err)?;
     Ok(board_id)
 }
@@ -1381,6 +1867,11 @@ const CHECKLIST_COLUMNS: &str = "id, card_id, text, is_done, position";
 #[tauri::command]
 pub fn list_checklist_items(card_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<ChecklistItem>> {
     let conn = state.conn.lock().unwrap();
+    checklist_items_in(&conn, card_id)
+}
+
+/// Тело `list_checklist_items` без `State` — его же зовёт инструмент ассистента.
+fn checklist_items_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult<Vec<ChecklistItem>> {
     // `id` breaks ties: without drag-reordering every item shares position 0
     // only if something went wrong, but a stable order still beats an arbitrary
     // one that shuffles between openings.
@@ -1399,7 +1890,11 @@ pub fn list_checklist_items(card_id: i64, state: State<'_, DbState>) -> CmdResul
 #[tauri::command]
 pub fn create_checklist_item(card_id: i64, text: String, state: State<'_, DbState>) -> CmdResult<ChecklistItem> {
     let conn = state.conn.lock().unwrap();
+    create_checklist_item_in(&conn, card_id, &text)
+}
 
+/// Тело `create_checklist_item` без `State` — его же зовёт ассистент.
+fn create_checklist_item_in(conn: &rusqlite::Connection, card_id: i64, text: &str) -> CmdResult<ChecklistItem> {
     let text = text.trim().to_string();
     if text.is_empty() {
         return Err("Пункт чек-листа не может быть пустым".to_string());
@@ -1430,7 +1925,11 @@ pub fn create_checklist_item(card_id: i64, text: String, state: State<'_, DbStat
 #[tauri::command]
 pub fn toggle_checklist_item(id: i64, state: State<'_, DbState>) -> CmdResult<bool> {
     let conn = state.conn.lock().unwrap();
+    toggle_checklist_item_in(&conn, id)
+}
 
+/// Тело `toggle_checklist_item` без `State` — его же зовёт ассистент.
+fn toggle_checklist_item_in(conn: &rusqlite::Connection, id: i64) -> CmdResult<bool> {
     let changed = conn.execute(
         "UPDATE checklist_items SET is_done = CASE is_done WHEN 0 THEN 1 ELSE 0 END WHERE id = ?1",
         params![id],
@@ -1625,6 +2124,11 @@ fn delete_member_from(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()>
 #[tauri::command]
 pub fn update_card_assignee(card_id: i64, member_id: Option<i64>, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
+    update_card_assignee_in(&conn, card_id, member_id)
+}
+
+/// Тело `update_card_assignee` без `State` — его же зовёт ассистент.
+fn update_card_assignee_in(conn: &rusqlite::Connection, card_id: i64, member_id: Option<i64>) -> CmdResult<()> {
     conn.execute(
         "UPDATE cards SET assignee_id = ?1 WHERE id = ?2",
         params![member_id, card_id],
@@ -1645,9 +2149,14 @@ pub fn update_card_author(card_id: i64, member_id: Option<i64>, state: State<'_,
 #[tauri::command]
 pub fn update_card_priority(card_id: i64, priority: String, state: State<'_, DbState>) -> CmdResult<()> {
     let conn = state.conn.lock().unwrap();
+    update_card_priority_in(&conn, card_id, &priority)
+}
+
+/// Тело `update_card_priority` без `State` — его же зовёт ассистент.
+fn update_card_priority_in(conn: &rusqlite::Connection, card_id: i64, priority: &str) -> CmdResult<()> {
     conn.execute(
         "UPDATE cards SET priority = ?1 WHERE id = ?2",
-        params![normalize_priority(Some(priority.as_str())), card_id],
+        params![normalize_priority(Some(priority)), card_id],
     ).map_err(to_string_err)?;
     Ok(())
 }
@@ -3398,6 +3907,7 @@ fn delete_card_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     tx.execute("DELETE FROM checklist_items WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM card_comments WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM time_entries WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
+    tx.execute("DELETE FROM card_retries WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     tx.execute("DELETE FROM custom_field_values WHERE card_id = ?1", params![id]).map_err(to_string_err)?;
     drop_dependencies_of(&tx, id).map_err(to_string_err)?;
     tx.execute("DELETE FROM cards WHERE id = ?1", params![id]).map_err(to_string_err)?;
@@ -3432,6 +3942,10 @@ fn delete_column_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     ).map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM time_entries WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM card_retries WHERE card_id IN (SELECT id FROM cards WHERE column_id = ?1)",
         params![id],
     ).map_err(to_string_err)?;
     tx.execute(
@@ -3492,6 +4006,14 @@ fn delete_board_in(conn: &mut rusqlite::Connection, id: i64) -> CmdResult<()> {
     ).map_err(to_string_err)?;
     tx.execute(
         "DELETE FROM time_entries WHERE card_id IN (
+            SELECT c.id FROM cards c
+            INNER JOIN columns col ON col.id = c.column_id
+            WHERE col.board_id = ?1
+        )",
+        params![id],
+    ).map_err(to_string_err)?;
+    tx.execute(
+        "DELETE FROM card_retries WHERE card_id IN (
             SELECT c.id FROM cards c
             INNER JOIN columns col ON col.id = c.column_id
             WHERE col.board_id = ?1
@@ -4076,6 +4598,12 @@ pub fn resolve_card_mistake(card_id: i64, state: State<'_, DbState>) -> CmdResul
 #[tauri::command]
 pub fn get_mistake_cards(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<Card>> {
     let conn = state.conn.lock().unwrap();
+    mistake_cards_in(&conn, workspace_id)
+}
+
+/// Тело `get_mistake_cards` без `State` — по нему же сводка ассистента
+/// считает «Требуют внимания», чтобы число совпадало с разделом.
+fn mistake_cards_in(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<Vec<Card>> {
     let sql = format!(
         "SELECT {cols}, b.id, b.name, col.name
          FROM cards c
@@ -4550,15 +5078,9 @@ fn request_card_retry_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult
     // Первая рабочая колонка доски: после костяка это «Новые», но правило
     // выражено через `is_final`, а не через имя, — доска могла приехать
     // импортом из файла и костяка не иметь.
-    let working_column: i64 = conn
-        .query_row(
-            "SELECT id FROM columns
-             WHERE board_id = ?1 AND archived = 0 AND is_final = 0
-             ORDER BY position ASC, id ASC LIMIT 1",
-            params![board_id],
-            |row| row.get(0),
-        )
-        .map_err(|_| ERR_NO_WORKING_COLUMN.to_string())?;
+    let working_column: i64 = first_working_column_in(conn, board_id)?
+        .map(|(id, _)| id)
+        .ok_or_else(|| ERR_NO_WORKING_COLUMN.to_string())?;
 
     let tx = conn.unchecked_transaction().map_err(to_string_err)?;
 
@@ -4580,6 +5102,9 @@ fn request_card_retry_in(conn: &rusqlite::Connection, card_id: i64) -> CmdResult
           WHERE id = ?2",
         params![format!("+{} days", RETRY_EXTENSION_DAYS), card_id],
     ).map_err(to_string_err)?;
+    // Отдельная строка на попытку — для отчёта «сколько попыток за период».
+    tx.execute("INSERT INTO card_retries (card_id) VALUES (?1)", params![card_id])
+        .map_err(to_string_err)?;
 
     // В начало первой рабочей колонки: задача возвращается в работу, а не
     // теряется в хвосте списка. Если она уже там — перенос всё равно нужен,
@@ -5188,4 +5713,662 @@ pub fn run_email_reminder_check(app: &tauri::AppHandle) {
     if sent > 0 {
         log::info!("email: отправлено писем: {}", sent);
     }
+}
+
+// ─── ИИ-ассистент (Ollama) ───
+//
+// Ollama — внешний процесс, см. `ollama.rs`. Всё, что здесь трогает сеть,
+// объявлено `async fn` и уходит в `spawn_blocking`: `reqwest::blocking` внутри
+// задачи tokio падает с паникой, а обычная команда заняла бы главный поток и
+// подвесила окно на всё время раздумий модели.
+//
+// По тому же правилу, что у почты (§24.4), замок базы на время сетевого
+// обращения не держится: сначала короткий заход за настройками и историей,
+// потом разговор с моделью, потом второй короткий заход — записать ответ.
+
+/// Системный промпт. Зашит в коде и пользователем не редактируется; в историю
+/// не пишется — подставляется первым сообщением при каждом вопросе, вместе со
+/// строкой о сегодняшней дате и пространстве (`system_prompt`).
+const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри приложения TaskFlow (локальный таск-менеджер). \
+Отвечай кратко и по делу, на русском языке.
+
+У тебя есть доступ к данным пользователя через инструменты. Используй их, чтобы отвечать \
+на вопросы конкретно, с реальными числами и названиями, а не общими фразами.
+
+Примеры того, что ты можешь:
+- «Сколько у меня задач с дедлайном до 5 октября?» → используй get_cards_by_deadline_range
+- «Какие задачи просрочены?» → используй get_overdue_cards
+- «Сколько времени я потратил на проект X?» → используй get_time_summary
+- «Покажи нагрузку по исполнителям» → используй get_workload
+
+Когда пользователь спрашивает о данных — всегда вызывай инструмент, не придумывай ответ из головы.
+
+Ты также можешь создавать и редактировать задачи. Перед каждым изменением пользователь увидит превью и должен подтвердить.
+
+Когда пользователь говорит «создай задачу», уточни:
+- На какой доске? (предложи список, если не указано)
+- Название задачи
+- Дедлайн (если не указан — не ставь, пользователь добавит потом)
+- Приоритет (если не указан — Medium)
+- Исполнитель (если не указан — текущий пользователь)
+
+Новая карточка всегда создаётся в первой рабочей колонке доски (не в финальной).
+
+В начале разговора (когда в истории ещё нет ни одной реплики) начни с краткой сводки продуктивности \
+за неделю, используя get_productivity_report. Не перечисляй все числа — выдели 2-3 ключевых, особенно \
+если есть просроченные задачи или задачи в «Требуют внимания».
+
+Ты можешь давать рекомендации:
+- Если много просроченных — предложи пересмотреть приоритеты
+- Если нагрузка неравномерная — предложи перераспределить задачи
+- Если задача давно без движения — обрати внимание
+Но не навязывайся: если пользователь спрашивает конкретное — отвечай конкретно, без непрошеных советов.";
+
+/// Предел длины одного сообщения человека. Не про безопасность, а про окно
+/// контекста: вставленный целиком лог на мегабайт модель всё равно обрежет, а
+/// ждать её придётся минуты.
+const AI_MAX_MESSAGE_CHARS: usize = 8000;
+
+/// Инструменты ассистента — дочерний модуль, чтобы звать внутренние функции
+/// команд (`boards_in`, `build_workspace_card_list`, …) без копий запросов.
+#[path = "ai_tools.rs"]
+mod ai_tools;
+
+#[tauri::command]
+pub fn get_ai_settings(state: State<'_, DbState>) -> CmdResult<AiSettings> {
+    let conn = state.conn.lock().unwrap();
+    read_ai_settings(&conn)
+}
+
+/// NULL в базе — «ещё не настраивали», подставляется значение по умолчанию.
+fn read_ai_settings(conn: &rusqlite::Connection) -> CmdResult<AiSettings> {
+    use crate::ollama::{CHAT_TIMEOUT_MAX_SECS, CHAT_TIMEOUT_MIN_SECS, DEFAULT_CHAT_TIMEOUT_SECS};
+    conn.query_row(
+        "SELECT ai_ollama_url, ai_model, ai_context_length, ai_timeout_seconds FROM user_profile WHERE id = 1",
+        [],
+        |row| {
+            let url: Option<String> = row.get(0)?;
+            let model: Option<String> = row.get(1)?;
+            let context: Option<i64> = row.get(2)?;
+            let timeout: Option<i64> = row.get(3)?;
+            Ok(AiSettings {
+                ollama_url: url
+                    .filter(|u| !u.trim().is_empty())
+                    .unwrap_or_else(|| crate::ollama::DEFAULT_OLLAMA_URL.to_string()),
+                model: model.unwrap_or_default(),
+                context_length: context
+                    .unwrap_or(DEFAULT_AI_CONTEXT_LENGTH)
+                    .clamp(AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX),
+                timeout_seconds: timeout
+                    .unwrap_or(DEFAULT_CHAT_TIMEOUT_SECS)
+                    .clamp(CHAT_TIMEOUT_MIN_SECS, CHAT_TIMEOUT_MAX_SECS),
+            })
+        },
+    )
+    .map_err(to_string_err)
+}
+
+#[tauri::command]
+pub fn update_ai_settings(
+    ollama_url: String,
+    model: String,
+    context_length: i64,
+    timeout_seconds: i64,
+    state: State<'_, DbState>,
+) -> CmdResult<AiSettings> {
+    let conn = state.conn.lock().unwrap();
+    write_ai_settings(&conn, &AiSettings { ollama_url, model, context_length, timeout_seconds })
+}
+
+/// Сохраняет и возвращает то, что легло в базу. Неверный адрес отвергается
+/// целиком — в отличие от порта почты, «исправить» его молча нечем. Длина
+/// контекста и таймаут зажимаются в границы.
+fn write_ai_settings(conn: &rusqlite::Connection, settings: &AiSettings) -> CmdResult<AiSettings> {
+    use crate::ollama::{CHAT_TIMEOUT_MAX_SECS, CHAT_TIMEOUT_MIN_SECS};
+    let url = crate::ollama::normalize_url(&settings.ollama_url)?;
+    let context = settings.context_length.clamp(AI_CONTEXT_LENGTH_MIN, AI_CONTEXT_LENGTH_MAX);
+    let timeout = settings.timeout_seconds.clamp(CHAT_TIMEOUT_MIN_SECS, CHAT_TIMEOUT_MAX_SECS);
+    conn.execute(
+        "UPDATE user_profile
+            SET ai_ollama_url = ?1, ai_model = ?2, ai_context_length = ?3, ai_timeout_seconds = ?4
+          WHERE id = 1",
+        params![url, settings.model.trim(), context, timeout],
+    )
+    .map_err(to_string_err)?;
+    read_ai_settings(conn)
+}
+
+/// Адрес для проверки: набранный в форме, если его передали, иначе
+/// сохранённый. Так «Проверить подключение» проверяет то, что человек видит
+/// на экране, ещё до «Сохранить».
+fn ollama_url_for(url: Option<String>, app: &tauri::AppHandle) -> CmdResult<String> {
+    use tauri::Manager;
+    match url {
+        Some(u) if !u.trim().is_empty() => Ok(u),
+        _ => {
+            let state = app.state::<DbState>();
+            let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+            Ok(read_ai_settings(&conn)?.ollama_url)
+        }
+    }
+}
+
+async fn run_blocking<T, F>(f: F) -> CmdResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> CmdResult<T> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("Внутренняя ошибка запроса к Ollama: {}", e))?
+}
+
+/// Запущена ли Ollama и какие модели в ней есть. Ошибка — готовый текст для
+/// человека («Ollama не запущена…»), а не код.
+#[tauri::command]
+pub async fn ollama_check_status(
+    url: Option<String>,
+    app: tauri::AppHandle,
+) -> CmdResult<Vec<crate::ollama::ModelInfo>> {
+    let url = ollama_url_for(url, &app)?;
+    run_blocking(move || crate::ollama::list_models(&url)).await
+}
+
+/// Только имена моделей — для выпадающего списка.
+#[tauri::command]
+pub async fn ollama_list_models(url: Option<String>, app: tauri::AppHandle) -> CmdResult<Vec<String>> {
+    let url = ollama_url_for(url, &app)?;
+    let models = run_blocking(move || crate::ollama::list_models(&url)).await?;
+    Ok(models.into_iter().map(|m| m.name).collect())
+}
+
+#[tauri::command]
+pub fn get_chat_history(workspace_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<ChatMessage>> {
+    let conn = state.conn.lock().unwrap();
+    read_chat_history(&conn, workspace_id, None)
+}
+
+const CHAT_SELECT: &str =
+    "SELECT id, workspace_id, role, content, created_at, tools_used, actions FROM chat_history";
+
+fn chat_message_from_row(row: &rusqlite::Row) -> rusqlite::Result<ChatMessage> {
+    let tools: Option<String> = row.get(5)?;
+    let actions: Option<String> = row.get(6)?;
+    Ok(ChatMessage {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        role: row.get(2)?,
+        content: row.get(3)?,
+        created_at: row.get(4)?,
+        // Испорченный JSON здесь не повод терять всю историю — это подписи
+        // под ответом, а не сам ответ.
+        tools_used: tools.and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default(),
+        actions: actions.and_then(|a| serde_json::from_str(&a).ok()).unwrap_or_default(),
+    })
+}
+
+/// История пространства в хронологическом порядке. `last` — взять только
+/// столько последних реплик (окно контекста модели).
+fn read_chat_history(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+    last: Option<i64>,
+) -> CmdResult<Vec<ChatMessage>> {
+    // Последние N берутся с конца по убыванию и переворачиваются: `LIMIT` без
+    // `DESC` отдал бы первые N, то есть самое старое. `LIMIT -1` в SQLite —
+    // «без предела».
+    let sql = format!(
+        "{} WHERE workspace_id = ?1 AND role IN ('user', 'assistant') ORDER BY id DESC LIMIT ?2",
+        CHAT_SELECT
+    );
+    let mut stmt = conn.prepare(&sql).map_err(to_string_err)?;
+    let mut messages = stmt
+        .query_map(params![workspace_id, last.unwrap_or(-1)], chat_message_from_row)
+        .map_err(to_string_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string_err)?;
+    messages.reverse();
+    Ok(messages)
+}
+
+/// Очищает историю пространства. Ожидающее подтверждения действие тоже
+/// снимается: вопроса, ради которого оно предложено, больше нет.
+#[tauri::command]
+pub fn clear_chat_history(
+    workspace_id: i64,
+    state: State<'_, DbState>,
+    assistant: State<'_, AssistantState>,
+) -> CmdResult<usize> {
+    assistant.pending.lock().map_err(to_string_err)?.remove(&workspace_id);
+    let conn = state.conn.lock().unwrap();
+    conn.execute("DELETE FROM chat_history WHERE workspace_id = ?1", params![workspace_id])
+        .map_err(to_string_err)
+}
+
+/// Системный промпт целиком: постоянная часть плюс то, чего модель знать не
+/// может, — сегодняшняя дата (без неё «до 5 октября» не перевести в диапазон)
+/// и название пространства.
+fn system_prompt(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<String> {
+    const WEEKDAYS: [&str; 7] = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
+    let (today, weekday): (String, i64) = conn
+        .query_row(
+            "SELECT date('now', 'localtime'), CAST(strftime('%w', 'now', 'localtime') AS INTEGER)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(to_string_err)?;
+    let workspace: String = conn
+        .query_row("SELECT name FROM workspaces WHERE id = ?1", params![workspace_id], |row| row.get(0))
+        .optional()
+        .map_err(to_string_err)?
+        .ok_or_else(|| "Пространство не найдено".to_string())?;
+    Ok(format!(
+        "{}\n\nСегодня {}, {}. Текущее пространство — «{}»; инструменты видят только его.",
+        AI_SYSTEM_PROMPT,
+        today,
+        WEEKDAYS[weekday.rem_euclid(7) as usize],
+        workspace,
+    ))
+}
+
+/// Что уходит модели первым запросом: системный промпт, реплики истории,
+/// новое сообщение. Результаты инструментов в историю не попадают — к
+/// следующему вопросу данные могли измениться, и модель спросит их заново.
+fn build_chat_request(system: &str, history: &[ChatMessage], user_text: &str) -> Vec<crate::ollama::Message> {
+    use crate::ollama::Message;
+    let mut messages = Vec::with_capacity(history.len() + 2);
+    messages.push(Message::new("system", system));
+    messages.extend(history.iter().map(|m| Message::new(&m.role, m.content.clone())));
+    messages.push(Message::new("user", user_text));
+    messages
+}
+
+/// Обе реплики — вопрос и ответ — пишутся одной транзакцией и только после
+/// ответа модели. Не ответила — в истории не остаётся вопроса без ответа, а
+/// текст возвращается человеку в поле ввода (это делает интерфейс).
+///
+/// `tools_used` — имена вызванных инструментов по порядку, `actions` —
+/// предложенные изменения и их судьба. Хранятся при ответе, чтобы после
+/// перезапуска было видно, откуда взялись числа и что поменялось в базе.
+fn save_chat_exchange(
+    conn: &mut rusqlite::Connection,
+    workspace_id: i64,
+    user_text: &str,
+    answer: &str,
+    tools_used: &[String],
+    actions: &[AiActionLog],
+) -> CmdResult<Vec<ChatMessage>> {
+    fn as_json<T: serde::Serialize>(items: &[T]) -> CmdResult<Option<String>> {
+        if items.is_empty() {
+            Ok(None)
+        } else {
+            serde_json::to_string(items).map(Some).map_err(to_string_err)
+        }
+    }
+    let tools_json = as_json(tools_used)?;
+    let actions_json = as_json(actions)?;
+    let tx = conn.transaction().map_err(to_string_err)?;
+    tx.execute(
+        "INSERT INTO chat_history (workspace_id, role, content) VALUES (?1, 'user', ?2)",
+        params![workspace_id, user_text],
+    )
+    .map_err(to_string_err)?;
+    let first = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO chat_history (workspace_id, role, content, tools_used, actions)
+         VALUES (?1, 'assistant', ?2, ?3, ?4)",
+        params![workspace_id, answer, tools_json, actions_json],
+    )
+    .map_err(to_string_err)?;
+    let second = tx.last_insert_rowid();
+    let saved = tx
+        .prepare(&format!("{} WHERE id IN (?1, ?2) ORDER BY id", CHAT_SELECT))
+        .map_err(to_string_err)?
+        .query_map(params![first, second], chat_message_from_row)
+        .map_err(to_string_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)?;
+    Ok(saved)
+}
+
+// ─── Ход разговора и подтверждение изменений ───
+//
+// Один вопрос человека — один «ход». Ход идёт, пока модель просит только
+// читающие инструменты; как только она просит изменение, ход **встаёт на
+// паузу**: превью уходит в чат, а всё состояние хода (сообщения, очередь
+// оставшихся вызовов, что уже сделано) ждёт в `AssistantState`. «Да» или
+// «Отмена» продолжают тот же ход с места остановки.
+//
+// Ожидание живёт в памяти, а не в базе: закрыли приложение, не ответив, — ход
+// пропал целиком, ничего не изменено и ничего не записано. Это честнее, чем
+// после перезапуска выполнить изменение, о котором человек уже забыл.
+
+/// Ход разговора: всё, что нужно, чтобы продолжить его после паузы.
+struct Turn {
+    user_text: String,
+    messages: Vec<crate::ollama::Message>,
+    /// Вызовы из последнего ответа модели, до которых ещё не дошла очередь.
+    queue: std::collections::VecDeque<crate::ollama::ToolCall>,
+    tools_used: Vec<String>,
+    actions: Vec<AiActionLog>,
+    /// Сколько раз уже спросили модель — предел `MAX_TOOL_ROUNDS` на весь ход,
+    /// включая паузы.
+    rounds: usize,
+}
+
+impl Turn {
+    fn new(user_text: String, messages: Vec<crate::ollama::Message>) -> Self {
+        Turn { user_text, messages, queue: Default::default(), tools_used: Vec::new(), actions: Vec::new(), rounds: 0 }
+    }
+
+    fn executed_anything(&self) -> bool {
+        self.actions.iter().any(|a| a.status == "done")
+    }
+}
+
+/// Ход, который ждёт «Да» или «Отмена».
+struct PendingTurn {
+    action_id: i64,
+    turn: Turn,
+    prepared: ai_tools::Prepared,
+}
+
+/// Ожидающие подтверждения ходы — по одному на пространство.
+#[derive(Default)]
+pub struct AssistantState {
+    pending: std::sync::Mutex<HashMap<i64, PendingTurn>>,
+    next_action_id: std::sync::atomic::AtomicI64,
+}
+
+enum TurnStep {
+    Answer(String),
+    Confirm(ai_tools::Prepared),
+}
+
+/// Ведёт ход, пока модель не ответит текстом или не попросит изменение.
+///
+/// `step_tool` решает судьбу каждого вызова: читающий выполняет сразу,
+/// изменение проверяет и возвращает на подтверждение. Отделено от команд,
+/// чтобы живой тест гонял тот же цикл на базе в памяти.
+async fn advance<F>(settings: &AiSettings, turn: &mut Turn, mut step_tool: F) -> CmdResult<TurnStep>
+where
+    F: FnMut(&str, &serde_json::Value) -> CmdResult<ai_tools::ToolStep>,
+{
+    let tools = ai_tools::definitions();
+    loop {
+        while let Some(call) = turn.queue.pop_front() {
+            match step_tool(&call.function.name, &call.function.arguments)? {
+                ai_tools::ToolStep::Result(result) => {
+                    log::info!("ассистент: инструмент {} → {} байт", call.function.name, result.len());
+                    turn.messages.push(crate::ollama::Message::tool_result(&call.function.name, result));
+                    turn.tools_used.push(call.function.name);
+                }
+                ai_tools::ToolStep::Confirm(prepared) => return Ok(TurnStep::Confirm(prepared)),
+            }
+        }
+
+        if turn.rounds >= ai_tools::MAX_TOOL_ROUNDS {
+            return Err("Модель слишком долго перебирала инструменты и не дала ответа — попробуйте спросить конкретнее.".to_string());
+        }
+        turn.rounds += 1;
+        let reply = {
+            let (settings, request, tools) = (settings.clone(), turn.messages.clone(), tools.clone());
+            run_blocking(move || {
+                crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &tools, settings.timeout_seconds)
+            })
+            .await?
+        };
+        if reply.tool_calls.is_empty() {
+            return Ok(TurnStep::Answer(reply.content));
+        }
+        turn.queue.extend(reply.tool_calls.iter().cloned());
+        turn.messages.push(reply);
+    }
+}
+
+/// Записывает исход подтверждения в ход: результат уходит модели сообщением
+/// `tool`, строчка — в журнал действий.
+fn resolve_action(turn: &mut Turn, prepared: &ai_tools::Prepared, outcome: Result<serde_json::Value, String>, approved: bool) {
+    let (result, log) = match (approved, outcome) {
+        (false, _) => (
+            serde_json::json!({ "cancelled": "Пользователь отменил действие" }),
+            AiActionLog { description: prepared.description.clone(), status: "cancelled".into(), error: None },
+        ),
+        (true, Ok(value)) => (
+            value,
+            AiActionLog { description: prepared.description.clone(), status: "done".into(), error: None },
+        ),
+        (true, Err(e)) => (
+            serde_json::json!({ "error": e }),
+            AiActionLog { description: prepared.description.clone(), status: "failed".into(), error: Some(e) },
+        ),
+    };
+    turn.messages.push(crate::ollama::Message::tool_result(&prepared.tool, result.to_string()));
+    turn.tools_used.push(prepared.tool.clone());
+    turn.actions.push(log);
+}
+
+/// Продолжает ход и доводит его до итога для интерфейса: либо ответ записан
+/// в историю, либо ход снова встал на паузу.
+///
+/// Если модель упала **после** выполненного изменения, ход всё равно
+/// записывается — с текстом ошибки вместо ответа: изменение в базе уже есть,
+/// и в истории должно остаться, откуда оно взялось.
+async fn drive_turn(app: &tauri::AppHandle, workspace_id: i64, settings: AiSettings, mut turn: Turn) -> CmdResult<ChatTurn> {
+    use tauri::Manager;
+
+    let step = advance(&settings, &mut turn, |name, args| {
+        // Замок — только на время одного инструмента, не на весь разговор.
+        let state = app.state::<DbState>();
+        let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        Ok(ai_tools::step(&conn, workspace_id, name, args))
+    })
+    .await;
+
+    let answer = match step {
+        Ok(TurnStep::Answer(text)) => text,
+        Ok(TurnStep::Confirm(prepared)) => {
+            let assistant = app.state::<AssistantState>();
+            let action_id = assistant.next_action_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let pending = AiPendingAction {
+                id: action_id,
+                user_text: turn.user_text.clone(),
+                tool: prepared.tool.clone(),
+                description: prepared.description.clone(),
+                warnings: prepared.warnings.clone(),
+            };
+            assistant
+                .pending
+                .lock()
+                .map_err(to_string_err)?
+                .insert(workspace_id, PendingTurn { action_id, turn, prepared });
+            return Ok(ChatTurn { messages: Vec::new(), pending: Some(pending) });
+        }
+        Err(e) if turn.executed_anything() => format!("Изменение выполнено, но ответить модель не смогла: {}", e),
+        Err(e) => return Err(e),
+    };
+
+    let state = app.state::<DbState>();
+    let mut conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+    let messages = save_chat_exchange(&mut conn, workspace_id, &turn.user_text, &answer, &turn.tools_used, &turn.actions)?;
+    Ok(ChatTurn { messages, pending: None })
+}
+
+/// Задать вопрос ассистенту.
+///
+/// Модель, адрес, системный промпт и окно истории берутся на бэкенде, а не
+/// приходят из интерфейса: промпт пользователем не редактируется, и
+/// передавать его из JS значило бы сделать его редактируемым через консоль.
+///
+/// Пока модель просит читающие инструменты, они выполняются сразу; изменение
+/// ставит ход на паузу — итог тогда `pending`, и продолжает его
+/// `ollama_confirm_action`. Каждый запрос к Ollama — со своим таймаутом из
+/// настроек.
+#[tauri::command]
+pub async fn ollama_chat(workspace_id: i64, content: String, app: tauri::AppHandle) -> CmdResult<ChatTurn> {
+    use tauri::Manager;
+
+    let text = content.trim().to_string();
+    if text.is_empty() {
+        return Err("Пустое сообщение".to_string());
+    }
+    if text.chars().count() > AI_MAX_MESSAGE_CHARS {
+        return Err(format!("Сообщение длиннее {} символов — сократите его", AI_MAX_MESSAGE_CHARS));
+    }
+    if app.state::<AssistantState>().pending.lock().map_err(to_string_err)?.contains_key(&workspace_id) {
+        return Err("Сначала подтвердите или отмените предложенное изменение".to_string());
+    }
+
+    let (settings, messages) = {
+        let state = app.state::<DbState>();
+        let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        let settings = read_ai_settings(&conn)?;
+        let system = system_prompt(&conn, workspace_id)?;
+        // «Последние 20» считаются вместе с новым сообщением — одно место
+        // окна уходит под него.
+        let history = read_chat_history(&conn, workspace_id, Some(settings.context_length - 1))?;
+        (settings, build_chat_request(&system, &history, &text))
+    };
+
+    drive_turn(&app, workspace_id, settings, Turn::new(text, messages)).await
+}
+
+/// «Да» или «Отмена» на предложенное изменение — и продолжение того же хода.
+///
+/// `action_id` должен совпасть с ожидающим: подтверждение, пришедшее к уже
+/// снятому или заменённому ожиданию, ничего не выполнит.
+#[tauri::command]
+pub async fn ollama_confirm_action(
+    workspace_id: i64,
+    action_id: i64,
+    approved: bool,
+    app: tauri::AppHandle,
+) -> CmdResult<ChatTurn> {
+    use tauri::Manager;
+
+    let PendingTurn { mut turn, prepared, .. } = {
+        let assistant = app.state::<AssistantState>();
+        let mut pending = assistant.pending.lock().map_err(to_string_err)?;
+        match pending.get(&workspace_id) {
+            Some(p) if p.action_id == action_id => pending.remove(&workspace_id).unwrap(),
+            _ => return Err("Это предложение уже неактуально — задайте вопрос заново".to_string()),
+        }
+    };
+
+    let (settings, outcome) = {
+        let state = app.state::<DbState>();
+        let mut conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        let settings = read_ai_settings(&conn)?;
+        let outcome = if approved {
+            let result = ai_tools::execute(&mut conn, workspace_id, &prepared);
+            match &result {
+                Ok(_) => log::info!("ассистент: выполнено {}", prepared.tool),
+                Err(e) => log::warn!("ассистент: {} не выполнено: {}", prepared.tool, e),
+            }
+            result
+        } else {
+            Ok(serde_json::Value::Null)
+        };
+        (settings, outcome)
+    };
+    resolve_action(&mut turn, &prepared, outcome, approved);
+
+    drive_turn(&app, workspace_id, settings, turn).await
+}
+
+/// Изменение, ждущее подтверждения в этом пространстве, если есть. Чат
+/// спрашивает при открытии: человек мог уйти на доску, не ответив.
+#[tauri::command]
+pub fn get_pending_action(workspace_id: i64, assistant: State<'_, AssistantState>) -> CmdResult<Option<AiPendingAction>> {
+    let pending = assistant.pending.lock().map_err(to_string_err)?;
+    Ok(pending.get(&workspace_id).map(|p| AiPendingAction {
+        id: p.action_id,
+        user_text: p.turn.user_text.clone(),
+        tool: p.prepared.tool.clone(),
+        description: p.prepared.description.clone(),
+        warnings: p.prepared.warnings.clone(),
+    }))
+}
+
+// ─── Приветственная сводка ───
+
+/// За сколько дней сводка при открытии пустого чата.
+const GREETING_REPORT_DAYS: i64 = 7;
+
+/// Запрос к модели на приветствие: тот же системный промпт, сводка за неделю
+/// прямо в нём (данные даются заранее — вызывать инструмент ради приветствия
+/// незачем) и короткая просьба поздороваться. Шаблона ответа нет: модель
+/// сама выбирает, что из чисел назвать.
+fn greeting_request(system: &str, report: &serde_json::Value) -> Vec<crate::ollama::Message> {
+    use crate::ollama::Message;
+    let system = format!(
+        "{}\n\nСводка продуктивности за последние {} дней (результат get_productivity_report):\n{}\n\n\
+         Пользователь только что открыл чат, и разговор ещё не начинался. Коротко поприветствуй его: \
+         выдели 2-3 ключевых числа из сводки — в первую очередь просроченные задачи и «Требуют внимания», \
+         если они есть, — и закончи вопросом, чем помочь. Не больше пяти строк.",
+        system, GREETING_REPORT_DAYS, report
+    );
+    vec![Message::new("system", system), Message::new("user", "(открыл чат)")]
+}
+
+/// Одна реплика ассистента без вопроса человека — так ложится приветствие.
+fn save_assistant_message(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+    content: &str,
+    tools_used: &[String],
+) -> CmdResult<ChatMessage> {
+    conn.execute(
+        "INSERT INTO chat_history (workspace_id, role, content, tools_used) VALUES (?1, 'assistant', ?2, ?3)",
+        params![workspace_id, content, serde_json::to_string(tools_used).map_err(to_string_err)?],
+    )
+    .map_err(to_string_err)?;
+    conn.query_row(
+        &format!("{} WHERE id = ?1", CHAT_SELECT),
+        params![conn.last_insert_rowid()],
+        chat_message_from_row,
+    )
+    .map_err(to_string_err)
+}
+
+/// Приветствие со сводкой за неделю — только для **пустой** истории: у
+/// начатого разговора есть что продолжать и без него. Возвращает записанную
+/// реплику или `None`, если история уже не пуста или ждёт подтверждение.
+///
+/// Реплика ложится в историю, как обычный ответ: следующий вопрос модель
+/// задаёт уже с ней в контексте, и повторять сводку ей незачем.
+#[tauri::command]
+pub async fn ollama_greeting(workspace_id: i64, app: tauri::AppHandle) -> CmdResult<Option<ChatMessage>> {
+    use tauri::Manager;
+
+    let prepared = {
+        if app.state::<AssistantState>().pending.lock().map_err(to_string_err)?.contains_key(&workspace_id) {
+            return Ok(None);
+        }
+        let state = app.state::<DbState>();
+        let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+        if !read_chat_history(&conn, workspace_id, Some(1))?.is_empty() {
+            return Ok(None);
+        }
+        let settings = read_ai_settings(&conn)?;
+        let report = ai_tools::productivity_report(&conn, workspace_id, GREETING_REPORT_DAYS)?;
+        (settings.clone(), greeting_request(&system_prompt(&conn, workspace_id)?, &report))
+    };
+    let (settings, request) = prepared;
+
+    let text = run_blocking(move || {
+        crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &[], settings.timeout_seconds)
+    })
+    .await?
+    .content;
+
+    let state = app.state::<DbState>();
+    let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
+    // Пока модель думала, человек мог успеть спросить своё — тогда
+    // приветствие уже не к месту.
+    if !read_chat_history(&conn, workspace_id, Some(1))?.is_empty() {
+        return Ok(None);
+    }
+    save_assistant_message(&conn, workspace_id, &text, &["get_productivity_report".to_string()]).map(Some)
 }

@@ -3,6 +3,7 @@ pub mod models;
 pub mod commands;
 pub mod crypto;
 pub mod email;
+pub mod ollama;
 
 use tauri::Manager;
 
@@ -20,6 +21,9 @@ pub fn run() {
                 conn: std::sync::Mutex::new(conn),
                 app_dir,
             });
+            // Изменения, которые ассистент предложил и которые ждут «Да» или
+            // «Отмена», — в памяти, не в базе (см. `commands::AssistantState`).
+            app.manage(commands::AssistantState::default());
 
             // Проверка сроков живёт в отдельном потоке, а не в таймере на
             // фронтенде: напоминание должно приходить и тогда, когда окно
@@ -64,6 +68,8 @@ pub fn run() {
             commands::update_card,
             commands::archive_card,
             commands::update_card_position,
+            commands::set_card_recurrence,
+            commands::get_card_recurrence,
 
             commands::list_card_comments,
             commands::create_card_comment,
@@ -162,6 +168,17 @@ pub fn run() {
             commands::resolve_card_mistake,
             commands::get_mistake_cards,
             commands::request_card_retry,
+
+            commands::get_ai_settings,
+            commands::update_ai_settings,
+            commands::ollama_check_status,
+            commands::ollama_list_models,
+            commands::get_chat_history,
+            commands::clear_chat_history,
+            commands::ollama_chat,
+            commands::ollama_confirm_action,
+            commands::get_pending_action,
+            commands::ollama_greeting,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

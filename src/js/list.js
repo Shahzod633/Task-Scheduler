@@ -17,7 +17,7 @@ import {
     createFilterState, createFilterToolbar, matchesFilter, groupKeyFor,
     priorityLabel, priorityModifier, PRIORITIES,
 } from './filters.js';
-import { showCardEditModal } from './board.js';
+import { showCardEditModal, announceRecurringSpawn } from './board.js';
 import { confirmFinalColumnMove } from './dependencies.js';
 import { formatFieldValue } from './fields.js';
 import { createElement, $, showToast, formatDueDate, isOverdue, pluralize } from './utils.js';
@@ -557,9 +557,13 @@ function openStatusPicker(anchor, card) {
                 // the target column: `data.cards` holds only unarchived cards,
                 // so counting them gives the next free position.
                 const endPosition = data.cards.filter(c => c.column_id === col.id).length;
-                await api.updateCardPosition(card.id, col.id, endPosition);
+                const spawn = await api.updateCardPosition(card.id, col.id, endPosition);
                 await refresh();
-                showToast(`Задача перенесена в «${col.name}»`);
+                // Повторяющаяся задача: тост о следующей заменяет обычный —
+                // перенос он подразумевает.
+                if (!announceRecurringSpawn(spawn, currentWorkspaceId)) {
+                    showToast(`Задача перенесена в «${col.name}»`);
+                }
             } catch (e) {
                 // Бэкенд отказывает, если задача уже в финальной колонке —
                 // его текст объясняет причину лучше общей фразы.

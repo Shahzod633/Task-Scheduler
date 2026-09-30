@@ -6,6 +6,7 @@
 
 import * as api from './api.js';
 import { confirmFinalColumnMove } from './dependencies.js';
+import { announceRecurringSpawn } from './board.js';
 import { createElement, $, showToast } from './utils.js';
 
 export async function renderInboxPage(workspaceId) {
@@ -82,8 +83,10 @@ export async function renderInboxPage(workspaceId) {
 
             try {
                 const targetCards = await api.getCards(targetColumnId);
-                await api.updateCardPosition(card.id, targetColumnId, targetCards.length);
-                showToast('Задача назначена в доску');
+                const spawn = await api.updateCardPosition(card.id, targetColumnId, targetCards.length);
+                if (!announceRecurringSpawn(spawn, workspaceId)) {
+                    showToast('Задача назначена в доску');
+                }
                 row.remove();
                 if (!list.children.length) {
                     list.appendChild(createElement('p', { className: 'page__empty' }, 'Inbox пуст'));

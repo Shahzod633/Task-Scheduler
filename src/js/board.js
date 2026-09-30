@@ -14,7 +14,7 @@ import {
     createFilterState, createFilterToolbar, matchesFilter, isFilterActive,
     groupKeyFor, priorityLabel, priorityModifier, PRIORITIES,
 } from './filters.js';
-import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate, isOverdue, staggerIn, pluralize, debounce, formatDate } from './utils.js';
+import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate, isOverdue, staggerIn, pluralize, debounce, formatDate, parseDueDate } from './utils.js';
 import { renderMarkdown } from './markdown.js';
 import { renderDependencies, confirmFinalColumnMove } from './dependencies.js';
 import { attachTimerButton, renderTimeLog, refreshTimer } from './timer.js';
@@ -940,6 +940,46 @@ function showCardMenu(event, cardData) {
     openPopover(menu, event.currentTarget, { placement: 'bottom', align: 'start', gap: 4 });
 }
 
+/** Варианты «Повторять» в окне карточки — значения `cards.recurrence_rule`. */
+const RECURRENCE_OPTIONS = [
+    ['', 'Нет'],
+    ['daily', 'Каждый день'],
+    ['weekly', 'Каждую неделю'],
+    ['monthly', 'Каждый месяц'],
+];
+
+/**
+ * Тост о следующей карточке повторяющейся задачи — общий на все три двери в
+ * финальную колонку (доска, «Список», Inbox). `spawn` — то, что вернул
+ * `api.updateCardPosition`; null — ничего не создано, говорить не о чем.
+ *
+ * «Открыть» ведёт на доску новой карточки и открывает её окно: карточка
+ * перечитывается целиком, как у перехода к связанной задаче, — окно правки
+ * сохраняет все поля, и собранное из обрывков затёрло бы настоящие.
+ *
+ * @returns {boolean} был ли тост
+ */
+export function announceRecurringSpawn(spawn, workspaceId) {
+    if (!spawn) return false;
+    const due = spawn.due_date
+        ? `, срок ${parseDueDate(spawn.due_date).toLocaleDateString('ru-RU')}`
+        : ', без срока';
+    showToast(`Создана следующая задача: «${spawn.title}»${due}`, 'success', {
+        label: 'Открыть',
+        onClick: async () => {
+            window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'board', boardId: spawn.board_id } }));
+            try {
+                const data = await api.listAllCardsInWorkspace(workspaceId);
+                const card = (data.cards || []).find(c => c.id === spawn.card_id);
+                if (card) showCardEditModal(card, { workspaceId });
+            } catch (e) {
+                console.error('Не удалось открыть следующую задачу:', e);
+            }
+        },
+    });
+    return true;
+}
+
 /**
  * Show card edit modal
  */
@@ -1086,6 +1126,31 @@ export function showCardEditModal(cardData, options = {}) {
 
     body.appendChild(peopleRow);
 
+    // «Повторять» — после переноса в финальную колонку появится следующая
+    // задача (§36). Правило читается отдельно: в карточке, которую приносят
+    // экраны, его нет. Пока не прочитано, список выключен, и «Сохранить» его
+    // не трогает — иначе закрытое до ответа окно стёрло бы правило.
+    const recurrenceGroup = createElement('div', { className: 'form-group card-modal__recurrence' });
+    recurrenceGroup.appendChild(createElement('label', { className: 'form-label' }, 'Повторять'));
+    const recurrenceSelect = createElement('select', { className: 'form-input', disabled: 'disabled' });
+    for (const [value, label] of RECURRENCE_OPTIONS) {
+        recurrenceSelect.appendChild(createElement('option', { value }, label));
+    }
+    recurrenceGroup.appendChild(recurrenceSelect);
+    recurrenceGroup.appendChild(createElement('p', { className: 'form-hint' },
+        'Когда задача попадёт в финальную колонку, появится следующая — с тем же названием и чек-листом ' +
+        'и сроком на день, неделю или месяц позже.'));
+    body.appendChild(recurrenceGroup);
+
+    let savedRecurrence;  // undefined — ещё не прочитано
+    api.getCardRecurrence(cardData.id)
+        .then((rule) => {
+            savedRecurrence = rule || '';
+            recurrenceSelect.value = savedRecurrence;
+            recurrenceSelect.disabled = false;
+        })
+        .catch((e) => console.error('Не удалось прочитать правило повторения:', e));
+
     // Пользовательские поля доски — сразу под стандартными. Доску карточки
     // знают все экраны, кроме самой доски: «Список», палитра, планировщик и
     // «Требуют внимания» приносят `board_id` в карточке, а `get_cards` его не
@@ -1171,6 +1236,9 @@ export function showCardEditModal(cardData, options = {}) {
             if (assigneeId !== wasAssignee) await api.updateCardAssignee(cardData.id, assigneeId);
             if (authorId !== wasAuthor) await api.updateCardAuthor(cardData.id, authorId);
             if (priority !== (cardData.priority || 'Medium')) await api.updateCardPriority(cardData.id, priority);
+            if (savedRecurrence !== undefined && recurrenceSelect.value !== savedRecurrence) {
+                await api.setCardRecurrence(cardData.id, recurrenceSelect.value || null);
+            }
             for (const { field, value } of fieldChanges) {
                 await api.setCustomFieldValue(cardData.id, field.id, value);
             }
@@ -1489,12 +1557,17 @@ function initSortable() {
                 }
 
                 try {
-                    await api.updateCardPosition(cardId, newColumnId, newPosition);
+                    const spawn = await api.updateCardPosition(cardId, newColumnId, newPosition);
 
                     // Update card counts
                     updateCardCounts();
 
-                    if (evt.to !== evt.from && evt.to.dataset.final === '1') {
+                    if (spawn) {
+                        // Следующая карточка повторяющейся задачи встала на эту
+                        // же доску — перерисовка её покажет, тост скажет, где.
+                        announceRecurringSpawn(spawn, currentWorkspaceId);
+                        renderBoard(currentBoardId);
+                    } else if (evt.to !== evt.from && evt.to.dataset.final === '1') {
                         showToast('Карточка в финальной колонке — вернуть её нельзя');
                     }
                 } catch (e) {

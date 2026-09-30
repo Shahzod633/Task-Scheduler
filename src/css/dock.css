@@ -6,6 +6,11 @@
     position: fixed;
     bottom: var(--space-lg);
     left: 50%;
+    /* Без этого ширина дока — не больше половины окна: у фиксированного
+       блока с `left: 50%` до правого края остаётся ровно половина, и лишнее
+       браузер отнимал у иконок, сжимая их до нуля (на 900–1000 px — всегда,
+       с пятой кнопкой «Ассистент» — уже на 1100). */
+    width: max-content;
     z-index: 200;
     background: var(--bg-dock);
     backdrop-filter: blur(var(--blur-glass)) saturate(160%);
@@ -57,6 +62,7 @@
 }
 
 .dock__btn svg {
+    flex-shrink: 0;
     width: 17px;
     height: 17px;
     transition: transform var(--transition-spring);
@@ -71,7 +77,7 @@
    пилюлей, а не подчёркиванием: линия под текстом на такой высоте
    наезжала бы на подпись. */
 .dock__btn--active {
-    color: var(--accent-100);
+    color: var(--accent-on-soft);
     background: var(--accent-light);
     box-shadow: inset 0 0 0 1px var(--accent-border);
 }
@@ -82,7 +88,7 @@
 
 .dock__btn--active:hover {
     background: var(--accent-light);
-    color: var(--accent-100);
+    color: var(--accent-on-soft);
 }
 
 .dock__separator {

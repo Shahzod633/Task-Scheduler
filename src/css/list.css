@@ -226,7 +226,7 @@
 .filter-bar__btn--on {
     background: var(--accent-light);
     border-color: var(--accent-border);
-    color: var(--accent-100);
+    color: var(--accent-on-soft);
 }
 
 .filter-bar__btn--reset { color: var(--text-muted); }
@@ -637,7 +637,7 @@
     padding: 0 var(--space-sm);
     border-radius: var(--radius-pill);
     background: var(--accent-light);
-    color: var(--accent-100);
+    color: var(--accent-on-soft);
     font-size: var(--font-size-xs);
     white-space: nowrap;
 }

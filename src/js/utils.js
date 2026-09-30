@@ -313,20 +313,41 @@ export function getGradients() {
 /**
  * Show a toast notification
  */
-export function showToast(message, type = 'success') {
+/**
+ * Всплывающее сообщение в углу.
+ *
+ * `action` — необязательная кнопка `{ label, onClick }`: например, «Открыть»
+ * у тоста о созданной следующей задаче. Такой тост живёт дольше — кнопку
+ * надо успеть прочитать и нажать.
+ */
+export function showToast(message, type = 'success', action = null) {
     let container = document.getElementById('toast-container');
     if (!container) {
         container = createElement('div', { id: 'toast-container', className: 'toast-container' });
         document.body.appendChild(container);
     }
-    
-    const toast = createElement('div', { className: `toast toast--${type}` }, message);
-    container.appendChild(toast);
-    
-    setTimeout(() => {
+
+    const toast = createElement('div', { className: `toast toast--${type}` },
+        createElement('span', { className: 'toast__text' }, message));
+
+    let timer = null;
+    const dismiss = () => {
+        clearTimeout(timer);
         toast.classList.add('toast--exit');
         setTimeout(() => toast.remove(), 300);
-    }, 3000);
+    };
+
+    if (action) {
+        const button = createElement('button', { className: 'toast__action', type: 'button' }, action.label);
+        button.addEventListener('click', () => {
+            dismiss();
+            action.onClick();
+        });
+        toast.appendChild(button);
+    }
+
+    container.appendChild(toast);
+    timer = setTimeout(dismiss, action ? 7000 : 3000);
 }
 
 /**
