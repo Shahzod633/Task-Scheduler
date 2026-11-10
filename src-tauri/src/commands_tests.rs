@@ -5409,3 +5409,63 @@ fn a_hand_edited_file_loses_only_its_broken_parts() {
     let sessions: i64 = conn.query_row("SELECT COUNT(*) FROM time_entries WHERE card_id = ?1", params![a], |r| r.get(0)).unwrap();
     assert_eq!(sessions, 0, "сессия без конца не превращается в идущий таймер");
 }
+
+
+// ─── Метки ───
+
+fn two_boards_with_card(conn: &Connection) -> (i64, i64, i64, i64) {
+    let ws: i64 = conn.query_row("SELECT id FROM workspaces LIMIT 1", [], |r| r.get(0)).unwrap();
+    let a = seed_board(conn, ws);
+    conn.execute("INSERT INTO boards (workspace_id, name, gradient) VALUES (?1, 'Доска Б', 'g')", params![ws]).unwrap();
+    let b = conn.last_insert_rowid();
+    let col: i64 = conn.query_row("SELECT id FROM columns WHERE board_id = ?1 ORDER BY id LIMIT 1", params![a], |r| r.get(0)).unwrap();
+    let card: i64 = conn.query_row("SELECT id FROM cards WHERE column_id = ?1 AND archived = 0 LIMIT 1", params![col], |r| r.get(0)).unwrap();
+    (a, b, col, card)
+}
+
+#[test]
+fn a_label_can_be_created_assigned_and_shows_on_the_card() {
+    let conn = test_db();
+    let (a, _b, col, card) = two_boards_with_card(&conn);
+    let label = create_label_in(&conn, a, "  Идея ", "#12ab34").unwrap();
+    assert_eq!(label.name, "Идея");
+    add_label_to_card_in(&conn, card, label.id).unwrap();
+    add_label_to_card_in(&conn, card, label.id).unwrap(); // повтор не ломает
+    let cards = cards_in(&conn, col).unwrap();
+    let c = cards.iter().find(|c| c.id == card).unwrap();
+    assert!(c.labels.iter().any(|l| l.id == label.id));
+    assert_eq!(c.labels.len(), 3); // «Баг», «Срочно» из сида и новая
+}
+
+#[test]
+fn a_label_of_another_board_is_refused() {
+    let conn = test_db();
+    let (_a, b, _col, card) = two_boards_with_card(&conn);
+    let foreign = create_label_in(&conn, b, "Чужая", "#fff").unwrap();
+    assert!(add_label_to_card_in(&conn, card, foreign.id).is_err());
+}
+
+#[test]
+fn label_input_is_validated() {
+    let conn = test_db();
+    let (a, _b, _col, _card) = two_boards_with_card(&conn);
+    assert!(create_label_in(&conn, a, "x", "red").is_err());
+    assert!(create_label_in(&conn, a, "x", "#12345g").is_err());
+    assert!(create_label_in(&conn, a, &"я".repeat(41), "#fff").is_err());
+    assert!(create_label_in(&conn, 9999, "x", "#fff").is_err());
+    assert!(create_label_in(&conn, a, "", "#fff").is_ok()); // полоска без имени
+}
+
+#[test]
+fn deleting_a_label_unhooks_it_from_cards() {
+    let mut conn = test_db();
+    let (a, _b, col, card) = two_boards_with_card(&conn);
+    let label = create_label_in(&conn, a, "Временная", "#abcdef").unwrap();
+    add_label_to_card_in(&conn, card, label.id).unwrap();
+    delete_label_in(&mut conn, label.id).unwrap();
+    let cards = cards_in(&conn, col).unwrap();
+    let c = cards.iter().find(|c| c.id == card).unwrap();
+    assert!(c.labels.iter().all(|l| l.id != label.id));
+    let left: i64 = conn.query_row("SELECT COUNT(*) FROM card_labels WHERE label_id = ?1", params![label.id], |r| r.get(0)).unwrap();
+    assert_eq!(left, 0);
+}

@@ -8,6 +8,7 @@ import { openPopover, closePopovers } from './popover.js';
 import { confirmDialog } from './dialog.js';
 import { showBoardArchive } from './archive.js';
 import { renderChecklist } from './checklist.js';
+import { renderCardLabels } from './labels.js';
 import { renderComments } from './comments.js';
 import { loadMembers, findMember, createAvatar, createMemberChip, openMemberPicker } from './members.js';
 import {
@@ -778,7 +779,8 @@ function createCardElement(cardData) {
         for (const label of cardData.labels) {
             labelsEl.appendChild(createElement('div', {
                 className: 'card__label',
-                style: { background: label.color }
+                style: { background: label.color },
+                title: label.name || ''
             }));
         }
         card.appendChild(labelsEl);
@@ -1156,6 +1158,9 @@ export function showCardEditModal(cardData, options = {}) {
     // «Требуют внимания» приносят `board_id` в карточке, а `get_cards` его не
     // отдаёт — для доски он взят при её отрисовке.
     const customFields = renderCardFields(body, cardData.id, cardData.board_id ?? currentBoardId);
+
+    // Метки пишутся сразу, как чек-лист, и видны на лицевой стороне карточки.
+    renderCardLabels(body, cardData.id, cardData.board_id ?? currentBoardId, () => { checklistDirty = true; });
 
     // Loads asynchronously; the modal is already on screen by then.
     renderChecklist(body, cardData.id, () => { checklistDirty = true; });

@@ -241,6 +241,14 @@ export async function removeLabelFromCard(cardId, labelId) {
     return await invoke('remove_label_from_card', { cardId, labelId });
 }
 
+export async function getCardLabels(cardId) {
+    return await invoke('get_card_labels', { cardId });
+}
+
+export async function deleteLabel(labelId) {
+    return await invoke('delete_label', { labelId });
+}
+
 // ─── Export/Import ───
 
 /** Returns the board as a JSON string (no file is written). */

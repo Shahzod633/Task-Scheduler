@@ -123,6 +123,8 @@ pub fn run() {
             commands::create_label,
             commands::add_label_to_card,
             commands::remove_label_from_card,
+            commands::get_card_labels,
+            commands::delete_label,
 
             commands::get_notifications,
             commands::mark_all_notifications_read,

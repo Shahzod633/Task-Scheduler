@@ -790,6 +790,27 @@ fn cards_in(conn: &rusqlite::Connection, column_id: i64) -> CmdResult<Vec<Card>>
 
     let mut res = Vec::new();
     for i in iter { res.push(i.map_err(to_string_err)?); }
+
+    // Метки — одним запросом на колонку, а не на карточку.
+    let mut lstmt = conn.prepare(
+        "SELECT cl.card_id, l.id, l.board_id, l.name, l.color
+           FROM card_labels cl
+           INNER JOIN labels l ON l.id = cl.label_id
+           INNER JOIN cards c ON c.id = cl.card_id
+          WHERE c.column_id = ?1 AND c.archived = 0
+          ORDER BY l.id ASC",
+    ).map_err(to_string_err)?;
+    let rows = lstmt.query_map(params![column_id], |row| {
+        Ok((row.get::<_, i64>(0)?, crate::models::Label {
+            id: row.get(1)?, board_id: row.get(2)?, name: row.get(3)?, color: row.get(4)?,
+        }))
+    }).map_err(to_string_err)?;
+    for r in rows {
+        let (card_id, label) = r.map_err(to_string_err)?;
+        if let Some(card) = res.iter_mut().find(|c| c.id == card_id) {
+            card.labels.push(label);
+        }
+    }
     Ok(res)
 }
 
@@ -2328,25 +2349,65 @@ pub fn get_labels(board_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<cra
     Ok(res)
 }
 
-#[tauri::command]
-pub fn create_label(board_id: i64, name: String, color: String, state: State<'_, DbState>) -> CmdResult<crate::models::Label> {
-    let conn = state.conn.lock().unwrap();
+/// Метка доски: имя до 40 символов (может быть пустым — тогда это просто
+/// цветная полоска), цвет — `#rgb` или `#rrggbb`. Цвет уходит в `style`
+/// лицевой стороны карточки, поэтому произвольную строку туда не пускаем.
+fn create_label_in(conn: &rusqlite::Connection, board_id: i64, name: &str, color: &str) -> CmdResult<crate::models::Label> {
+    let name = name.trim();
+    if name.chars().count() > 40 {
+        return Err("Название метки — не длиннее 40 символов".to_string());
+    }
+    let hex_ok = color.starts_with('#')
+        && (color.len() == 4 || color.len() == 7)
+        && color[1..].chars().all(|c| c.is_ascii_hexdigit());
+    if !hex_ok {
+        return Err("Цвет метки должен быть вида #rrggbb".to_string());
+    }
+    let exists: i64 = conn
+        .query_row("SELECT COUNT(*) FROM boards WHERE id = ?1", params![board_id], |r| r.get(0))
+        .map_err(to_string_err)?;
+    if exists == 0 {
+        return Err("Доска не найдена".to_string());
+    }
     conn.execute(
         "INSERT INTO labels (board_id, name, color) VALUES (?1, ?2, ?3)",
         params![board_id, name, color],
     ).map_err(to_string_err)?;
     let id = conn.last_insert_rowid();
-    Ok(crate::models::Label { id, board_id, name, color })
+    Ok(crate::models::Label { id, board_id, name: name.to_string(), color: color.to_string() })
 }
 
 #[tauri::command]
-pub fn add_label_to_card(card_id: i64, label_id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+pub fn create_label(board_id: i64, name: String, color: String, state: State<'_, DbState>) -> CmdResult<crate::models::Label> {
     let conn = state.conn.lock().unwrap();
+    create_label_in(&conn, board_id, &name, &color)
+}
+
+/// Метку можно повесить только на карточку той же доски, где она создана:
+/// иначе метки чужой доски просочились бы в экспорт и фильтры.
+fn add_label_to_card_in(conn: &rusqlite::Connection, card_id: i64, label_id: i64) -> CmdResult<()> {
+    let same_board: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM cards c
+           INNER JOIN columns col ON col.id = c.column_id
+           INNER JOIN labels l ON l.board_id = col.board_id
+          WHERE c.id = ?1 AND l.id = ?2",
+        params![card_id, label_id],
+        |r| r.get(0),
+    ).map_err(to_string_err)?;
+    if same_board == 0 {
+        return Err("Эта метка принадлежит другой доске".to_string());
+    }
     conn.execute(
         "INSERT OR IGNORE INTO card_labels (card_id, label_id) VALUES (?1, ?2)",
         params![card_id, label_id],
     ).map_err(to_string_err)?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn add_label_to_card(card_id: i64, label_id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    add_label_to_card_in(&conn, card_id, label_id)
 }
 
 #[tauri::command]
@@ -2357,6 +2418,38 @@ pub fn remove_label_from_card(card_id: i64, label_id: i64, state: State<'_, DbSt
         params![card_id, label_id],
     ).map_err(to_string_err)?;
     Ok(())
+}
+
+/// Метки одной карточки — окно карточки спрашивает их само: экраны вроде
+/// «Списка» приносят карточки без меток.
+#[tauri::command]
+pub fn get_card_labels(card_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<crate::models::Label>> {
+    let conn = state.conn.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT l.id, l.board_id, l.name, l.color FROM card_labels cl
+           INNER JOIN labels l ON l.id = cl.label_id
+          WHERE cl.card_id = ?1 ORDER BY l.id ASC",
+    ).map_err(to_string_err)?;
+    let iter = stmt.query_map(params![card_id], |row| {
+        Ok(crate::models::Label { id: row.get(0)?, board_id: row.get(1)?, name: row.get(2)?, color: row.get(3)? })
+    }).map_err(to_string_err)?;
+    let mut res = Vec::new();
+    for i in iter { res.push(i.map_err(to_string_err)?); }
+    Ok(res)
+}
+
+/// Удаляет метку с доски вместе со снятием её со всех карточек.
+fn delete_label_in(conn: &mut rusqlite::Connection, label_id: i64) -> CmdResult<()> {
+    let tx = conn.transaction().map_err(to_string_err)?;
+    tx.execute("DELETE FROM card_labels WHERE label_id = ?1", params![label_id]).map_err(to_string_err)?;
+    tx.execute("DELETE FROM labels WHERE id = ?1", params![label_id]).map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)
+}
+
+#[tauri::command]
+pub fn delete_label(label_id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let mut conn = state.conn.lock().unwrap();
+    delete_label_in(&mut conn, label_id)
 }
 
 // ─── Notifications ───
