@@ -256,6 +256,7 @@ function paintCardButton(btn) {
 
     btn.innerHTML = running ? Icons.stop : Icons.clock;
     btn.dataset.tooltip = running ? 'Остановить таймер' : 'Запустить таймер';
+    btn.setAttribute('aria-label', btn.dataset.tooltip);
     refreshTooltip(btn);
     btn.classList.toggle('card__timer-btn--running', running);
     const card = btn.closest('.card');

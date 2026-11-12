@@ -15,7 +15,7 @@ function token(name, fallback) {
 
 /** Цвета рядов данных по имени, а не значением: значение зависит от темы. */
 const SERIES_TOKENS = {
-    accent: ['--accent-color', '#6c5cff'],
+    accent: ['--accent-color', '#3366ff'],
     danger: ['--color-danger', '#f4685f'],
     success: ['--color-success', '#3ecf8e'],
 };

@@ -5,9 +5,9 @@
 
 /* ─── Generic Page Shell ─── */
 .page {
-    /* Нижний отступ учитывает плавающий док: иначе он перекрывает
-       последнюю строку календаря и хвост длинных списков. */
-    padding: var(--space-xl) var(--space-2xl) calc(var(--dock-height) + var(--space-2xl));
+    /* Раньше нижний отступ был выше на высоту плавающего дока — он перекрывал
+       хвост списков. Дока с 12.11 нет. */
+    padding: var(--space-xl) var(--space-2xl) var(--space-2xl);
     overflow-y: auto;
     height: 100%;
     scroll-behavior: smooth;
@@ -157,7 +157,7 @@
     width: 26px;
     height: 26px;
     border-radius: var(--radius-sm);
-    background: var(--gradient-1);
+    background: var(--accent-fill);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -285,13 +285,14 @@
 }
 
 .theme-toggle__option--active {
-    background: var(--accent-gradient);
+    background: var(--accent-fill);
     color: var(--text-on-accent);
     box-shadow: var(--shadow-sm);
 }
 
 .form-hint {
-    font-size: var(--font-size-xs);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
     color: var(--text-muted);
     margin-top: var(--space-sm);
 }
@@ -368,6 +369,66 @@
     .home-widgets { grid-template-columns: 1fr; }
 }
 
+.home-widget--wide {
+    grid-column: 1 / -1;
+}
+
+/* ─── «Сегодня и просрочено» (12.11) ─── */
+.today-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.today-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    width: 100%;
+    padding: var(--space-sm);
+    border-radius: var(--radius-md);
+    text-align: left;
+    transition: background var(--transition-fast);
+}
+
+.today-row:hover {
+    background: var(--bg-card-hover);
+}
+
+.today-row__text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.today-row__title,
+.today-row__where {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.today-row__title {
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+}
+
+.today-row__where {
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+}
+
+/* Чип срока одной ширины — названия встают ровной колонкой. */
+.today-row .due-chip {
+    min-width: 104px;
+}
+
+.today-list__more {
+    align-self: flex-start;
+    margin-top: var(--space-xs);
+}
+
 .home-widget {
     background: var(--bg-panel);
     backdrop-filter: blur(var(--blur-panel));
@@ -415,17 +476,78 @@
 }
 
 /* ─── Settings Page ─── */
+/* Две панели (12.11): слева разделы, справа формы. Список разделов прилипает
+   к верху прокрутки; уже 1100 px встаёт строкой над формами. */
+.settings-layout {
+    display: grid;
+    grid-template-columns: 200px minmax(0, 640px);
+    gap: var(--space-2xl);
+    align-items: start;
+}
+
+.settings-nav {
+    position: sticky;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-top: var(--space-lg);
+}
+
+.settings-nav__item {
+    width: 100%;
+    text-align: left;
+    padding: 7px var(--space-md);
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+    font-size: var(--font-size-ui);
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.settings-nav__item:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.settings-nav__item--active {
+    background: var(--accent-soft);
+    color: var(--accent-on-soft);
+    font-weight: var(--font-weight-medium);
+}
+
+.settings-section {
+    scroll-margin-top: var(--space-lg);
+}
+
 .settings-section-title {
     font-family: var(--font-display);
-    font-size: var(--font-size-lg);
+    font-size: var(--font-size-xl);
     font-weight: var(--font-weight-semibold);
     letter-spacing: var(--tracking-tight);
     color: var(--text-primary);
     margin: var(--space-2xl) 0 var(--space-md);
 }
 
-.settings-section-title:first-of-type {
+.settings-section:first-child .settings-section-title {
     margin-top: var(--space-lg);
+}
+
+@media (max-width: 1099px) {
+    .settings-layout {
+        grid-template-columns: minmax(0, 1fr);
+        gap: 0;
+    }
+
+    .settings-nav {
+        position: static;
+        flex-direction: row;
+        flex-wrap: wrap;
+        gap: var(--space-xs);
+    }
+
+    .settings-nav__item {
+        width: auto;
+    }
 }
 
 .settings-card {
@@ -437,7 +559,7 @@
     border: 1px solid var(--border-panel);
     border-radius: var(--radius-xl);
     padding: var(--space-xl);
-    max-width: 520px;
+    max-width: 640px;
     box-shadow: var(--highlight-top);
 }
 
@@ -650,7 +772,12 @@
 
 .planner-grid {
     display: grid;
-    grid-template-columns: repeat(7, 1fr);
+    /* `minmax(0, …)`, а не просто `1fr`: у `1fr` нижняя граница — ширина
+       содержимого, и одно длинное название в ячейке (белый пробел не
+       переносится) распирало свой столбец. Сетка становилась шире окна, а
+       `overflow: hidden` молча срезал воскресенье — при 900 px и пятницу с
+       субботой. */
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     gap: 1px;
     background: var(--border-subtle);
     border: 1px solid var(--border-default);
@@ -688,9 +815,11 @@
     opacity: 0.55;
 }
 
+/* Сегодня — янтарь, цвет времени в «Сигнале». Кобальт здесь читался бы как
+   «выбранный день», а это не выбор, а «сейчас». */
 .planner-cell--today {
-    background: var(--accent-soft);
-    box-shadow: inset 0 0 0 1px var(--accent-border);
+    background: var(--warning-soft);
+    box-shadow: inset 0 0 0 1px var(--warning-border);
 }
 
 .planner-cell__day {
@@ -702,7 +831,7 @@
 }
 
 .planner-cell--today .planner-cell__day {
-    color: var(--accent-on-soft);
+    color: var(--color-warning);
 }
 
 .planner-card-chip {
@@ -722,8 +851,14 @@
     transform: translateY(-1px);
 }
 
+/* Просрочка — рамкой и цветом названия, а не толстой полосой слева: полоса
+   у края «плашки» читалась как украшение, а не как состояние. */
 .planner-card-chip--overdue {
-    border-left: 2px solid var(--color-danger);
+    border-color: var(--danger-border);
+}
+
+.planner-card-chip--overdue .planner-card-chip__title {
+    color: var(--color-danger);
 }
 
 .planner-card-chip__title {
@@ -735,8 +870,11 @@
 }
 
 .planner-card-chip__board {
-    font-size: 10px;
+    font-size: var(--font-size-xs);
     color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* ─── Mistake Tracking Dashboard ─── */
@@ -1067,9 +1205,13 @@
     border-radius: var(--radius-pill);
 }
 
+/* Приоритет в «Сигнале» передаётся не цветом, а яркостью: высокий — светлый
+   сегмент, средний — приглушённый, низкий — едва заметный. Сам токен
+   `--priority-low` прозрачный (на точке это пустое кольцо), поэтому сегменту
+   нужен свой оттенок. */
 .workload-bar__seg--high { background: var(--priority-high); }
 .workload-bar__seg--medium { background: var(--priority-medium); }
-.workload-bar__seg--low { background: var(--priority-low); }
+.workload-bar__seg--low { background: var(--border-strong); }
 
 /* Пустая дорожка вместо полосы: строка участника без задач держит ту же
    высоту, и список не превращается в лесенку. */
@@ -1206,7 +1348,7 @@
 }
 
 .assistant__bubble--user {
-    background: var(--accent-gradient);
+    background: var(--accent-fill);
     color: var(--text-on-accent);
     border-bottom-right-radius: var(--radius-xs);
 }

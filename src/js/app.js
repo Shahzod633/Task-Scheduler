@@ -5,9 +5,9 @@
 import * as api from './api.js';
 import Icons from './icons.js';
 import { renderBoard } from './board.js';
-import { renderHub, filterBoards } from './hub.js';
-import { renderDock, showDock, removeDock } from './dock.js';
+import { renderHub } from './hub.js';
 import { renderWorkspaceSidebar, ensureDefaultWorkspace } from './workspace.js';
+import { initSidebarRail, setSidebarContext } from './sidebar.js';
 import { initHeaderInteractions } from './header.js';
 import { initTooltips } from './popover.js';
 import { initModalEscape } from './dialog.js';
@@ -26,18 +26,28 @@ import { applyWorkspaceBackground } from './background.js';
 import { initTheme } from './theme.js';
 import { openPalette, closePalette, isPaletteOpen } from './palette.js';
 import { initTimer, askAboutOrphanedTimers } from './timer.js';
-import { $, debounce, showToast } from './utils.js';
+import { $, showToast } from './utils.js';
 
 let currentView = { name: 'hub', params: {} };
 let defaultWorkspaceId = null;
 let lastBoardId = null;
 
-// Views that show the left sidebar (workspace/hub-style navigation)
-const SIDEBAR_VIEWS = new Set(['hub', 'templates', 'home', 'settings', 'recent', 'favorites', 'mistakes', 'list', 'members']);
-// Views that show the floating dock (board working context)
-const DOCK_VIEWS = new Set(['board', 'inbox', 'planner', 'assistant']);
-// view name -> sidebar top-level item id
-const SIDEBAR_ITEM_IDS = { hub: 'sidebar-boards', list: 'sidebar-list', mistakes: 'sidebar-mistakes', assistant: 'sidebar-assistant', templates: 'sidebar-templates', home: 'sidebar-home', settings: 'sidebar-settings' };
+// Экран → пункт сайдбара, который подсвечивается. С 12.11 сайдбар — единственная
+// навигация: плавающего дока (Inbox, Планировщик, Ассистент, Доска, «Выбрать
+// другую доску») больше нет, его пункты переехали сюда, и сайдбар виден на
+// всех экранах, включая доску.
+const SIDEBAR_ITEM_IDS = {
+    hub: 'sidebar-boards',
+    board: 'sidebar-current-board',
+    list: 'sidebar-list',
+    planner: 'sidebar-planner',
+    inbox: 'sidebar-inbox',
+    mistakes: 'sidebar-mistakes',
+    assistant: 'sidebar-assistant',
+    templates: 'sidebar-templates',
+    home: 'sidebar-home',
+    settings: 'sidebar-settings',
+};
 
 const ROUTES = {
     hub: (params) => renderHub(params.workspaceId || defaultWorkspaceId),
@@ -50,6 +60,7 @@ const ROUTES = {
         lastBoardId = boardId;
         await api.recordBoardView(boardId);
         await renderBoard(boardId);
+        showCurrentBoardItem(boardId);
     },
     templates: (params) => renderTemplatesPage(params.workspaceId || defaultWorkspaceId),
     home: (params) => renderHomePage(params.workspaceId || defaultWorkspaceId),
@@ -79,6 +90,7 @@ async function init() {
 
         // Render the global layout
         renderLayout();
+        initSidebarRail();
         initHeaderInteractions(() => defaultWorkspaceId);
         // Индикатор идущего таймера — сразу вместе с шапкой. Первый экран его
         // не ждёт: таймера чаще всего нет, а чтение его — лишний шаг до доски.
@@ -158,10 +170,14 @@ function renderLayout() {
 
             <button class="header__create-btn" id="header-create-btn">+ Создать</button>
 
-            <div class="header__search">
+            <!-- Поиск — кнопка, открывающая палитру (Ctrl+K). Раньше здесь было
+                 поле, которое искало только по названиям досок и только на
+                 экране «Доски», а на остальных двенадцати экранах молчало. -->
+            <button class="header__search" id="header-search" type="button">
                 <span class="header__search-icon">${Icons.search}</span>
-                <input type="text" class="header__search-input" id="search-input" placeholder="Поиск">
-            </div>
+                <span class="header__search-text">Поиск по доскам и задачам</span>
+                <kbd class="header__search-kbd">Ctrl K</kbd>
+            </button>
 
             <div class="header__right">
                 <!-- Идущий таймер: виден, только пока время идёт (см. timer.js) -->
@@ -184,41 +200,65 @@ function renderLayout() {
         <!-- Main -->
         <div class="main">
             <!-- Sidebar -->
+            <!-- Пункты — кнопки, а не div: до них доходит Tab (12.11).
+                 data-rail-label — подсказка, когда сайдбар свёрнут (sidebar.js). -->
             <aside class="sidebar" id="app-sidebar">
-                <div class="sidebar__section">
-                    <div class="sidebar__item sidebar__item--active" id="sidebar-boards">
+                <nav class="sidebar__section" aria-label="Разделы">
+                    <button type="button" class="sidebar__item sidebar__item--active" id="sidebar-boards" data-rail-label="Доски">
                         <span class="sidebar__item-icon">${Icons.boards}</span>
                         <span class="sidebar__item-text">Доски</span>
-                    </div>
-                    <div class="sidebar__item" id="sidebar-list">
+                    </button>
+                    <!-- Последняя открытая доска — возврат к ней в один щелчок, как
+                         было у кнопки «Доска» в доке. Появляется после первой
+                         открытой доски (showCurrentBoardItem). -->
+                    <button type="button" class="sidebar__item sidebar__item--sub" id="sidebar-current-board" hidden>
+                        <span class="sidebar__item-icon">${Icons.grid}</span>
+                        <span class="sidebar__item-text"></span>
+                    </button>
+                    <button type="button" class="sidebar__item" id="sidebar-list" data-rail-label="Список">
                         <span class="sidebar__item-icon">${Icons.list}</span>
                         <span class="sidebar__item-text">Список</span>
-                    </div>
-                    <div class="sidebar__item" id="sidebar-mistakes">
+                    </button>
+                    <button type="button" class="sidebar__item" id="sidebar-planner" data-rail-label="Планировщик">
+                        <span class="sidebar__item-icon">${Icons.calendar}</span>
+                        <span class="sidebar__item-text">Планировщик</span>
+                    </button>
+                    <button type="button" class="sidebar__item" id="sidebar-inbox" data-rail-label="Inbox">
+                        <span class="sidebar__item-icon">${Icons.inbox}</span>
+                        <span class="sidebar__item-text">Inbox</span>
+                    </button>
+                    <button type="button" class="sidebar__item" id="sidebar-mistakes" data-rail-label="Требуют внимания">
                         <span class="sidebar__item-icon">${Icons.alertTriangle}</span>
                         <span class="sidebar__item-text">Требуют внимания</span>
-                    </div>
-                    <div class="sidebar__item" id="sidebar-assistant">
+                    </button>
+                    <button type="button" class="sidebar__item" id="sidebar-assistant" data-rail-label="Ассистент">
                         <span class="sidebar__item-icon">${Icons.sparkles}</span>
                         <span class="sidebar__item-text">Ассистент</span>
-                    </div>
-                    <div class="sidebar__item" id="sidebar-templates">
+                    </button>
+                    <button type="button" class="sidebar__item" id="sidebar-templates" data-rail-label="Шаблоны">
                         <span class="sidebar__item-icon">${Icons.template}</span>
                         <span class="sidebar__item-text">Шаблоны</span>
-                    </div>
-                    <div class="sidebar__item" id="sidebar-home">
+                    </button>
+                    <button type="button" class="sidebar__item" id="sidebar-home" data-rail-label="Главная страница">
                         <span class="sidebar__item-icon">${Icons.home}</span>
                         <span class="sidebar__item-text">Главная страница</span>
-                    </div>
-                    <div class="sidebar__item" id="sidebar-settings">
+                    </button>
+                    <button type="button" class="sidebar__item" id="sidebar-settings" data-rail-label="Настройки">
                         <span class="sidebar__item-icon">${Icons.settings}</span>
                         <span class="sidebar__item-text">Настройки</span>
-                    </div>
-                </div>
+                    </button>
+                </nav>
 
                 <div class="sidebar__section">
                     <div class="sidebar__section-title">Рабочие пространства</div>
                     <div id="sidebar-workspaces"></div>
+                </div>
+
+                <div class="sidebar__footer">
+                    <button type="button" class="sidebar__collapse" id="sidebar-collapse" aria-expanded="true">
+                        <span class="sidebar__item-icon">${Icons.panelLeft}</span>
+                        <span class="sidebar__collapse-text">Свернуть</span>
+                    </button>
                 </div>
             </aside>
 
@@ -244,31 +284,39 @@ function renderLayout() {
         }
     });
 
-    // Event: Search
-    const searchInput = $('#search-input');
-    searchInput.addEventListener('input', debounce((e) => {
-        if (currentView.name === 'hub') {
-            filterBoards(e.target.value);
-        }
-    }, 200));
+    // Поиск в шапке — тот же, что по Ctrl+K: по доскам и карточкам всего
+    // пространства, с любого экрана.
+    $('#header-search').addEventListener('click', () => {
+        if (!isPaletteOpen()) openPalette(defaultWorkspaceId);
+    });
 
     // Event: Sidebar navigation
     $('#sidebar-boards').addEventListener('click', () => {
         navigateTo('hub', { workspaceId: defaultWorkspaceId });
     });
 
+    $('#sidebar-current-board').addEventListener('click', () => {
+        if (lastBoardId) navigateTo('board', { boardId: lastBoardId });
+    });
+
     $('#sidebar-list').addEventListener('click', () => {
         navigateTo('list', { workspaceId: defaultWorkspaceId });
+    });
+
+    $('#sidebar-planner').addEventListener('click', () => {
+        navigateTo('planner', { workspaceId: defaultWorkspaceId });
+    });
+
+    $('#sidebar-inbox').addEventListener('click', () => {
+        navigateTo('inbox', { workspaceId: defaultWorkspaceId });
     });
 
     $('#sidebar-mistakes').addEventListener('click', () => {
         navigateTo('mistakes', { workspaceId: defaultWorkspaceId });
     });
 
-    // Та же страница, что у кнопки дока, но открытая отсюда остаётся в
-    // обрамлении сайдбара — см. `via` в navigateTo.
     $('#sidebar-assistant').addEventListener('click', () => {
-        navigateTo('assistant', { workspaceId: defaultWorkspaceId, via: 'sidebar' });
+        navigateTo('assistant', { workspaceId: defaultWorkspaceId });
     });
 
     $('#sidebar-templates').addEventListener('click', () => {
@@ -285,6 +333,28 @@ function renderLayout() {
 }
 
 /**
+ * Пункт «последняя открытая доска» под «Досками»: название доски — подписью,
+ * а в свёрнутом сайдбаре — подсказкой. Название читается отдельно: экран
+ * доски его не отдаёт, а лишний запрос по id дешевле, чем тянуть его оттуда.
+ */
+async function showCurrentBoardItem(boardId) {
+    const item = $('#sidebar-current-board');
+    if (!item) return;
+    try {
+        const board = await api.getBoard(boardId);
+        if (boardId !== lastBoardId) return; // пока читали, открыли другую
+        item.querySelector('.sidebar__item-text').textContent = board.name;
+        item.dataset.railLabel = `Доска «${board.name}»`;
+        item.setAttribute('aria-label', `Доска «${board.name}»`);
+        if (item.closest('.sidebar--rail')) item.dataset.tooltip = item.dataset.railLabel;
+        item.hidden = false;
+    } catch (e) {
+        // Доску удалили или она недоступна — пункт просто не показывается.
+        item.hidden = true;
+    }
+}
+
+/**
  * Highlight the active top-level sidebar item for the given view
  */
 function updateSidebarActiveState(view) {
@@ -298,8 +368,7 @@ function updateSidebarActiveState(view) {
 
 /**
  * Navigate between views. Single choke point: fully re-renders only the
- * central content area (and the dock/sidebar chrome around it) — never the
- * whole app.
+ * central content area (and the sidebar around it) — never the whole app.
  */
 async function navigateTo(view, params = {}) {
     if (!ROUTES[view]) return;
@@ -315,34 +384,15 @@ async function navigateTo(view, params = {}) {
     // без размытия.
     $('#app').dataset.view = view;
 
-    // Обрамление решает экран, а у ассистента — ещё и то, откуда пришли: он
-    // открывается и из сайдбара, и из дока, и человек остаётся в том
-    // обрамлении, из которого нажал.
-    const viaSidebar = params.via === 'sidebar';
-    const withSidebar = SIDEBAR_VIEWS.has(view) || viaSidebar;
-    const withDock = DOCK_VIEWS.has(view) && !viaSidebar;
-
-    const sidebar = $('#app-sidebar');
-    if (sidebar) sidebar.classList.toggle('sidebar--hidden', !withSidebar);
-
-    if (withSidebar) {
-        await renderWorkspaceSidebar(defaultWorkspaceId);
-    }
+    // Сайдбар виден на всех экранах; на доске он по умолчанию свёрнут до
+    // иконок — колонкам нужна ширина (sidebar.js).
+    setSidebarContext(view);
+    await renderWorkspaceSidebar(defaultWorkspaceId);
 
     // Фон принадлежит пространству, а не экрану, поэтому пересчитывается на
     // каждом переходе: `defaultWorkspaceId` только что мог смениться. Не
     // дожидаемся — оформление не должно задерживать отрисовку страницы.
     applyWorkspaceBackground(defaultWorkspaceId);
-
-    if (withDock) {
-        renderDock(view);
-        showDock();
-    } else {
-        removeDock();
-    }
-
-    const searchInput = $('#search-input');
-    if (searchInput) searchInput.value = '';
 
     try {
         await ROUTES[view](params);

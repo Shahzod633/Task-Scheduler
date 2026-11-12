@@ -15,7 +15,7 @@ import {
     createFilterState, createFilterToolbar, matchesFilter, isFilterActive,
     groupKeyFor, priorityLabel, priorityModifier, PRIORITIES,
 } from './filters.js';
-import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate, isOverdue, staggerIn, pluralize, debounce, formatDate, parseDueDate } from './utils.js';
+import { createElement, $, $$, showToast, autoResize, escapeHtml, formatDueDate, isOverdue, dueState, staggerIn, pluralize, debounce, formatDate, parseDueDate, textColorOn } from './utils.js';
 import { renderMarkdown } from './markdown.js';
 import { renderDependencies, confirmFinalColumnMove } from './dependencies.js';
 import { attachTimerButton, renderTimeLog, refreshTimer } from './timer.js';
@@ -768,20 +768,21 @@ function showColumnMenu(event, colData) {
  */
 function createCardElement(cardData) {
     const card = createElement('div', {
-        // The priority modifier paints the thin stripe down the left edge.
-        className: `card card--priority-${priorityModifier(cardData.priority)}`,
+        className: 'card',
         dataset: { cardId: cardData.id }
     });
 
-    // Labels (if any)
+    // Метки — чипами с названием (раньше полоски 36×7 без текста: цвет
+    // приходилось помнить). Метка без названия остаётся полоской.
     if (cardData.labels && cardData.labels.length > 0) {
         const labelsEl = createElement('div', { className: 'card__labels' });
         for (const label of cardData.labels) {
-            labelsEl.appendChild(createElement('div', {
-                className: 'card__label',
-                style: { background: label.color },
-                title: label.name || ''
-            }));
+            const chip = createElement('span', {
+                className: `card__label ${label.name ? '' : 'card__label--bar'}`,
+                style: { background: label.color, color: textColorOn(label.color) },
+            }, label.name || '');
+            if (label.name && label.name.length > 18) chip.setAttribute('data-tooltip', label.name);
+            labelsEl.appendChild(chip);
         }
         card.appendChild(labelsEl);
     }
@@ -798,15 +799,30 @@ function createCardElement(cardData) {
     card.appendChild(createElement('div', {
         className: 'card__title'
     }, cardData.title));
-    
+
     // Metadata
     const assignee = findMember(cardData.assignee_id);
     const checklistTotal = cardData.checklist_total || 0;
     const blockedOpen = cardData.blocked_open || 0;
+    // Приоритет — значком, и только высокий и низкий: средний стоит у
+    // большинства карточек и как отличие ничего не сообщает.
+    const priority = priorityModifier(cardData.priority);
+    const showPriority = priority === 'high' || priority === 'low';
     const hasMeta = cardData.description || cardData.due_date || assignee
-        || checklistTotal > 0 || blockedOpen > 0;
+        || checklistTotal > 0 || blockedOpen > 0 || showPriority;
     if (hasMeta) {
         const meta = createElement('div', { className: 'card__meta' });
+
+        if (showPriority) {
+            const label = priority === 'high' ? 'Высокий приоритет' : 'Низкий приоритет';
+            meta.appendChild(createElement('div', {
+                className: `card__meta-item card__priority card__priority--${priority}`,
+                innerHTML: priority === 'high' ? Icons.chevronsUp : Icons.chevronDown,
+                'data-tooltip': label,
+                'aria-label': label,
+                role: 'img',
+            }));
+        }
 
         // Only shown when the card actually has a checklist — an empty "0 из 0"
         // on every card would be noise.
@@ -831,9 +847,10 @@ function createCardElement(cardData) {
         }
 
         if (cardData.due_date) {
-            const overdue = isOverdue(cardData.due_date);
+            // `overdue` — красный, `soon` (сегодня/завтра) — янтарь времени.
+            const state = dueState(cardData.due_date);
             const dueEl = createElement('div', {
-                className: `card__meta-item card__meta-item--due ${overdue ? 'overdue' : ''}`,
+                className: `card__meta-item card__meta-item--due ${state}`,
                 innerHTML: `${Icons.clock} <span>${formatDueDate(cardData.due_date)}</span>`
             });
             meta.appendChild(dueEl);
@@ -860,7 +877,9 @@ function createCardElement(cardData) {
     // Edit button
     const editBtn = createElement('button', {
         className: 'card__edit-btn',
-        innerHTML: Icons.edit
+        innerHTML: Icons.edit,
+        type: 'button',
+        'aria-label': `Открыть карточку «${cardData.title}»`,
     });
     editBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -871,7 +890,9 @@ function createCardElement(cardData) {
     // Card context menu (mistake tracking)
     const menuBtn = createElement('button', {
         className: 'card__menu-btn',
-        innerHTML: Icons.moreHorizontal
+        innerHTML: Icons.moreHorizontal,
+        type: 'button',
+        'aria-label': 'Меню карточки',
     });
     menuBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -983,7 +1004,20 @@ export function announceRecurringSpawn(spawn, workspaceId) {
 }
 
 /**
- * Show card edit modal
+ * Окно карточки (переделано 12.11, DESIGN_AUDIT.md — слабое место №4).
+ *
+ * Две колонки: слева то, что читают и пишут (название, описание, чек-лист,
+ * связи, время, комментарии), справа свойства (срок, люди, приоритет, метки,
+ * повтор, поля). Шапка и низ закреплены, прокручивается только середина.
+ *
+ * Сохранение одно для всего — **сразу**. Раньше название, описание, люди,
+ * приоритет, повтор и поля ждали «Сохранить», а метки, чек-лист, время и
+ * комментарии писались сразу; закрытие крестиком или Esc молча теряло первые.
+ * Теперь текст пишется через 0,7 с после последней буквы и при уходе из поля,
+ * остальное — в момент выбора, а при закрытии недописанное досохраняется.
+ *
+ * Исключение — срок: он задаётся один раз и не правится (§20.2), поэтому
+ * записывается только кнопкой «Задать срок» и после подтверждения.
  */
 export function showCardEditModal(cardData, options = {}) {
     const onChange = options.onChange || (() => renderBoard(currentBoardId));
@@ -991,116 +1025,254 @@ export function showCardEditModal(cardData, options = {}) {
     // это окно не с доски («Список», палитра, планировщик, «Требуют внимания»),
     // знают его сами и передают явно; для доски оно взято при её отрисовке.
     const workspaceId = options.workspaceId || currentWorkspaceId;
+    // Доску карточки знают все экраны, кроме самой доски: «Список», палитра,
+    // планировщик и «Требуют внимания» приносят `board_id` в карточке, а
+    // `get_cards` его не отдаёт — для доски он взят при её отрисовке.
+    const boardId = cardData.board_id ?? currentBoardId;
     const existing = $('.modal-overlay');
     if (existing) existing.remove();
+    // Куда вернуть фокус после закрытия: на карточку или строку, с которой
+    // окно открыли, а не в начало страницы.
+    const returnFocus = document.activeElement;
 
     const overlay = createElement('div', { className: 'modal-overlay', id: 'card-modal-overlay' });
-    const modal = createElement('div', { className: 'modal', style: { width: '500px' } });
+    const modal = createElement('div', {
+        className: 'modal modal--card',
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-labelledby': 'card-modal-title',
+    });
 
-    // Checklist edits save as they happen rather than on "Сохранить", so
-    // closing the window still has to refresh the board — otherwise the "2 из 5"
-    // on the card face would keep showing the count from before.
-    let checklistDirty = false;
-    const dismiss = () => {
-        overlay.remove();
-        if (checklistDirty) onChange();
+    // ─── Запись ───────────────────────────────────────────────────────────
+    //
+    // Записи идут цепочкой: два быстрых изменения подряд не обгонят друг друга
+    // и не запишутся в обратном порядке. Ошибка одной не обрывает следующие.
+    let dirty = false;          // что-то записано — доску обновить при закрытии
+    let textTimer = null;       // отложенная запись названия и описания
+    let queue = Promise.resolve();
+
+    const status = createElement('span', {
+        className: 'card-modal__status',
+        role: 'status',
+        'aria-live': 'polite',
+    });
+    const setStatus = (state, text) => {
+        status.dataset.state = state;
+        status.textContent = text;
     };
 
-    // Header
+    const persist = (task) => {
+        setStatus('saving', 'Сохраняю…');
+        queue = queue
+            .then(task)
+            .then(() => {
+                dirty = true;
+                setStatus('saved', 'Сохранено');
+            })
+            .catch((e) => {
+                setStatus('error', 'Не сохранено');
+                // Отказ по значению поля («Такого варианта у поля нет») приходит
+                // с бэкенда строкой и объясняет, что не так, — его и показываем.
+                showToast(typeof e === 'string' ? e : (e && e.message) || 'Не удалось сохранить', 'error');
+            });
+        return queue;
+    };
+
+    // ─── Шапка ────────────────────────────────────────────────────────────
     const header = createElement('div', { className: 'modal__header' });
-    header.appendChild(createElement('h2', { className: 'modal__title' }, cardData.title));
-    const closeBtn = createElement('button', { className: 'modal__close', innerHTML: Icons.x });
-    closeBtn.addEventListener('click', dismiss);
+    const headerTitle = createElement('h2', { className: 'modal__title', id: 'card-modal-title' }, cardData.title);
+    header.appendChild(headerTitle);
+    header.appendChild(status);
+    const closeBtn = createElement('button', {
+        className: 'modal__close',
+        type: 'button',
+        innerHTML: Icons.x,
+        'aria-label': 'Закрыть',
+    });
     header.appendChild(closeBtn);
     modal.appendChild(header);
-    
-    // Body
+
     const body = createElement('div', { className: 'modal__body' });
-    
-    // Title
+    const layout = createElement('div', { className: 'card-modal__layout' });
+    const main = createElement('div', { className: 'card-modal__main' });
+    const side = createElement('div', { className: 'card-modal__side' });
+    layout.appendChild(main);
+    layout.appendChild(side);
+    body.appendChild(layout);
+
+    // ─── Название и описание ──────────────────────────────────────────────
+    let savedTitle = cardData.title;
+    let savedDesc = cardData.description || '';
+    // Срок, с которым карточка сейчас лежит в базе. Уходит обратно при каждой
+    // записи текста: бэкенд принимает дату только вместо пустой, так что
+    // заданный срок от этого не меняется, а пустой не появляется.
+    let currentDue = cardData.due_date || null;
+
     const titleGroup = createElement('div', { className: 'form-group' });
-    titleGroup.appendChild(createElement('label', { className: 'form-label' }, 'Название'));
+    titleGroup.appendChild(createElement('label', { className: 'form-label', for: 'card-edit-title' }, 'Название'));
     const titleInput = createElement('input', {
-        className: 'form-input',
+        className: 'form-input card-modal__title-input',
         value: cardData.title,
-        id: 'card-edit-title'
+        id: 'card-edit-title',
+        maxlength: '500',
     });
     titleGroup.appendChild(titleInput);
-    body.appendChild(titleGroup);
-    
-    // Description
+    main.appendChild(titleGroup);
+
     const descGroup = createElement('div', { className: 'form-group' });
-    descGroup.appendChild(createElement('label', { className: 'form-label' }, 'Описание'));
+    descGroup.appendChild(createElement('label', { className: 'form-label', for: 'card-edit-description' }, 'Описание'));
     const descInput = createElement('textarea', {
         className: 'form-textarea',
-        id: 'card-edit-description'
+        id: 'card-edit-description',
     });
-    descInput.value = cardData.description || '';
-    descInput.placeholder = 'Добавьте описание...';
+    descInput.value = savedDesc;
+    descInput.placeholder = 'Добавьте описание…';
     descGroup.appendChild(descInput);
-    body.appendChild(descGroup);
-    
-    // ─── Дедлайн ───
-    //
-    // Срок задаётся один раз. Пока его нет — поле обычное: задачу заводят
-    // раньше, чем узнают дату сдачи. Как только дата появилась, поле
-    // становится нередактируемым навсегда. То же правило продублировано в
-    // `update_card` на бэкенде — окно можно и обойти.
-    const hasDeadline = Boolean(cardData.due_date);
-    const dueGroup = createElement('div', { className: 'form-group' });
-    dueGroup.appendChild(createElement('label', { className: 'form-label' }, 'Дедлайн'));
-    const dueInput = createElement('input', {
-        className: `form-input ${hasDeadline ? 'form-input--locked' : ''}`,
-        type: 'date',
-        id: 'card-edit-due',
-        value: cardData.due_date ? cardData.due_date.split('T')[0] : ''
-    });
-    if (hasDeadline) {
-        // Именно `disabled`, а не `readonly`: у `<input type="date">` readonly
-        // не мешает открыть календарь и выбрать в нём другую дату.
-        dueInput.disabled = true;
-    }
-    dueGroup.appendChild(dueInput);
-    dueGroup.appendChild(createElement('p', { className: 'form-hint' },
-        hasDeadline
-            ? 'Дедлайн задан и больше не меняется.'
-            : 'Дедлайн задаётся один раз — после сохранения изменить его будет нельзя.'));
-    body.appendChild(dueGroup);
+    main.appendChild(descGroup);
 
-    // ─── Исполнитель / Автор / Приоритет ───
+    const saveText = () => {
+        clearTimeout(textTimer);
+        textTimer = null;
+        const title = titleInput.value.trim();
+        const desc = descInput.value;
+        if (!title) {
+            titleInput.setAttribute('aria-invalid', 'true');
+            setStatus('error', 'Название не может быть пустым');
+            return queue;
+        }
+        titleInput.removeAttribute('aria-invalid');
+        if (title === savedTitle && desc === savedDesc) return queue;
+        return persist(async () => {
+            await api.updateCard(cardData.id, title, desc, currentDue);
+            savedTitle = title;
+            savedDesc = desc;
+            cardData.title = title;
+            cardData.description = desc;
+            headerTitle.textContent = title;
+        });
+    };
+    const scheduleText = () => {
+        clearTimeout(textTimer);
+        textTimer = setTimeout(saveText, 700);
+    };
+    titleInput.addEventListener('input', scheduleText);
+    titleInput.addEventListener('blur', saveText);
+    titleInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveText(); }
+    });
+    descInput.addEventListener('input', scheduleText);
+    descInput.addEventListener('blur', saveText);
+
+    // ─── Срок ─────────────────────────────────────────────────────────────
     //
-    // The card face shows an assignee avatar, so there has to be somewhere to
-    // set one without going to the "Список" screen. Accepts both card shapes:
-    // the board sends ids, the list screen sends whole member records.
+    // Срок задаётся один раз. Пока его нет — дата и кнопка «Задать срок»:
+    // задачу заводят раньше, чем узнают дату сдачи. Как только срок задан,
+    // поле закрыто навсегда. То же правило продублировано в `update_card` на
+    // бэкенде — окно можно и обойти.
+    const dueGroup = createElement('div', { className: 'form-group card-modal__due' });
+    side.appendChild(dueGroup);
+
+    const paintDue = () => {
+        dueGroup.innerHTML = '';
+        dueGroup.appendChild(createElement('label', { className: 'form-label', for: 'card-edit-due' }, 'Срок'));
+        const dueInput = createElement('input', {
+            className: `form-input ${currentDue ? 'form-input--locked' : ''}`,
+            type: 'date',
+            id: 'card-edit-due',
+            value: currentDue ? currentDue.split('T')[0] : '',
+        });
+        if (currentDue) {
+            // Именно `disabled`, а не `readonly`: у `<input type="date">` readonly
+            // не мешает открыть календарь и выбрать в нём другую дату.
+            dueInput.disabled = true;
+            dueGroup.appendChild(dueInput);
+            dueGroup.appendChild(createElement('p', { className: 'form-hint' },
+                'Срок задан и больше не меняется — его можно только продлить попыткой.'));
+            return;
+        }
+        const row = createElement('div', { className: 'card-modal__due-row' });
+        row.appendChild(dueInput);
+        const setBtn = createElement('button', {
+            className: 'btn btn--secondary btn--sm',
+            type: 'button',
+            disabled: 'disabled',
+        }, 'Задать');
+        dueInput.addEventListener('input', () => { setBtn.disabled = !dueInput.value; });
+        setBtn.addEventListener('click', async () => {
+            const date = dueInput.value;
+            if (!date) return;
+            const label = parseDueDate(date).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+            const ok = await confirmDialog({
+                title: 'Задать срок?',
+                message: `Срок — ${label}. Он задаётся один раз: изменить его потом будет нельзя, только продлить попыткой.`,
+                confirmText: 'Задать срок',
+            });
+            if (!ok) return;
+            // Недописанный текст — сначала: иначе запись срока ушла бы со
+            // старым названием, а следом его перезаписал бы отложенный текст.
+            await saveText();
+            await persist(async () => {
+                await api.updateCard(cardData.id, savedTitle, savedDesc, date);
+                currentDue = date;
+                cardData.due_date = date;
+            });
+            paintDue();
+        });
+        row.appendChild(setBtn);
+        dueGroup.appendChild(row);
+        dueGroup.appendChild(createElement('p', { className: 'form-hint' },
+            'Срок задаётся один раз — потом его можно будет только продлить попыткой.'));
+    };
+    paintDue();
+
+    // ─── Исполнитель, автор, приоритет ────────────────────────────────────
+    //
+    // Принимает обе формы карточки: доска присылает id, «Список» — целые
+    // записи участников.
     let assigneeId = cardData.assignee ? cardData.assignee.id : (cardData.assignee_id ?? null);
     let authorId = cardData.author ? cardData.author.id : (cardData.author_id ?? null);
     let priority = cardData.priority || 'Medium';
 
-    const peopleRow = createElement('div', { className: 'card-modal__people' });
-
-    const personField = (label, getId, setId, noneLabel) => {
-        const group = createElement('div', { className: 'form-group card-modal__field' });
-        group.appendChild(createElement('label', { className: 'form-label' }, label));
-        const btn = createElement('button', { className: 'person-cell person-cell--wide', type: 'button' });
+    const personField = (label, getId, onPick, noneLabel) => {
+        const group = createElement('div', { className: 'form-group' });
+        group.appendChild(createElement('div', { className: 'form-label' }, label));
+        const btn = createElement('button', {
+            className: 'person-cell person-cell--wide',
+            type: 'button',
+            'aria-label': label,
+        });
         const paint = () => {
             btn.innerHTML = '';
             btn.appendChild(createMemberChip(findMember(getId())));
         };
         paint();
         btn.addEventListener('click', () => {
-            openMemberPicker(btn, getId(), (memberId) => { setId(memberId); paint(); },
-                { allowNone: true, noneLabel });
+            openMemberPicker(btn, getId(), (memberId) => {
+                if (memberId === getId()) return;
+                onPick(memberId);
+                paint();
+            }, { allowNone: true, noneLabel });
         });
         group.appendChild(btn);
         return group;
     };
 
-    peopleRow.appendChild(personField('Исполнитель', () => assigneeId, (v) => { assigneeId = v; }, 'Не назначен'));
-    peopleRow.appendChild(personField('Автор', () => authorId, (v) => { authorId = v; }, 'Без автора'));
+    side.appendChild(personField('Исполнитель', () => assigneeId, (id) => {
+        assigneeId = id;
+        persist(() => api.updateCardAssignee(cardData.id, id));
+    }, 'Не назначен'));
+    side.appendChild(personField('Автор', () => authorId, (id) => {
+        authorId = id;
+        persist(() => api.updateCardAuthor(cardData.id, id));
+    }, 'Без автора'));
 
-    const priorityGroup = createElement('div', { className: 'form-group card-modal__field' });
-    priorityGroup.appendChild(createElement('label', { className: 'form-label' }, 'Приоритет'));
-    const priorityBtn = createElement('button', { className: 'priority-pill', type: 'button' });
+    const priorityGroup = createElement('div', { className: 'form-group' });
+    priorityGroup.appendChild(createElement('div', { className: 'form-label' }, 'Приоритет'));
+    const priorityBtn = createElement('button', {
+        className: 'priority-pill',
+        type: 'button',
+        'aria-label': 'Приоритет',
+    });
     const paintPriority = () => {
         priorityBtn.className = `priority-pill priority-pill--${priorityModifier(priority)}`;
         priorityBtn.innerHTML = '';
@@ -1116,25 +1288,32 @@ export function showCardEditModal(cardData, options = {}) {
             item.appendChild(createElement('span', {}, p.label));
             item.addEventListener('click', () => {
                 closePopovers();
+                if (p.value === priority) return;
                 priority = p.value;
                 paintPriority();
+                persist(() => api.updateCardPriority(cardData.id, p.value));
             });
             menu.appendChild(item);
         }
         openPopover(menu, priorityBtn, { placement: 'bottom', align: 'start', gap: 4 });
     });
     priorityGroup.appendChild(priorityBtn);
-    peopleRow.appendChild(priorityGroup);
+    side.appendChild(priorityGroup);
 
-    body.appendChild(peopleRow);
+    // Метки пишутся сразу и видны на лицевой стороне карточки.
+    renderCardLabels(side, cardData.id, boardId, () => { dirty = true; });
 
     // «Повторять» — после переноса в финальную колонку появится следующая
     // задача (§36). Правило читается отдельно: в карточке, которую приносят
-    // экраны, его нет. Пока не прочитано, список выключен, и «Сохранить» его
-    // не трогает — иначе закрытое до ответа окно стёрло бы правило.
+    // экраны, его нет. Пока не прочитано, список выключен — запись по
+    // `change` и не случится.
     const recurrenceGroup = createElement('div', { className: 'form-group card-modal__recurrence' });
-    recurrenceGroup.appendChild(createElement('label', { className: 'form-label' }, 'Повторять'));
-    const recurrenceSelect = createElement('select', { className: 'form-input', disabled: 'disabled' });
+    recurrenceGroup.appendChild(createElement('label', { className: 'form-label', for: 'card-edit-recurrence' }, 'Повторять'));
+    const recurrenceSelect = createElement('select', {
+        className: 'form-input',
+        id: 'card-edit-recurrence',
+        disabled: 'disabled',
+    });
     for (const [value, label] of RECURRENCE_OPTIONS) {
         recurrenceSelect.appendChild(createElement('option', { value }, label));
     }
@@ -1142,68 +1321,96 @@ export function showCardEditModal(cardData, options = {}) {
     recurrenceGroup.appendChild(createElement('p', { className: 'form-hint' },
         'Когда задача попадёт в финальную колонку, появится следующая — с тем же названием и чек-листом ' +
         'и сроком на день, неделю или месяц позже.'));
-    body.appendChild(recurrenceGroup);
+    side.appendChild(recurrenceGroup);
 
-    let savedRecurrence;  // undefined — ещё не прочитано
     api.getCardRecurrence(cardData.id)
         .then((rule) => {
-            savedRecurrence = rule || '';
-            recurrenceSelect.value = savedRecurrence;
+            recurrenceSelect.value = rule || '';
             recurrenceSelect.disabled = false;
         })
         .catch((e) => console.error('Не удалось прочитать правило повторения:', e));
+    recurrenceSelect.addEventListener('change', () => {
+        const value = recurrenceSelect.value || null;
+        persist(() => api.setCardRecurrence(cardData.id, value));
+    });
 
-    // Пользовательские поля доски — сразу под стандартными. Доску карточки
-    // знают все экраны, кроме самой доски: «Список», палитра, планировщик и
-    // «Требуют внимания» приносят `board_id` в карточке, а `get_cards` его не
-    // отдаёт — для доски он взят при её отрисовке.
-    const customFields = renderCardFields(body, cardData.id, cardData.board_id ?? currentBoardId);
+    // Пользовательские поля доски. Пишутся по `change` — то есть по выбору
+    // варианта или по уходу из текстового поля, а не на каждую букву.
+    const customFields = renderCardFields(side, cardData.id, boardId, {
+        onChange: () => {
+            let changes;
+            try {
+                changes = customFields.changes();
+            } catch (e) {
+                setStatus('error', e.message);
+                showToast(e.message, 'error');
+                return;
+            }
+            if (!changes.length) return;
+            persist(async () => {
+                for (const { field, value } of changes) {
+                    await api.setCustomFieldValue(cardData.id, field.id, value);
+                }
+                customFields.markSaved(changes);
+            });
+        },
+    });
 
-    // Метки пишутся сразу, как чек-лист, и видны на лицевой стороне карточки.
-    renderCardLabels(body, cardData.id, cardData.board_id ?? currentBoardId, () => { checklistDirty = true; });
-
-    // Loads asynchronously; the modal is already on screen by then.
-    renderChecklist(body, cardData.id, () => { checklistDirty = true; });
-    // Зависимости, как и чек-лист, пишутся сразу и видны на лицевой стороне
-    // карточки значком звена — значит, доску после правок надо обновить.
-    renderDependencies(body, cardData, {
+    // Чек-лист, связи, время и комментарии пишутся сами. Чек-лист и связи
+    // видны на лицевой стороне карточки («2 из 5», значок звена) — после них
+    // доску нужно обновить.
+    renderChecklist(main, cardData.id, () => { dirty = true; });
+    renderDependencies(main, cardData, {
         workspaceId,
-        onChange: () => { checklistDirty = true; },
+        onChange: () => { dirty = true; },
         // Открытие связанной карточки приходит отсюда, а не изнутри модуля
         // зависимостей: тот не импортирует `board.js`, иначе вышло бы кольцо.
         // Карточку он передаёт уже прочитанной целиком.
         onOpenCard: (linked) => showCardEditModal(linked, { onChange: () => {}, workspaceId }),
     });
-    // Время, вписанное руками, пишется сразу. Лицевая сторона карточки его не
-    // показывает, поэтому доску после этого обновлять не нужно.
-    renderTimeLog(body, cardData.id);
-    // Комментарии сохраняются сразу, поэтому окно про них ничего не помнит и
-    // обновлять доску из-за них не нужно: на лицевой стороне карточки их нет.
-    renderComments(body, cardData.id);
+    renderTimeLog(main, cardData.id);
+    renderComments(main, cardData.id);
 
     modal.appendChild(body);
-    
-    // Footer
+
+    // ─── Закрытие ─────────────────────────────────────────────────────────
+    let closing = false;
+    const dismiss = async () => {
+        if (closing) return;
+        closing = true;
+        // Недописанное — досохранить, а не потерять.
+        if (textTimer) saveText();
+        await queue;
+        overlay.remove();
+        if (returnFocus && returnFocus.isConnected) returnFocus.focus();
+        if (dirty) onChange();
+    };
+    closeBtn.addEventListener('click', dismiss);
+
+    // ─── Низ ──────────────────────────────────────────────────────────────
     const footer = createElement('div', { className: 'modal__footer' });
-    
+
     const archiveBtn = createElement('button', {
         className: 'btn btn--danger',
-        innerHTML: `${Icons.archive} Архивировать`
+        type: 'button',
+        innerHTML: `${Icons.archive} Архивировать`,
     });
     archiveBtn.addEventListener('click', async () => {
         const ok = await confirmDialog({
             title: 'Архивировать карточку?',
-            message: `Карточка «${cardData.title}» пропадёт с доски. Вернуть её можно через «Архив доски».`,
+            message: `Карточка «${savedTitle}» пропадёт с доски. Вернуть её можно через «Архив доски».`,
             confirmText: 'Архивировать',
             danger: true,
         });
         if (!ok) return;
-
+        if (textTimer) saveText();
+        await queue;
         try {
             await api.archiveCard(cardData.id);
             // Архивация останавливает таймер карточки на бэкенде — шапка должна
             // узнать об этом сейчас, а не через полминуты сверки.
             refreshTimer();
+            closing = true;
             overlay.remove();
             onChange();
             showToast('Карточка архивирована');
@@ -1212,57 +1419,14 @@ export function showCardEditModal(cardData, options = {}) {
         }
     });
     footer.appendChild(archiveBtn);
-    
-    const saveBtn = createElement('button', {
-        className: 'btn btn--primary'
-    }, 'Сохранить');
-    saveBtn.addEventListener('click', async () => {
-        const title = titleInput.value.trim();
-        if (!title) return;
-        // Заданный срок уходит обратно как есть: поле выключено, менять
-        // нечего, а бэкенд всё равно принимает дату только вместо пустой.
-        const dueDate = hasDeadline ? cardData.due_date : (dueInput.value || null);
-        // Поля проверяются до первой записи: иначе карточка сохранилась бы
-        // наполовину — название уже в базе, а поле с ошибкой нет.
-        let fieldChanges;
-        try {
-            fieldChanges = customFields.changes();
-        } catch (e) {
-            showToast(e.message, 'error');
-            return;
-        }
-        try {
-            await api.updateCard(cardData.id, title, descInput.value, dueDate);
 
-            // Only what actually changed is written — each of these is its own
-            // command, and a no-op UPDATE is still a write.
-            const wasAssignee = cardData.assignee ? cardData.assignee.id : (cardData.assignee_id ?? null);
-            const wasAuthor = cardData.author ? cardData.author.id : (cardData.author_id ?? null);
-            if (assigneeId !== wasAssignee) await api.updateCardAssignee(cardData.id, assigneeId);
-            if (authorId !== wasAuthor) await api.updateCardAuthor(cardData.id, authorId);
-            if (priority !== (cardData.priority || 'Medium')) await api.updateCardPriority(cardData.id, priority);
-            if (savedRecurrence !== undefined && recurrenceSelect.value !== savedRecurrence) {
-                await api.setCardRecurrence(cardData.id, recurrenceSelect.value || null);
-            }
-            for (const { field, value } of fieldChanges) {
-                await api.setCustomFieldValue(cardData.id, field.id, value);
-            }
+    const doneBtn = createElement('button', { className: 'btn btn--primary', type: 'button' }, 'Готово');
+    doneBtn.addEventListener('click', dismiss);
+    footer.appendChild(doneBtn);
 
-            overlay.remove();
-            onChange();
-            showToast('Карточка обновлена');
-        } catch (e) {
-            // Отказ по значению поля («Такого варианта у поля нет») приходит с
-            // бэкенда строкой и объясняет, что не так, — его и показываем.
-            showToast(typeof e === 'string' ? e : 'Не удалось сохранить карточку', 'error');
-        }
-    });
-    footer.appendChild(saveBtn);
-    
     modal.appendChild(footer);
     overlay.appendChild(modal);
 
-    // Close on overlay click
     overlay.addEventListener('click', (e) => {
         if (e.target === overlay) dismiss();
     });

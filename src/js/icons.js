@@ -9,9 +9,9 @@ const Icons = {
     logo: `<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
         <defs>
             <linearGradient id="tf-logo-fill" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
-                <stop offset="0" stop-color="#7C6BFF"/>
-                <stop offset="0.55" stop-color="#8E5CFF"/>
-                <stop offset="1" stop-color="#B45CFF"/>
+                <stop offset="0" stop-color="#4D7CFF"/>
+                <stop offset="0.55" stop-color="#3366FF"/>
+                <stop offset="1" stop-color="#2149D6"/>
             </linearGradient>
             <linearGradient id="tf-logo-sheen" x1="6" y1="2" x2="20" y2="18" gradientUnits="userSpaceOnUse">
                 <stop offset="0" stop-color="#fff" stop-opacity="0.28"/>
@@ -195,6 +195,18 @@ const Icons = {
 
     chevronDown: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="m6 9 6 6 6-6"/>
+    </svg>`,
+
+    // Свернуть / развернуть сайдбар.
+    panelLeft: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2"/>
+        <path d="M9 3v18"/>
+    </svg>`,
+
+    // Высокий приоритет на лицевой стороне карточки: форма вместо цвета.
+    chevronsUp: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m17 11-5-5-5 5"/>
+        <path d="m17 18-5-5-5 5"/>
     </svg>`,
 
     // Ticked box — the checklist counter on a card face.

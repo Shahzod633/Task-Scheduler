@@ -12,7 +12,7 @@ import Icons from './icons.js';
 import { showCardEditModal } from './board.js';
 import { confirmDialog } from './dialog.js';
 import { renderBarChart, renderLineChart } from './charts.js';
-import { createElement, $, showToast, formatDate, lastNDays, parseTimestamp, toDateKey } from './utils.js';
+import { createElement, $, showToast, formatDate, lastNDays, parseTimestamp, toDateKey, formatDecimal, formatShortDay } from './utils.js';
 
 /// Столько раз можно попросить ещё одну попытку. То же число — в
 /// `commands::RETRY_LIMIT`; бэкенд проверяет его сам, здесь оно только решает,
@@ -85,7 +85,7 @@ function renderStats(container, cards) {
         ['Всего ошибок', String(total)],
         ['Открыто', String(open)],
         ['Исправлено', String(resolved)],
-        ['Среднее время исправления', avgDays === null ? '—' : `${avgDays.toFixed(1)} дн.`],
+        ['Среднее время исправления', avgDays === null ? '—' : `${formatDecimal(avgDays)} дн.`],
     ];
     for (const [label, value] of tiles) {
         const tile = createElement('div', { className: 'mistake-stat-tile' });
@@ -97,7 +97,7 @@ function renderStats(container, cards) {
 
 function renderCharts(barCanvas, lineCanvas, cards) {
     const days = lastNDays(30);
-    const labels = days.map(d => d.slice(5));
+    const labels = days.map(formatShortDay);
 
     // Отметки в базе — в UTC, а столбцы графика подписаны местными датами.
     // Резать строку через .slice(0, 10) нельзя: событие, случившееся вечером,
@@ -160,7 +160,7 @@ function renderList(container, cards, workspaceId) {
             'data-tooltip': retries >= RETRY_LIMIT
                 ? 'Попытки исчерпаны: при следующей просрочке задача уйдёт в архив'
                 : 'Потрачено попыток продления срока'
-        }, `${retries} из ${RETRY_LIMIT}`);
+        }, `${retries} из ${RETRY_LIMIT} попыток`);
         row.appendChild(attempts);
 
         if (retries < RETRY_LIMIT) {

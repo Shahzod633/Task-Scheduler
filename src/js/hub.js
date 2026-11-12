@@ -81,9 +81,10 @@ export async function renderHub(workspaceId) {
 function createWorkspaceHeader(workspace) {
     const header = createElement('div', { className: 'hub__workspace-header' });
     
+    // Заливка — в CSS (`--accent-fill`): на градиенте обложки белая буква
+    // давала 3,6:1.
     const icon = createElement('div', {
-        className: 'hub__workspace-icon',
-        style: { background: 'var(--gradient-1)' }
+        className: 'hub__workspace-icon'
     }, workspace.name.charAt(0).toUpperCase());
     header.appendChild(icon);
     
@@ -519,22 +520,6 @@ async function importBoardFromDisk(workspaceId) {
         console.error('Board import failed:', e);
         // Backend errors are already user-readable ("Файл не похож на экспорт…").
         showToast(typeof e === 'string' ? e : 'Не удалось импортировать доску', 'error');
-    }
-}
-
-/**
- * Filter boards by search query
- */
-export function filterBoards(query) {
-    const cards = $$('.hub__board-card');
-    const lowerQuery = query.toLowerCase();
-    
-    for (const card of cards) {
-        const name = $('.hub__board-name', card);
-        if (name) {
-            const matches = name.textContent.toLowerCase().includes(lowerQuery);
-            card.style.display = matches ? '' : 'none';
-        }
     }
 }
 

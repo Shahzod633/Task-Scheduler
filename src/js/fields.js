@@ -392,11 +392,12 @@ function openCreateForm(container, boardId, onDone) {
  * @param {number} cardId
  * @param {number|null} boardId - доска карточки; без неё полей не показать
  */
-export function renderCardFields(container, cardId, boardId) {
+export function renderCardFields(container, cardId, boardId, { onChange } = {}) {
     const wrap = createElement('div', { className: 'card-fields' });
     container.appendChild(wrap);
 
-    // Какие вводы нарисованы и что в них было при открытии окна.
+    // Какие вводы нарисованы и что в них было при открытии окна (или при
+    // последней записи — см. `markSaved`).
     const inputs = [];
 
     if (boardId) {
@@ -407,6 +408,9 @@ export function renderCardFields(container, cardId, boardId) {
                     const initial = current ? current.value : '';
                     const input = createFieldInput(field, initial);
                     inputs.push({ field, input, initial });
+                    // `change`, а не `input`: окно карточки пишет поля сразу,
+                    // и запись на каждую букву числа или даты была бы лишней.
+                    if (onChange) input.addEventListener('change', onChange);
 
                     const group = createElement('label', { className: 'form-group card-fields__field' });
                     group.appendChild(createElement('span', { className: 'form-label' }, field.name));
@@ -434,6 +438,14 @@ export function renderCardFields(container, cardId, boardId) {
                 if (value !== initial) result.push({ field, value: value || null });
             }
             return result;
+        },
+
+        /** Записанные значения становятся исходными — следующий `changes()` их не вернёт. */
+        markSaved(saved) {
+            for (const { field, value } of saved) {
+                const entry = inputs.find(e => e.field.id === field.id);
+                if (entry) entry.initial = value || '';
+            }
         },
     };
 }

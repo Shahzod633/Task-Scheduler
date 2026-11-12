@@ -12,7 +12,7 @@ import * as api from './api.js';
 import Icons from './icons.js';
 import { openPopover, closePopovers } from './popover.js';
 import { confirmDialog } from './dialog.js';
-import { createElement, $, showToast, pluralize } from './utils.js';
+import { createElement, $, showToast, pluralize, textColorOn } from './utils.js';
 
 /** Palette offered when recolouring a member — mirrors MEMBER_COLORS in Rust. */
 const MEMBER_COLORS = [
@@ -66,7 +66,9 @@ export function createAvatar(member, opts = {}) {
 
     return createElement('div', {
         className: `member-avatar member-avatar--${size}`,
-        style: { background: member.color },
+        // Инициалы — тёмные или белые, смотря что читается на цвете участника:
+        // белые на янтарном давали 2,2:1, на изумрудном — 2,5:1.
+        style: { background: member.color, color: textColorOn(member.color) },
         ...(tooltip ? { 'data-tooltip': member.name } : {}),
     }, member.initials || '?');
 }

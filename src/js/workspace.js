@@ -19,15 +19,17 @@ export async function renderWorkspaceSidebar(workspaceId, isExpanded = true) {
     for (const ws of workspaces) {
         const wsBlock = createElement('div', { className: 'sidebar__workspace' });
         
-        // Workspace header
-        const header = createElement('div', {
+        // Шапка пространства и пункты под ней — кнопки (до них доходит Tab);
+        // `railLabel` — подсказка, когда сайдбар свёрнут до иконок (sidebar.js).
+        const header = createElement('button', {
             className: 'sidebar__workspace-header',
-            dataset: { workspaceId: ws.id }
+            type: 'button',
+            dataset: { workspaceId: ws.id, railLabel: ws.name }
         });
         
+        // Заливка — в CSS (`--accent-fill`), как у значка на экране «Доски».
         const icon = createElement('div', {
-            className: 'sidebar__workspace-icon',
-            style: { background: 'var(--gradient-1)' }
+            className: 'sidebar__workspace-icon'
         }, ws.name.charAt(0).toUpperCase());
         header.appendChild(icon);
         
@@ -48,8 +50,9 @@ export async function renderWorkspaceSidebar(workspaceId, isExpanded = true) {
         });
         
         // Boards
-        const boardsItem = createElement('div', {
-            className: `sidebar__item ${ws.id === workspaceId ? 'sidebar__item--active' : ''}`
+        const boardsItem = createElement('button', {
+            className: `sidebar__item ${ws.id === workspaceId ? 'sidebar__item--active' : ''}`,
+            type: 'button'
         });
         boardsItem.appendChild(createElement('span', { className: 'sidebar__item-icon', innerHTML: Icons.boards }));
         boardsItem.appendChild(createElement('span', { className: 'sidebar__item-text' }, 'Доски'));
@@ -61,7 +64,7 @@ export async function renderWorkspaceSidebar(workspaceId, isExpanded = true) {
         // Members — the local directory of names used on cards. Until now this
         // row and its "+" were decoration: neither had a click handler, so the
         // screen behind them could never be reached.
-        const membersItem = createElement('div', { className: 'sidebar__item' });
+        const membersItem = createElement('button', { className: 'sidebar__item', type: 'button' });
         membersItem.appendChild(createElement('span', { className: 'sidebar__item-icon', innerHTML: Icons.users }));
         membersItem.appendChild(createElement('span', { className: 'sidebar__item-text' }, 'Участники'));
         const addMemberBtn = createElement('span', {
@@ -76,7 +79,7 @@ export async function renderWorkspaceSidebar(workspaceId, isExpanded = true) {
         menu.appendChild(membersItem);
 
         // Settings
-        const settingsItem = createElement('div', { className: 'sidebar__item' });
+        const settingsItem = createElement('button', { className: 'sidebar__item', type: 'button' });
         settingsItem.appendChild(createElement('span', { className: 'sidebar__item-icon', innerHTML: Icons.settings }));
         settingsItem.appendChild(createElement('span', { className: 'sidebar__item-text' }, 'Настройки'));
         settingsItem.addEventListener('click', () => {
