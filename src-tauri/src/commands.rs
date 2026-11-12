@@ -5847,9 +5847,26 @@ const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри п
 
 Новая карточка всегда создаётся в первой рабочей колонке доски (не в финальной).
 
-В начале разговора (когда в истории ещё нет ни одной реплики) начни с краткой сводки продуктивности \
-за неделю, используя get_productivity_report. Не перечисляй все числа — выдели 2-3 ключевых, особенно \
-если есть просроченные задачи или задачи в «Требуют внимания».
+ВАЖНО: задача создаётся или меняется ТОЛЬКО вызовом инструмента (create_card, move_card и другие). \
+Никогда не пиши «создал», «добавил», «перенёс», «готово», пока не вызвал инструмент и не получил его результат. \
+Если доска и название известны — сразу вызывай create_card, не переспрашивай про необязательное. \
+Если доска в пространстве одна — бери её, не спрашивая. \
+Если чего-то не хватает — задай вопрос, а не делай вид, что задача создана.
+
+Срок (due_date) ставь ТОЛЬКО если пользователь сам его назвал. Не назвал — due_date не передавай вовсе: \
+срок в этом приложении задаётся один раз и потом не меняется, придуманный срок не исправить.
+Названный относительно срок («завтра», «в пятницу», «через неделю») переводи в due_date вида ГГГГ-ММ-ДД по \
+датам, указанным ниже, и не оставляй такие слова в названии задачи: «позвонить маме завтра» — это задача \
+«Позвонить маме» со сроком на завтрашнее число.
+
+Отвечая после изменения, называй доску, колонку и срок так, как их вернул инструмент (поле what_was_done), \
+а не по памяти.
+
+board_id, card_id и другие номера — служебные, для вызова инструментов. Пользователю их не называй: \
+доски и задачи называй по имени.
+
+Сводку продуктивности давай только тогда, когда о ней спрашивают, и только по данным \
+get_productivity_report. Никогда не придумывай числа: нет данных инструмента — нет цифр.
 
 Ты можешь давать рекомендации:
 - Если много просроченных — предложи пересмотреть приоритеты
@@ -6038,9 +6055,40 @@ pub fn clear_chat_history(
         .map_err(to_string_err)
 }
 
+/// Сколько досок перечислять в системном промпте. Дальше — только число и
+/// отсылка к `get_boards`: сотня досок съела бы окно контекста локальной модели.
+const AI_PROMPT_MAX_BOARDS: usize = 30;
+
+/// Строка промпта со списком досок пространства и их `board_id`.
+///
+/// Без неё модель, услышав «на доске Shady's tasks», подставляла номер наугад
+/// (проверено живьём 12.11: board_id 3 вместо 1) вместо того, чтобы сначала
+/// вызвать `get_boards`, а на просьбу «предложи доску» печатала заглушку
+/// «[список досок из get_boards]».
+fn prompt_boards_line(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<String> {
+    let boards = boards_in(conn, workspace_id)?;
+    if boards.is_empty() {
+        return Ok("Досок в пространстве пока нет — создать задачу некуда.".to_string());
+    }
+    let listed: Vec<String> = boards
+        .iter()
+        .take(AI_PROMPT_MAX_BOARDS)
+        .map(|b| format!("«{}» (board_id {})", b.name, b.id))
+        .collect();
+    let mut line = format!("Доски пространства: {}.", listed.join(", "));
+    if boards.len() > AI_PROMPT_MAX_BOARDS {
+        line.push_str(&format!(
+            " И ещё {} — полный список даёт get_boards.",
+            boards.len() - AI_PROMPT_MAX_BOARDS
+        ));
+    }
+    line.push_str(" Бери board_id только отсюда или из get_boards, не угадывай.");
+    Ok(line)
+}
+
 /// Системный промпт целиком: постоянная часть плюс то, чего модель знать не
-/// может, — сегодняшняя дата (без неё «до 5 октября» не перевести в диапазон)
-/// и название пространства.
+/// может, — сегодняшняя дата (без неё «до 5 октября» не перевести в диапазон),
+/// название пространства и его доски с номерами.
 fn system_prompt(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<String> {
     const WEEKDAYS: [&str; 7] = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
     let (today, weekday): (String, i64) = conn
@@ -6055,12 +6103,34 @@ fn system_prompt(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<St
         .optional()
         .map_err(to_string_err)?
         .ok_or_else(|| "Пространство не найдено".to_string())?;
+    // Ближайшие семь дней — готовыми датами. Считать самой модель ошибалась:
+    // живой прогон 12.11 перевёл «завтра» при сегодняшнем 12-м в 14-е. И
+    // слова «послезавтра» в списке нет намеренно: в нём есть «завтра», и
+    // модель цеплялась за дату после него — тоже 14-е.
+    let mut days = Vec::with_capacity(7);
+    for offset in 1..=7 {
+        let (date, wd): (String, i64) = conn
+            .query_row(
+                "SELECT date('now', 'localtime', ?1), CAST(strftime('%w', 'now', 'localtime', ?1) AS INTEGER)",
+                params![format!("+{} days", offset)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(to_string_err)?;
+        days.push((WEEKDAYS[wd.rem_euclid(7) as usize], date));
+    }
+    let (tomorrow_name, tomorrow) = &days[0];
+    let week: Vec<String> = days[1..].iter().map(|(name, date)| format!("{} {}", name, date)).collect();
     Ok(format!(
-        "{}\n\nСегодня {}, {}. Текущее пространство — «{}»; инструменты видят только его.",
+        "{}\n\nСегодня {}, {}. «Завтра» — это {} ({}). Следующие дни: {}. \
+         Текущее пространство — «{}»; инструменты видят только его.\n{}",
         AI_SYSTEM_PROMPT,
         today,
         WEEKDAYS[weekday.rem_euclid(7) as usize],
+        tomorrow,
+        tomorrow_name,
+        week.join(", "),
         workspace,
+        prompt_boards_line(conn, workspace_id)?,
     ))
 }
 
@@ -6148,11 +6218,16 @@ struct Turn {
     /// Сколько раз уже спросили модель — предел `MAX_TOOL_ROUNDS` на весь ход,
     /// включая паузы.
     rounds: usize,
+    /// Модели уже напомнили, что она заявила об изменении без инструмента, —
+    /// второй раз за ход не напоминаем.
+    nudged: bool,
+    /// Модель уже просили повторить ответ по-русски.
+    language_retried: bool,
 }
 
 impl Turn {
     fn new(user_text: String, messages: Vec<crate::ollama::Message>) -> Self {
-        Turn { user_text, messages, queue: Default::default(), tools_used: Vec::new(), actions: Vec::new(), rounds: 0 }
+        Turn { user_text, messages, queue: Default::default(), tools_used: Vec::new(), actions: Vec::new(), rounds: 0, nudged: false, language_retried: false }
     }
 
     fn executed_anything(&self) -> bool {
@@ -6179,6 +6254,25 @@ enum TurnStep {
     Confirm(ai_tools::Prepared),
 }
 
+/// Две последние реплики человека — текущая и предыдущая. Вторая нужна для
+/// уточнений: на вопрос ассистента «На какой доске?» отвечают просто
+/// «Учёба», и сама просьба («создай задачу … к пятнице») остаётся репликой
+/// раньше.
+fn recent_user_texts(messages: &[crate::ollama::Message]) -> Vec<&str> {
+    messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == "user")
+        .take(2)
+        .map(|m| m.content.as_str())
+        .collect()
+}
+
+/// Просил ли человек изменение — в текущей реплике или в предыдущей.
+fn change_requested(messages: &[crate::ollama::Message]) -> bool {
+    recent_user_texts(messages).into_iter().any(ai_tools::requests_change)
+}
+
 /// Ведёт ход, пока модель не ответит текстом или не попросит изменение.
 ///
 /// `step_tool` решает судьбу каждого вызова: читающий выполняет сразу,
@@ -6191,7 +6285,19 @@ where
     let tools = ai_tools::definitions();
     loop {
         while let Some(call) = turn.queue.pop_front() {
-            match step_tool(&call.function.name, &call.function.arguments)? {
+            // Срок, которого человек не называл, убирается ещё до превью.
+            let args = match ai_tools::drop_unasked_due_date(
+                &call.function.name,
+                &call.function.arguments,
+                &recent_user_texts(&turn.messages),
+            ) {
+                Some(cleaned) => {
+                    log::info!("ассистент: срок, о котором не просили, убран из {}", call.function.name);
+                    cleaned
+                }
+                None => call.function.arguments.clone(),
+            };
+            match step_tool(&call.function.name, &args)? {
                 ai_tools::ToolStep::Result(result) => {
                     log::info!("ассистент: инструмент {} → {} байт", call.function.name, result.len());
                     turn.messages.push(crate::ollama::Message::tool_result(&call.function.name, result));
@@ -6212,8 +6318,49 @@ where
             })
             .await?
         };
+        let mut reply = reply;
         if reply.tool_calls.is_empty() {
-            return Ok(TurnStep::Answer(reply.content));
+            // Вызов, написанный текстом, — всё равно вызов.
+            if let Some(call) = ai_tools::salvage_tool_call(&reply.content) {
+                log::info!("ассистент: вызов {} пришёл текстом — разобран", call.function.name);
+                reply.content.clear();
+                reply.tool_calls.push(call);
+            }
+        }
+        if reply.tool_calls.is_empty() {
+            let can_retry = turn.rounds < ai_tools::MAX_TOOL_ROUNDS;
+            // Ответ не по-русски (иероглифы, английский) — один раз просим
+            // повторить, потом обрезаем иероглифический хвост. Раньше проверки
+            // «сделал ли»: повторный ответ может оказаться и вызовом инструмента.
+            if ai_tools::needs_language_retry(&reply.content) {
+                if !turn.language_retried && can_retry {
+                    log::warn!("ассистент: в ответе текст не на русском — прошу повторить");
+                    turn.language_retried = true;
+                    turn.messages.push(reply);
+                    turn.messages.push(crate::ollama::Message::new("system", ai_tools::NUDGE_LANGUAGE));
+                    continue;
+                }
+                reply.content = ai_tools::cut_foreign_tail(&reply.content);
+            }
+            // «Создал», хотя человек просил изменение, а в этом ходе ничего
+            // не выполнено, — модель выдумала. Без просьбы об изменении
+            // проверка не включается: «вы создали 4 задачи» в сводке — это
+            // данные, а не выдумка.
+            if !turn.executed_anything()
+                && change_requested(&turn.messages)
+                && ai_tools::claims_change(&reply.content)
+            {
+                if !turn.nudged && can_retry {
+                    log::warn!("ассистент: заявлено изменение без вызова инструмента — напоминание");
+                    turn.nudged = true;
+                    turn.messages.push(reply);
+                    turn.messages.push(crate::ollama::Message::new("system", ai_tools::NUDGE_NO_TOOL));
+                    continue;
+                }
+                log::warn!("ассистент: изменение заявлено, но не выполнено — ответ помечен");
+                reply.content = format!("{}{}", reply.content, ai_tools::NOTE_NOTHING_CHANGED);
+            }
+            return Ok(TurnStep::Answer(ai_tools::strip_service_ids(&reply.content)));
         }
         turn.queue.extend(reply.tool_calls.iter().cloned());
         turn.messages.push(reply);
@@ -6425,6 +6572,31 @@ fn save_assistant_message(
     .map_err(to_string_err)
 }
 
+/// Текст приветствия: один запрос к модели без инструментов.
+///
+/// Приветствие с иероглифами (было живьём 12.11: «Как я могу помочь
+/// вам今天完成了…») — один повтор с просьбой писать по-русски, затем обрезка
+/// чужого хвоста, как в обычном ответе. Вынесено из команды, чтобы живой тест
+/// гонял тот же путь.
+async fn greeting_text(settings: &AiSettings, request: Vec<crate::ollama::Message>) -> CmdResult<String> {
+    let ask = |messages: Vec<crate::ollama::Message>| {
+        let settings = settings.clone();
+        run_blocking(move || {
+            crate::ollama::chat(&settings.ollama_url, &settings.model, &messages, &[], settings.timeout_seconds)
+        })
+    };
+    let first = ask(request.clone()).await?;
+    if !ai_tools::needs_language_retry(&first.content) {
+        return Ok(ai_tools::strip_service_ids(&first.content));
+    }
+    log::warn!("ассистент: приветствие не на русском — прошу повторить");
+    let mut retry = request;
+    retry.push(first.clone());
+    retry.push(crate::ollama::Message::new("system", ai_tools::NUDGE_LANGUAGE));
+    let second = ask(retry).await.map(|m| m.content).unwrap_or(first.content);
+    Ok(ai_tools::strip_service_ids(&ai_tools::cut_foreign_tail(&second)))
+}
+
 /// Приветствие со сводкой за неделю — только для **пустой** истории: у
 /// начатого разговора есть что продолжать и без него. Возвращает записанную
 /// реплику или `None`, если история уже не пуста или ждёт подтверждение.
@@ -6450,11 +6622,7 @@ pub async fn ollama_greeting(workspace_id: i64, app: tauri::AppHandle) -> CmdRes
     };
     let (settings, request) = prepared;
 
-    let text = run_blocking(move || {
-        crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &[], settings.timeout_seconds)
-    })
-    .await?
-    .content;
+    let text = greeting_text(&settings, request).await?;
 
     let state = app.state::<DbState>();
     let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;

@@ -144,6 +144,233 @@ pub(super) fn is_write_tool(name: &str) -> bool {
     WRITE_TOOLS.contains(&name)
 }
 
+// ─── Защита от «сказал, что сделал, а не сделал» ───
+//
+// Маленькие локальные модели дважды ошибаются одинаково: либо пишут вызов
+// инструмента текстом (JSON в ответе вместо `tool_calls`), либо вовсе
+// отвечают «Задача создана», ничего не вызвав. В обоих случаях человек видел
+// уверенный ответ, а в базе ничего не менялось.
+
+/// Вызов инструмента, который модель написала **текстом**. Узнаётся только
+/// целый ответ-объект с известным именем инструмента — фраза, в которой JSON
+/// лишь упомянут, вызовом не считается.
+pub(super) fn salvage_tool_call(content: &str) -> Option<crate::ollama::ToolCall> {
+    let mut text = content.trim();
+    for (open, close) in [("<tool_call>", "</tool_call>"), ("```json", "```"), ("```", "```")] {
+        if let Some(rest) = text.strip_prefix(open) {
+            let rest = rest.trim();
+            text = rest.strip_suffix(close).unwrap_or(rest).trim();
+        }
+    }
+    let value: Value = serde_json::from_str(text).ok()?;
+    let name = value.get("name")?.as_str()?;
+    if !tool_names().iter().any(|n| n == name) {
+        return None;
+    }
+    let arguments = value
+        .get("arguments")
+        .or_else(|| value.get("parameters"))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !arguments.is_object() {
+        return None;
+    }
+    Some(crate::ollama::ToolCall {
+        function: crate::ollama::FunctionCall { name: name.to_string(), arguments },
+    })
+}
+
+fn lowercase_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Просил ли человек что-то изменить. Проверка «сказал, что сделал» имеет
+/// смысл только тогда: в ответе на «как у меня дела за месяц» слова «вы
+/// создали 4 задачи» — это сводка, а не выдуманное действие (живой прогон
+/// 12.11 повесил на такой ответ предупреждение).
+pub(super) fn requests_change(text: &str) -> bool {
+    const IMPERATIVES: [&str; 18] = [
+        "создай", "добавь", "заведи", "запиши", "внеси", "перенеси", "перемести", "передвинь",
+        "измени", "поменяй", "смени", "поставь", "назначь", "запусти", "останови", "отметь",
+        "закрой", "переименуй",
+    ];
+    lowercase_words(text)
+        .iter()
+        .any(|w| IMPERATIVES.iter().any(|imp| w.starts_with(imp)))
+}
+
+/// Есть ли в тексте хоть какой-то признак даты: цифра, день недели, месяц,
+/// «сегодня / завтра / через / неделя», «срок», «дедлайн». Сомнение
+/// трактуется в пользу «есть»: лишняя цифра лишь оставит срок, предложенный
+/// моделью, а он всё равно проходит через окно подтверждения.
+pub(super) fn mentions_date(text: &str) -> bool {
+    const STEMS: [&str; 27] = [
+        "сегодн", "завтр", "послезавтр", "понедельн", "вторник", "среду", "среда", "среды",
+        "четверг", "пятниц", "суббот", "воскресен", "недел", "месяц", "январ", "феврал",
+        "март", "апрел", "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр",
+        "срок", "дедлайн",
+    ];
+    const WORDS: [&str; 5] = ["май", "мая", "мае", "через", "до"];
+    text.chars().any(|c| c.is_ascii_digit())
+        || lowercase_words(text)
+            .iter()
+            .any(|w| STEMS.iter().any(|s| w.starts_with(s)) || WORDS.contains(&w.as_str()))
+}
+
+/// Срок, о котором человек не говорил, из предложенного `create_card`
+/// убирается — до превью, так что в окне подтверждения его уже нет.
+///
+/// Живой прогон 12.11: на «Создай задачу Сделать презентацию на доске …»
+/// модель сама поставила срок через неделю. Срок в TaskFlow задаётся один
+/// раз и потом не правится (§20.2) — выдуманный исправить было бы нельзя.
+/// `user_texts` — последние реплики человека: срок мог прозвучать в ответе на
+/// уточняющий вопрос.
+pub(super) fn drop_unasked_due_date(tool: &str, args: &Value, user_texts: &[&str]) -> Option<Value> {
+    if tool != "create_card" || args.get("due_date").map_or(true, Value::is_null) {
+        return None;
+    }
+    if user_texts.iter().any(|t| mentions_date(t)) {
+        return None;
+    }
+    let mut cleaned = args.clone();
+    cleaned.as_object_mut()?.remove("due_date");
+    Some(cleaned)
+}
+
+/// Утверждает ли ответ, что изменение **уже сделано**. Ловятся формы
+/// прошедшего времени («создал», «создана», «перенёс»); не ловятся:
+/// - «создать», «создам» и отрицание («не создана»);
+/// - множественное число на «-ли» («вы создали», «перенесли») — так модель
+///   пересказывает действия человека, а о своих говорит в единственном;
+/// - пересказ данных: «было создано», «была создана 5 сентября», «создано 4».
+pub(super) fn claims_change(content: &str) -> bool {
+    const STEMS: [&str; 22] = [
+        "создал", "создан", "добавил", "добавлен", "перенёс", "перенес", "перемещ",
+        "переместил", "изменил", "изменён", "изменен", "обновил", "обновлён", "обновлен",
+        "назначил", "назначен", "установил", "установлен", "запустил", "запущен",
+        "остановил", "остановлен",
+    ];
+    const DESCRIPTIVE_BEFORE: [&str; 5] = ["не", "было", "была", "был", "были"];
+    let words = lowercase_words(content);
+    words.iter().enumerate().any(|(i, w)| {
+        if !STEMS.iter().any(|stem| w.starts_with(stem)) || w.ends_with("ли") {
+            return false;
+        }
+        let before = i.checked_sub(1).map(|j| words[j].as_str());
+        let after = words.get(i + 1).map(String::as_str);
+        let descriptive = before.is_some_and(|b| DESCRIPTIVE_BEFORE.contains(&b))
+            || after.is_some_and(|a| a.chars().all(|c| c.is_ascii_digit()));
+        !descriptive
+    })
+}
+
+/// Есть ли в тексте иероглифы, кана или хангыль. qwen2.5 иногда посреди
+/// русской фразы переходит на китайский (живой прогон 12.11: приветствие
+/// оборвалось на «Как я могу помочь вам今天完成了…»).
+pub(super) fn has_foreign_script(text: &str) -> bool {
+    text.chars().any(is_foreign_script)
+}
+
+fn is_foreign_script(c: char) -> bool {
+    matches!(c as u32,
+        0x3000..=0x303F     // знаки препинания CJK
+        | 0x3040..=0x30FF   // кана
+        | 0x3400..=0x4DBF   // иероглифы, расширение A
+        | 0x4E00..=0x9FFF   // иероглифы
+        | 0xAC00..=0xD7AF   // хангыль
+        | 0xF900..=0xFAFF   // совместимые иероглифы
+        | 0xFF00..=0xFFEF)  // полноширинные формы («，», «？»)
+}
+
+/// Ответ в основном латиницей — модель ушла в английский (живой прогон
+/// 12.11: «Sure, where would you like to add this task?»). Латиница внутри
+/// русского ответа — названия досок вроде «Shady's tasks» — не в счёт: пока
+/// кириллицы хотя бы треть букв, ответ русский.
+pub(super) fn mostly_latin(text: &str) -> bool {
+    let (mut latin, mut cyrillic) = (0usize, 0usize);
+    for c in text.chars() {
+        if c.is_ascii_alphabetic() {
+            latin += 1;
+        } else if ('\u{0400}'..='\u{04FF}').contains(&c) {
+            cyrillic += 1;
+        }
+    }
+    latin >= 20 && cyrillic * 2 < latin
+}
+
+/// Нужно ли попросить повторить ответ по-русски.
+pub(super) fn needs_language_retry(text: &str) -> bool {
+    has_foreign_script(text) || mostly_latin(text)
+}
+
+/// Убирает из ответа служебные номера в скобках — «Учёба (board_id 3)»,
+/// «(id 12)». Модель повторяла их за списком досок в промпте, хотя просьба
+/// их не называть там же; надёжнее вычистить, чем уговаривать.
+pub(super) fn strip_service_ids(text: &str) -> String {
+    const KEYS: [&str; 6] = ["board_id", "card_id", "column_id", "member_id", "item_id", "id"];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('(') {
+        let after = &rest[open + 1..];
+        let close = after.find(')');
+        let is_service_id = close.is_some_and(|end| {
+            let inner = after[..end].trim().to_lowercase();
+            KEYS.iter().any(|key| {
+                inner
+                    .strip_prefix(key)
+                    .map(|tail| tail.trim_start_matches([' ', ':', '=', '№', '#']))
+                    .is_some_and(|num| !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()))
+            })
+        });
+        if is_service_id {
+            out.push_str(rest[..open].trim_end_matches(' '));
+            rest = &after[close.unwrap() + 1..];
+        } else {
+            out.push_str(&rest[..open + 1]);
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Последний рубеж, если и повторный ответ не на русском: текст обрезается
+/// до первого чужого символа. Если до него почти ничего нет, ответ остаётся
+/// как был — пустой ответ хуже частично непонятного.
+pub(super) fn cut_foreign_tail(text: &str) -> String {
+    let Some(pos) = text.char_indices().find(|(_, c)| is_foreign_script(*c)).map(|(i, _)| i) else {
+        return text.to_string();
+    };
+    let head = text[..pos].trim_end_matches(|c: char| c.is_whitespace() || ",;:—-".contains(c));
+    if head.chars().count() < 20 {
+        return text.to_string();
+    }
+    let mut out = head.to_string();
+    if !out.ends_with(['.', '!', '?', '…']) {
+        out.push('…');
+    }
+    out
+}
+
+/// Просьба повторить ответ по-русски — один раз за ход.
+pub(super) const NUDGE_LANGUAGE: &str = "Проверка приложения: ответ написан не на русском \
+(иероглифы или английский). Повтори его целиком на русском языке.";
+
+/// Напоминание модели, когда она заявила об изменении, не вызвав инструмент.
+pub(super) const NUDGE_NO_TOOL: &str = "Проверка приложения: в этом ответе ты НЕ вызвал ни одного \
+изменяющего инструмента, поэтому в данных ничего не изменилось. Если пользователь просил создать или \
+изменить задачу — вызови нужный инструмент сейчас (для новой задачи — create_card). Если ты только \
+описывал уже существующие данные — повтори ответ, не утверждая, что что-то сделал.";
+
+/// Приписка к ответу, если модель и после напоминания утверждает своё.
+pub(super) const NOTE_NOTHING_CHANGED: &str = "\n\n⚠ Приложение: в этом ответе ничего не было изменено — \
+ни одно действие не выполнялось. Если вы просили создать или изменить задачу, повторите просьбу, \
+указав доску и название: перед изменением появится окно подтверждения.";
+
 /// Выполняет инструмент и возвращает то, что уйдёт модели: JSON-строку с
 /// данными или `{"error": "..."}`. Ошибка — не отказ всего вопроса, а
 /// сообщение модели, чтобы она поправилась.
@@ -934,7 +1161,7 @@ pub(super) fn execute(conn: &mut rusqlite::Connection, workspace_id: i64, prepar
     }
     let a = &fresh.args;
     let id = |key: &str| a[key].as_i64().ok_or_else(|| format!("нет {}", key));
-    match fresh.tool.as_str() {
+    let mut result = match fresh.tool.as_str() {
         "create_card" => {
             let tx = conn.unchecked_transaction().map_err(to_string_err)?;
             let title = a["title"].as_str().unwrap_or_default().to_string();
@@ -987,7 +1214,15 @@ pub(super) fn execute(conn: &mut rusqlite::Connection, workspace_id: i64, prepar
             Ok(json!({ "ok": true, "session": format_duration(seconds) }))
         }
         other => Err(format!("Инструмента «{}» нет", other)),
+    }?;
+    // То же описание, что человек подтвердил: доска, колонка, срок, приоритет.
+    // С одним `{"ok": true}` модель пересказывала сделанное по памяти и
+    // путала доску (живой прогон 12.11: «создана на доске «Домашние дела»»
+    // при задаче, созданной на «Shady's tasks»).
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("what_was_done".into(), json!(fresh.description));
     }
+    Ok(result)
 }
 
 #[cfg(test)]

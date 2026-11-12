@@ -4907,6 +4907,45 @@ fn the_system_prompt_names_today_and_the_workspace() {
     assert!(prompt.contains(&format!("Сегодня {}", today)), "{prompt}");
     assert!(prompt.contains("«Тест»"), "{prompt}");
     assert!(system_prompt(&conn, 999).is_err());
+    // «Завтра» и следующие дни — готовыми датами: модель их не считает.
+    let in_days = |n: i64| -> String {
+        conn.query_row("SELECT date('now', 'localtime', ?1)", params![format!("+{n} days")], |r| r.get(0)).unwrap()
+    };
+    assert!(prompt.contains(&format!("«Завтра» — это {}", in_days(1))), "{prompt}");
+    assert!(prompt.contains(&in_days(7)), "{prompt}");
+    // «Послезавтра» содержит «завтра», и модель путала даты — слова в списке нет.
+    assert!(!prompt.contains("послезавтра"), "{prompt}");
+}
+
+#[test]
+fn the_system_prompt_lists_the_workspace_boards_with_their_ids() {
+    let conn = test_db();
+    let empty = system_prompt(&conn, 1).unwrap();
+    assert!(empty.contains("Досок в пространстве пока нет"), "{empty}");
+
+    conn.execute("INSERT INTO boards (workspace_id, name, gradient) VALUES (1, 'Работа', 'g')", ()).unwrap();
+    let work = conn.last_insert_rowid();
+    conn.execute("INSERT INTO boards (workspace_id, name, gradient, archived) VALUES (1, 'Старая', 'g', 1)", ()).unwrap();
+    conn.execute("INSERT INTO workspaces (name) VALUES ('Чужое')", ()).unwrap();
+    let other = conn.last_insert_rowid();
+    conn.execute("INSERT INTO boards (workspace_id, name, gradient) VALUES (?1, 'Секретная', 'g')", params![other]).unwrap();
+
+    let prompt = system_prompt(&conn, 1).unwrap();
+    assert!(prompt.contains(&format!("«Работа» (board_id {})", work)), "{prompt}");
+    // Архивная доска и доска чужого пространства модели не предлагаются.
+    assert!(!prompt.contains("Старая"), "{prompt}");
+    assert!(!prompt.contains("Секретная"), "{prompt}");
+}
+
+#[test]
+fn a_long_board_list_is_cut_with_a_pointer_to_get_boards() {
+    let conn = test_db();
+    for i in 0..(AI_PROMPT_MAX_BOARDS + 5) {
+        conn.execute("INSERT INTO boards (workspace_id, name, gradient) VALUES (1, ?1, 'g')", params![format!("Доска {i}")]).unwrap();
+    }
+    let line = prompt_boards_line(&conn, 1).unwrap();
+    assert_eq!(line.matches("(board_id ").count(), AI_PROMPT_MAX_BOARDS, "{line}");
+    assert!(line.contains("И ещё 5"), "{line}");
 }
 
 // ─── Дата завершения и попытки (ассистент, Фаза 4) ───

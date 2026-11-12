@@ -652,8 +652,23 @@ fn ai_tools_live_questions_from_the_phase_check() {
     let settings = live_settings();
     let system = system_prompt(&f.conn, f.ws).unwrap();
 
+    // Доски с 12.11 перечислены в самом промпте, и на «сколько досок» модель
+    // вправе ответить по нему, не вызывая get_boards. Проверяется ответ:
+    // обе доски названы, служебные номера человеку не показаны.
+    let boards_question = "Сколько у меня досок?";
+    let mut turn = Turn::new(boards_question.into(), build_chat_request(&system, &[], boards_question));
+    let answer = match tauri::async_runtime::block_on(advance(&settings, &mut turn, |name, args| {
+        println!("    → {name}({args})");
+        Ok(step(&f.conn, f.ws, name, args))
+    })).unwrap() {
+        TurnStep::Answer(a) => a,
+        TurnStep::Confirm(p) => panic!("на вопрос о данных модель предложила изменение: {}", p.description),
+    };
+    println!("ВОПРОС: {boards_question}\nИНСТРУМЕНТЫ: {:?}\nОТВЕТ: {answer}\n", turn.tools_used);
+    assert!(answer.contains("Учёба") && answer.contains("Shady"), "{answer}");
+    assert!(!answer.contains("board_id") && !answer.contains("(id"), "служебный номер в ответе: {answer}");
+
     for (question, expected_tool) in [
-        ("Сколько у меня досок?", "get_boards"),
         ("Какие задачи просрочены?", "get_overdue_cards"),
     ] {
         let mut turn = Turn::new(question.into(), build_chat_request(&system, &[], question));
@@ -673,14 +688,29 @@ fn ai_tools_live_questions_from_the_phase_check() {
 /// «Проверка» Фазы 3: модель должна предложить создание с правильными полями,
 /// а после «Да» карточка — появиться на доске.
 ///
+/// Срок в вопросе — через три недели от сегодня. Раньше здесь стояло
+/// «10 октября», и с 11.10.2026 тест падал на правиле «срок в прошлом
+/// отвергается», а не на модели.
+///
 /// `cargo test --lib ai_tools_live_create -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn ai_tools_live_create_card_from_the_phase_check() {
+    const MONTHS: [&str; 12] = [
+        "января", "февраля", "марта", "апреля", "мая", "июня",
+        "июля", "августа", "сентября", "октября", "ноября", "декабря",
+    ];
     let mut f = fixture();
     let settings = live_settings();
     let system = system_prompt(&f.conn, f.ws).unwrap();
-    let question = "Создай задачу 'Подготовить отчёт' на доске Shady's tasks с дедлайном 10 октября, приоритет высокий";
+    let due_expected = date_offset(&f.conn, 21);
+    let month: usize = due_expected[5..7].parse().unwrap();
+    let day: u32 = due_expected[8..10].parse().unwrap();
+    let question = format!(
+        "Создай задачу 'Подготовить отчёт' на доске Shady's tasks с дедлайном {} {}, приоритет высокий",
+        day, MONTHS[month - 1]
+    );
+    let question = question.as_str();
     let mut turn = Turn::new(question.into(), build_chat_request(&system, &[], question));
     let started = std::time::Instant::now();
 
@@ -713,9 +743,69 @@ fn ai_tools_live_create_card_from_the_phase_check() {
     ).unwrap();
     println!("В БАЗЕ: {title} | {due:?} | {prio} | колонка {col}");
     assert_eq!(title, "Подготовить отчёт");
-    assert_eq!(due.as_deref().map(|d| &d[5..]), Some("10-10"));
+    // Месяц и день, без года: на стыке декабря и января модель вправе
+    // понять «9 января» и как прошедшую дату.
+    assert_eq!(due.as_deref().map(|d| &d[5..]), Some(&due_expected[5..]));
     assert_eq!(prio, "High");
     assert_eq!(col, f.open_col);
+}
+
+/// Просьбы «как пишет человек» — без доски, без кавычек. Главное правило:
+/// ответ не может утверждать, что задача создана, если в базе её нет.
+/// Допустимые исходы: задача создана (через превью), модель задала вопрос,
+/// либо ответ помечен припиской приложения.
+///
+/// `cargo test --lib ai_tools_live_casual -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn ai_tools_live_casual_create_requests_never_lie() {
+    let settings = live_settings();
+    // Срок: у первой и третьей просьбы его нет и быть не должно — он
+    // задаётся один раз и не правится; у второй — завтрашнее число.
+    for (question, due_offset) in [
+        ("создай задачу купить молоко", None),
+        ("добавь задачу позвонить маме завтра", Some(1)),
+        ("Создай задачу Сделать презентацию на доске Shady's tasks", None),
+    ] {
+        let mut f = fixture();
+        let system = system_prompt(&f.conn, f.ws).unwrap();
+        let before: i64 = f.conn.query_row("SELECT COUNT(*) FROM cards", [], |r| r.get(0)).unwrap();
+        let mut turn = Turn::new(question.into(), build_chat_request(&system, &[], question));
+        let started = std::time::Instant::now();
+        let answer = loop {
+            let step_result = {
+                let conn = &f.conn;
+                tauri::async_runtime::block_on(advance(&settings, &mut turn, |name, args| {
+                    println!("    → {name}({args})");
+                    Ok(step(conn, f.ws, name, args))
+                })).unwrap()
+            };
+            match step_result {
+                TurnStep::Answer(a) => break a,
+                TurnStep::Confirm(p) => {
+                    println!("ПРЕВЬЮ: {}", p.description);
+                    let outcome = execute(&mut f.conn, f.ws, &p);
+                    resolve_action(&mut turn, &p, outcome, true);
+                }
+            }
+        };
+        let after: i64 = f.conn.query_row("SELECT COUNT(*) FROM cards", [], |r| r.get(0)).unwrap();
+        let created = after - before;
+        let noted = answer.contains("ничего не было изменено");
+        println!(
+            "ВОПРОС: {question}\nОТВЕТ ({:.1} с): {answer}\nСОЗДАНО КАРТОЧЕК: {created} | напоминание: {} | приписка: {noted}\n",
+            started.elapsed().as_secs_f32(), turn.nudged
+        );
+        assert!(created > 0 || noted || !claims_change(&answer), "ответ утверждает изменение, которого нет");
+        if created > 0 {
+            let due: Option<String> = f.conn
+                .query_row("SELECT due_date FROM cards ORDER BY id DESC LIMIT 1", [], |r| r.get(0))
+                .unwrap();
+            let expected = due_offset.map(|n| date_offset(&f.conn, n));
+            println!("СРОК В БАЗЕ: {due:?}, ждали {expected:?}\n");
+            assert_eq!(due, expected, "{question}");
+        }
+    }
 }
 
 // ─── Подтверждение: что уходит модели и что остаётся в истории ───
@@ -779,12 +869,11 @@ fn ai_tools_live_report_greeting_and_month_question() {
     let report = productivity_report(&f.conn, f.ws, 7).unwrap();
     println!("СВОДКА: {report}");
     let started = std::time::Instant::now();
-    let greeting = tauri::async_runtime::block_on(async {
-        let (settings, request) = (settings.clone(), greeting_request(&system, &report));
-        run_blocking(move || crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &[], settings.timeout_seconds)).await
-    }).unwrap().content;
+    // Тот же путь, что у команды: с повтором, если модель ушла в иероглифы.
+    let greeting = tauri::async_runtime::block_on(greeting_text(&settings, greeting_request(&system, &report))).unwrap();
     println!("ПРИВЕТСТВИЕ ({:.1} с):\n{greeting}\n", started.elapsed().as_secs_f32());
     assert!(greeting.contains('2'), "в приветствии должны быть реальные числа (2 просроченные)");
+    assert!(!has_foreign_script(&greeting), "приветствие не на русском: {greeting}");
 
     let question = "Как у меня дела с продуктивностью за месяц?";
     let greeting_msg = ChatMessage {
@@ -802,4 +891,151 @@ fn ai_tools_live_report_greeting_and_month_question() {
     };
     println!("ВОПРОС: {question}\nИНСТРУМЕНТЫ: {:?}\nОТВЕТ ({:.1} с): {answer}", turn.tools_used, started.elapsed().as_secs_f32());
     assert!(turn.tools_used.iter().any(|t| t == "get_productivity_report"), "{:?}", turn.tools_used);
+    // Сводка пересказывает действия человека («вы создали 4») — это не
+    // выдуманное изменение, и предупреждения под ней быть не должно.
+    assert!(!answer.contains("ничего не было изменено"), "ложная тревога: {answer}");
+    assert!(!turn.nudged, "напоминание о невызванном инструменте на вопросе без просьбы");
+}
+
+#[test]
+fn an_executed_change_reports_what_was_done() {
+    let mut f = fixture();
+    let p = prepared(&f, "create_card", json!({"board_id": f.board, "title": "Отчёт"}));
+    let result = execute(&mut f.conn, f.ws, &p).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["what_was_done"], p.description);
+    assert!(p.description.contains("Shady's tasks"), "{}", p.description);
+}
+
+// ─── «Сказал, что сделал, а не сделал» ───
+
+#[test]
+fn a_claim_of_a_finished_change_is_recognised() {
+    for text in [
+        "Задача «Отчёт» создана на доске «Работа».",
+        "Я создал задачу.",
+        "Готово, добавил карточку в колонку «Новые».",
+        "Карточка перенесена в «Закрыто».",
+        "Приоритет изменён на высокий.",
+    ] {
+        assert!(claims_change(text), "{}", text);
+    }
+}
+
+#[test]
+fn questions_plans_and_denials_are_not_claims() {
+    for text in [
+        "На какой доске создать задачу?",
+        "Сейчас создам задачу — подтвердите.",
+        "Задача не создана: такой доски нет.",
+        "У вас 3 просроченные задачи.",
+        // Пересказ данных, а не своё действие (живой прогон 12.11).
+        "За последний месяц вы завершили 1 задачу и создали 4 новые.",
+        "Задача была создана 5 сентября.",
+        "За неделю создано 4 задачи.",
+    ] {
+        assert!(!claims_change(text), "{}", text);
+    }
+}
+
+#[test]
+fn a_change_request_is_told_from_a_question() {
+    for text in [
+        "создай задачу купить молоко",
+        "Добавь задачу позвонить маме завтра",
+        "Перенеси «Отчёт» в Закрыто",
+        "поставь высокий приоритет",
+        "Отметь пункт чек-листа",
+    ] {
+        assert!(requests_change(text), "{}", text);
+    }
+    for text in [
+        "Как у меня дела с продуктивностью за месяц?",
+        "Какие задачи просрочены?",
+        "Сколько у меня досок?",
+        "Что я создал на этой неделе?",
+    ] {
+        assert!(!requests_change(text), "{}", text);
+    }
+}
+
+#[test]
+fn a_due_date_nobody_asked_for_is_dropped() {
+    let args = json!({"board_id": 1, "title": "Сделать презентацию", "due_date": "2026-11-19"});
+    let cleaned = drop_unasked_due_date("create_card", &args, &["Создай задачу Сделать презентацию на доске Shady's tasks"])
+        .expect("срок никто не называл — его быть не должно");
+    assert!(cleaned.get("due_date").is_none());
+    assert_eq!(cleaned["title"], "Сделать презентацию");
+    assert_eq!(cleaned["board_id"], 1);
+    // Срок назван — остаётся как есть.
+    for asked in [
+        "добавь задачу позвонить маме завтра",
+        "создай отчёт к 5 декабря",
+        "до пятницы доделать сайт",
+        "Создай задачу, срок — через неделю",
+        "дедлайн в среду",
+    ] {
+        assert!(drop_unasked_due_date("create_card", &args, &[asked]).is_none(), "{asked}");
+    }
+    // Срок прозвучал репликой раньше — в ответ на уточняющий вопрос.
+    assert!(drop_unasked_due_date("create_card", &args, &["на доске Учёба", "создай задачу отчёт на пятницу"]).is_none());
+    // Другие инструменты и создание без срока не трогаются.
+    assert!(drop_unasked_due_date("move_card", &args, &["перенеси"]).is_none());
+    assert!(drop_unasked_due_date("create_card", &json!({"board_id": 1, "title": "x"}), &["создай x"]).is_none());
+    // «Средний приоритет» — не «среда».
+    assert!(!mentions_date("создай задачу, приоритет средний"));
+}
+
+#[test]
+fn service_ids_are_stripped_from_answers() {
+    assert_eq!(
+        strip_service_ids("У вас две доски: «Учёба» (board_id 3) и «Shady's tasks» (board_id 1)."),
+        "У вас две доски: «Учёба» и «Shady's tasks»."
+    );
+    assert_eq!(strip_service_ids("Задача «Отчёт» (id: 12) создана."), "Задача «Отчёт» создана.");
+    // Обычные скобки не трогаются.
+    for keep in ["Просрочено (2 задачи).", "Срок (до пятницы) прошёл.", "Скобка ( без пары", "(identity 5)"] {
+        assert_eq!(strip_service_ids(keep), keep);
+    }
+}
+
+#[test]
+fn an_english_answer_is_told_from_a_russian_one_with_latin_names() {
+    assert!(mostly_latin("Sure, where would you like to add this task? The available boards are: 1. Shady's tasks"));
+    assert!(!mostly_latin("Задача «Купить молоко» создана на доске «Shady's tasks» в колонке «В работе»."));
+    assert!(!mostly_latin("OK"));
+    assert!(needs_language_retry("Sure, where would you like to add this task «Купить молоко»?"));
+    assert!(!needs_language_retry("Готово: задача создана на доске «Shady's tasks»."));
+}
+
+#[test]
+fn foreign_script_is_detected_and_cut_off() {
+    let mixed = "За неделю вы закрыли одну задачу. Как я могу помочь вам今天完成了1个任务，创建了4个新任务";
+    assert!(has_foreign_script(mixed));
+    assert_eq!(cut_foreign_tail(mixed), "За неделю вы закрыли одну задачу. Как я могу помочь вам…");
+    assert!(!has_foreign_script("Обычный ответ — с тире, «кавычками» и ⚠ знаком."));
+    // До чужого текста почти ничего нет — ответ остаётся как был.
+    assert_eq!(cut_foreign_tail("Да，好的"), "Да，好的");
+    assert_eq!(cut_foreign_tail("Без иероглифов."), "Без иероглифов.");
+}
+
+#[test]
+fn a_tool_call_written_as_text_is_salvaged() {
+    let call = salvage_tool_call(r#"{"name": "create_card", "arguments": {"board_id": 1, "title": "Отчёт"}}"#).unwrap();
+    assert_eq!(call.function.name, "create_card");
+    assert_eq!(call.function.arguments["title"], "Отчёт");
+
+    let fenced = "```json\n{\"name\": \"get_boards\", \"parameters\": {}}\n```";
+    assert_eq!(salvage_tool_call(fenced).unwrap().function.name, "get_boards");
+
+    let tagged = "<tool_call>\n{\"name\": \"get_workload\"}\n</tool_call>";
+    assert_eq!(salvage_tool_call(tagged).unwrap().function.name, "get_workload");
+}
+
+#[test]
+fn ordinary_text_and_unknown_tools_are_not_salvaged() {
+    assert!(salvage_tool_call("Задача создана.").is_none());
+    assert!(salvage_tool_call(r#"{"name": "drop_database", "arguments": {}}"#).is_none());
+    assert!(salvage_tool_call(r#"{"name": "create_card", "arguments": "нет"}"#).is_none());
+    assert!(salvage_tool_call(r#"Вызываю {"name": "create_card", "arguments": {}}"#).is_none());
 }
