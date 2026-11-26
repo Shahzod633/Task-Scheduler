@@ -223,7 +223,9 @@
 }
 
 /* ─── Экран «Привычки» ─── */
-.page--habits {
+/* Ширину ограничивают дети, а не сама `.page`: она — прокручиваемый
+   контейнер, и с max-width полоса прокрутки вставала посреди окна. */
+.page--habits > * {
     max-width: 1080px;
 }
 
@@ -627,7 +629,7 @@ select.habits-panel__select {
 }
 
 @media (max-width: 1099px) {
-    .page--habits {
+    .page--habits > * {
         max-width: none;
     }
 }

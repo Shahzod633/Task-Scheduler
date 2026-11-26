@@ -878,6 +878,7 @@ async function renderHeatmapSection(section, activeHabits, { wave = false } = {}
     const weeks = createElement('div', { className: 'heatmap__weeks' });
 
     let lastMonth = -1;
+    let lastLabel = null; // { el, week } — предыдущая подпись месяца
     let total = 0;
     let activeDays = 0;
     for (let w = 0; w < weekCount; w++) {
@@ -886,9 +887,13 @@ async function renderHeatmapSection(section, activeHabits, { wave = false } = {}
         const month = first ? Number(first.date.slice(5, 7)) : -1;
         const monthLabel = createElement('span', { className: 'heatmap__month' });
         if (first && month !== lastMonth) {
+            // Подпись шире недели: если прошлый месяц попал на карту хвостом
+            // в одну-две недели, его подпись налезла бы на эту («ноябек»).
+            if (lastLabel && w - lastLabel.week < 3) lastLabel.el.textContent = '';
             monthLabel.textContent = new Date(Number(first.date.slice(0, 4)), month - 1, 1)
                 .toLocaleDateString('ru-RU', { month: 'short' }).replace('.', '');
             lastMonth = month;
+            lastLabel = { el: monthLabel, week: w };
         }
         months.appendChild(monthLabel);
         for (let d = 0; d < 7; d++) {
