@@ -1,0 +1,1032 @@
+/* ============================================
+   TaskFlow — Привычки: экран, виджет главной, тепловая карта, ИИ-аналитика
+   ============================================
+   Палитра «Сигнал»: кобальт — действие и выполненное, янтарь — стрик и
+   внимание (время), красный здесь не появляется вовсе — он только у
+   просроченных задач. Сорванная привычка — приглушённая, а не тревожная. */
+
+.habits-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+
+/* ─── Шапка виджета на главной ─── */
+.home-widget__head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-md);
+}
+
+.home-widget__head .home-widget__title {
+    margin-bottom: 0;
+    margin-right: auto;
+}
+
+.home-widget__counter {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ─── Строка «сегодня» ─── */
+.habit-today-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.habit-today {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    min-height: 44px;
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: var(--radius-md);
+    transition: background var(--transition-fast);
+}
+
+.habit-today-list .habit-today:hover {
+    background: var(--bg-card-hover);
+}
+
+.habit-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-round);
+    border: 1.5px solid var(--border-strong);
+    background: transparent;
+    color: transparent;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast),
+        transform var(--transition-fast);
+}
+
+.habit-check svg {
+    width: 15px;
+    height: 15px;
+}
+
+.habit-check:hover {
+    border-color: var(--accent-border);
+    color: var(--accent-text);
+}
+
+.habit-check {
+    /* Чем заливается кружок выполненной: лайт-версия — вполсилы. */
+    --habit-fill: var(--accent-fill);
+    position: relative;
+}
+
+.habit-check path {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+}
+
+.habit-check:active {
+    transform: scale(0.9);
+}
+
+.habit-today--done .habit-check {
+    background: var(--habit-fill);
+    border-color: var(--accent-fill);
+    color: var(--text-on-accent);
+}
+
+.habit-today--light .habit-check {
+    --habit-fill: color-mix(in srgb, var(--accent-color) 30%, transparent);
+    border-color: var(--accent-border);
+    color: var(--accent-text);
+}
+
+.habit-check--off {
+    border-style: dashed;
+    cursor: default;
+}
+
+.habit-today__text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.habit-today__title,
+.habit-today__meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.habit-today__title {
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+}
+
+.habit-today__meta {
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+}
+
+.habit-today--done .habit-today__title {
+    color: var(--text-secondary);
+}
+
+.habit-today--missed .habit-today__title,
+.habit-today--off .habit-today__title {
+    color: var(--text-muted);
+}
+
+.habit-today__actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+/* ─── Стрик и нагрузка ─── */
+.habit-streak {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+    min-width: 44px;
+    justify-content: flex-end;
+    color: var(--color-warning);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    font-variant-numeric: tabular-nums;
+}
+
+.habit-streak svg {
+    width: 15px;
+    height: 15px;
+}
+
+.habit-streak--cold {
+    color: var(--text-muted);
+    font-weight: var(--font-weight-normal);
+}
+
+.habit-effort {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.habit-effort__dot {
+    width: 6px;
+    height: 6px;
+    border-radius: var(--radius-round);
+    background: var(--border-strong);
+}
+
+.habit-effort__dot--on {
+    background: var(--text-secondary);
+}
+
+/* ─── Окошко пропуска ─── */
+.habit-skip {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+}
+
+.habit-skip__title {
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.habit-skip__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-xs);
+}
+
+.habit-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-md);
+}
+
+/* ─── Экран «Привычки» ─── */
+/* Ширину ограничивают дети, а не сама `.page`: она — прокручиваемый
+   контейнер, и с max-width полоса прокрутки вставала посреди окна. */
+.page--habits > * {
+    max-width: 1080px;
+}
+
+.habits-section + .habits-section {
+    margin-top: var(--space-xl);
+}
+
+.habits-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-md);
+}
+
+.habits-toolbar__archived {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.habits-toolbar__add {
+    margin-left: auto;
+}
+
+.habits-toolbar__add svg {
+    width: 16px;
+    height: 16px;
+}
+
+.habit-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.habit-row {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    padding: var(--space-sm) calc(var(--space-sm) + 34px) var(--space-md) var(--space-sm);
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
+    border-radius: var(--radius-lg);
+    transition: border-color var(--transition-fast);
+}
+
+.habit-row:hover {
+    border-color: var(--border-hover);
+}
+
+.habit-row--archived {
+    opacity: 0.7;
+}
+
+.habit-row__details {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-xs) var(--space-lg);
+    /* Под текстом строки, а не под кружком. */
+    padding-left: calc(26px + var(--space-md) + var(--space-sm));
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+}
+
+.habit-row__fallback {
+    color: var(--text-secondary);
+}
+
+.habit-row__description {
+    flex-basis: 100%;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.habit-row__more {
+    position: absolute;
+    top: var(--space-sm);
+    right: var(--space-sm);
+}
+
+/* ─── Форма ─── */
+.habit-form {
+    width: 520px;
+}
+
+.habit-form .theme-toggle {
+    flex-wrap: wrap;
+}
+
+.habit-form__extra {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+}
+
+.habit-form__extra:empty {
+    display: none;
+}
+
+.habit-form__inline-hint {
+    margin-top: 0;
+}
+
+.habit-form__error {
+    min-height: 1em;
+    font-size: var(--font-size-sm);
+    color: var(--color-warning);
+}
+
+.habit-form__error:empty {
+    display: none;
+}
+
+/* ─── Панели: тепловая карта и ИИ ─── */
+.habits-panel {
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
+    border-radius: var(--radius-xl);
+    padding: var(--space-lg);
+    box-shadow: var(--highlight-top);
+}
+
+.habits-panel__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-md);
+}
+
+.habits-section__title {
+    margin-right: auto;
+    font-family: var(--font-display);
+    font-size: var(--font-size-lg);
+    font-weight: var(--font-weight-semibold);
+    letter-spacing: var(--tracking-tight);
+    color: var(--text-primary);
+}
+
+/* `select.form-input` в components.css растягивает список на всю ширину и
+   весит больше одного класса. */
+select.habits-panel__select {
+    width: auto;
+    min-width: 200px;
+    /* Иначе ширину задаёт самое длинное название привычки. */
+    max-width: 280px;
+}
+
+/* ─── Тепловая карта ─── */
+.heatmap-holder {
+    overflow-x: auto;
+}
+
+.heatmap {
+    --heat-cell: 13px;
+    --heat-gap: 3px;
+    display: inline-flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.heatmap__months {
+    display: flex;
+    gap: var(--heat-gap);
+    padding-left: calc(24px + var(--heat-gap));
+}
+
+.heatmap__month {
+    width: var(--heat-cell);
+    overflow: visible;
+    white-space: nowrap;
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+}
+
+.heatmap__body {
+    display: flex;
+    gap: var(--heat-gap);
+}
+
+.heatmap__weekdays {
+    display: grid;
+    grid-template-rows: repeat(7, var(--heat-cell));
+    gap: var(--heat-gap);
+    width: 24px;
+    font-size: var(--font-size-xs);
+    line-height: var(--heat-cell);
+    color: var(--text-muted);
+}
+
+.heatmap__weeks {
+    display: flex;
+    gap: var(--heat-gap);
+}
+
+.heatmap__week {
+    display: grid;
+    grid-template-rows: repeat(7, var(--heat-cell));
+    gap: var(--heat-gap);
+}
+
+.heatmap__cell {
+    display: inline-block;
+    width: var(--heat-cell);
+    height: var(--heat-cell);
+    border-radius: 3px;
+    background: var(--bg-card);
+}
+
+.heatmap__cell--l1 { background: color-mix(in srgb, var(--accent-color) 28%, transparent); }
+.heatmap__cell--l2 { background: color-mix(in srgb, var(--accent-color) 50%, transparent); }
+.heatmap__cell--l3 { background: color-mix(in srgb, var(--accent-color) 74%, transparent); }
+.heatmap__cell--l4 { background: var(--accent-color); }
+
+/* День, когда ничего не стояло по расписанию, — пустая рамка, а не
+   «ноль»: ноль значит «мог, но не сделал». */
+.heatmap__cell--idle {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.heatmap__cell--future {
+    background: transparent;
+}
+
+.heatmap__cell--today {
+    box-shadow: inset 0 0 0 1.5px var(--text-secondary);
+}
+
+.heatmap__foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    margin-top: var(--space-md);
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+}
+
+.heatmap__legend {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.heatmap__legend .heatmap__cell {
+    width: 11px;
+    height: 11px;
+}
+
+/* ─── ИИ-аналитика ─── */
+.habit-ai__chart {
+    position: relative;
+    height: 200px;
+    margin-bottom: var(--space-lg);
+}
+
+.habit-ai__spinner {
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+    border-color: rgba(255, 255, 255, 0.35);
+    border-top-color: var(--text-on-accent);
+}
+
+.habit-ai__status {
+    margin-bottom: var(--space-md);
+}
+
+.habit-ai__status:empty {
+    display: none;
+}
+
+.habit-ai__error {
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    background: var(--warning-soft);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    line-height: 1.5;
+}
+
+.habit-ai__placeholder,
+.habit-ai__none {
+    color: var(--text-muted);
+    font-size: var(--font-size-md);
+    line-height: 1.6;
+    max-width: 72ch;
+}
+
+.habit-ai__meta {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    margin-bottom: var(--space-sm);
+}
+
+.habit-ai__stale {
+    display: inline-block;
+    padding: var(--space-xs) var(--space-md);
+    margin-bottom: var(--space-md);
+    border-radius: var(--radius-pill);
+    background: var(--warning-soft);
+    color: var(--color-warning);
+    font-size: var(--font-size-sm);
+}
+
+.habit-ai__verdict {
+    position: relative;
+    color: var(--text-primary);
+    font-weight: var(--font-weight-medium);
+    font-size: var(--font-size-lg);
+    line-height: 1.5;
+    max-width: 72ch;
+}
+
+.habit-ai__subtitle {
+    margin: var(--space-xl) 0 var(--space-sm);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+    letter-spacing: var(--tracking-caps);
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.habit-ai__list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    list-style: none;
+}
+
+.habit-ai__item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-md);
+}
+
+.habit-ai__confidence,
+.habit-ai__habit {
+    flex-shrink: 0;
+    min-width: 84px;
+    padding: 2px var(--space-sm);
+    border-radius: var(--radius-pill);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+    text-align: center;
+    background: var(--bg-card);
+    color: var(--text-secondary);
+}
+
+.habit-ai__confidence--high {
+    background: var(--accent-fill);
+    color: var(--text-on-accent);
+}
+
+.habit-ai__confidence--medium {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+}
+
+.habit-ai__habit {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+}
+
+.habit-ai__text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    max-width: 72ch;
+}
+
+.habit-ai__pattern {
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    line-height: 1.5;
+}
+
+.habit-ai__evidence {
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+}
+
+@media (max-width: 1099px) {
+    .page--habits > * {
+        max-width: none;
+    }
+}
+
+/* ============================================
+   Движение: «сигнал времени»
+   ============================================
+   Одна авторская последовательность — отметка привычки:
+     0–320 мс   стрелка обходит циферблат кружка (conic-gradient по
+                зарегистрированному углу --habit-sweep), с 12 часов;
+     250–490    прорисовывается галочка (stroke-dashoffset);
+     160–780    по строке к огоньку бежит полоса света — сигнал доходит
+                до стрика;
+     280–840    от кружка расходится одно кольцо;
+     400–1020   огонёк вспыхивает, цифра стрика перекатывается вверх.
+   Остальное — тихое: снятие отметки сворачивает циферблат обратно за
+   220 мс, срыв гасит огонёк, карта при первом показе загорается волной от
+   старых недель к сегодняшней, луч ИИ читает график за 14 дней.
+   Все кадры разыгрываются один раз — на перерисовке сразу после отметки
+   (очередь `pendingMotion` в habits.js). */
+
+@property --habit-sweep {
+    syntax: '<angle>';
+    inherits: false;
+    initial-value: 360deg;
+}
+
+@keyframes habit-sweep {
+    from { --habit-sweep: 0deg; }
+    to   { --habit-sweep: 360deg; }
+}
+
+@keyframes habit-unsweep {
+    from { --habit-sweep: 360deg; }
+    to   { --habit-sweep: 0deg; }
+}
+
+@keyframes habit-draw {
+    from { stroke-dashoffset: 1; }
+    to   { stroke-dashoffset: 0; }
+}
+
+@keyframes habit-ping {
+    from { opacity: 0.6; transform: scale(1); }
+    to   { opacity: 0; transform: scale(1.9); }
+}
+
+@keyframes habit-signal {
+    0%   { opacity: 1; background-position: -60% 0; }
+    80%  { opacity: 1; }
+    100% { opacity: 0; background-position: 160% 0; }
+}
+
+@keyframes habit-dim {
+    from { color: var(--text-primary); }
+    to   { color: var(--text-muted); }
+}
+
+/* ─── Кружок ─── */
+.habit-check::after {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    border-radius: inherit;
+    border: 2px solid var(--accent-color);
+    opacity: 0;
+    pointer-events: none;
+}
+
+.habit-today--just-done .habit-check {
+    background: conic-gradient(var(--habit-fill) var(--habit-sweep), transparent 0);
+    animation: habit-sweep 320ms cubic-bezier(0.55, 0, 0.25, 1) both;
+}
+
+.habit-today--just-done .habit-check path {
+    animation: habit-draw 240ms var(--ease-out) 250ms both;
+}
+
+.habit-today--just-done .habit-check::after {
+    animation: habit-ping 560ms var(--ease-out) 280ms both;
+}
+
+/* Снятие отметки: циферблат сворачивается обратно — быстрее, чем шёл. */
+.habit-today--just-undo .habit-check {
+    background: conic-gradient(var(--accent-fill) var(--habit-sweep), transparent 0);
+    animation: habit-unsweep 220ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* ─── Полоса света по строке ─── */
+.habit-today {
+    position: relative;
+    isolation: isolate;
+}
+
+.habit-today::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+    opacity: 0;
+    background: linear-gradient(90deg,
+        transparent 0%,
+        var(--accent-soft) 35%,
+        color-mix(in srgb, var(--accent-color) 24%, transparent) 50%,
+        var(--accent-soft) 65%,
+        transparent 100%) no-repeat;
+    background-size: 45% 100%;
+}
+
+.habit-today--just-done::before {
+    animation: habit-signal 620ms var(--ease-out) 160ms both;
+}
+
+/* Срыв или пропуск: название гаснет, причина встаёт на место. */
+.habit-today--just-missed .habit-today__title {
+    animation: habit-dim 420ms var(--ease-out) both;
+}
+
+.habit-today--just-missed .habit-today__meta {
+    animation: rise-in-sm 260ms var(--ease-out) both;
+}
+
+/* ─── Стрик: одометр и огонёк ─── */
+.habit-streak__flame {
+    display: inline-flex;
+    transform-origin: 50% 85%;
+}
+
+.habit-streak__num {
+    display: inline-grid;
+    overflow: hidden;
+    height: 1.3em;
+    line-height: 1.3em;
+}
+
+.habit-streak__digit {
+    grid-area: 1 / 1;
+    text-align: right;
+}
+
+@keyframes odo-out-up   { from { transform: translateY(0); opacity: 1; } to { transform: translateY(-100%); opacity: 0; } }
+@keyframes odo-in-up    { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes odo-out-down { from { transform: translateY(0); opacity: 1; } to { transform: translateY(100%); opacity: 0; } }
+@keyframes odo-in-down  { from { transform: translateY(-100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+.habit-streak--up .habit-streak__digit--old   { animation: odo-out-up 380ms var(--ease-out) 420ms both; }
+.habit-streak--up .habit-streak__digit--new   { animation: odo-in-up 380ms var(--ease-out) 460ms both; }
+.habit-streak--down .habit-streak__digit--old { animation: odo-out-down 300ms var(--ease-out) 120ms both; }
+.habit-streak--down .habit-streak__digit--new { animation: odo-in-down 300ms var(--ease-out) 160ms both; }
+
+@keyframes flame-flare {
+    0%   { transform: none; filter: none; }
+    30%  { transform: scale(1.45) rotate(-8deg); filter: drop-shadow(0 -2px 5px color-mix(in srgb, var(--color-warning) 70%, transparent)); }
+    60%  { transform: scale(0.94) rotate(3deg); }
+    100% { transform: none; filter: none; }
+}
+
+/* Огонёк «чадит» и гаснет: два провала яркости, как у свечи на сквозняке. */
+@keyframes flame-gutter {
+    0%   { opacity: 1; transform: none; }
+    25%  { opacity: 0.3; transform: scale(0.78) translateY(1px); }
+    45%  { opacity: 0.85; transform: scale(0.95); }
+    65%  { opacity: 0.25; transform: scale(0.8); }
+    100% { opacity: 1; transform: none; }
+}
+
+@keyframes streak-cool {
+    from { color: var(--color-warning); }
+    to   { color: var(--text-muted); }
+}
+
+.habit-streak--up .habit-streak__flame {
+    animation: flame-flare 620ms var(--ease-out) 400ms both;
+}
+
+.habit-streak--down .habit-streak__flame {
+    animation: flame-gutter 560ms ease-in-out both;
+}
+
+.habit-streak--down.habit-streak--cold {
+    animation: streak-cool 560ms ease-in-out both;
+}
+
+/* ─── Полоска дня в виджете ─── */
+.habit-progress {
+    position: relative;
+    display: flex;
+    gap: 3px;
+    height: 4px;
+    margin: calc(-1 * var(--space-xs)) 0 var(--space-md);
+}
+
+.habit-progress[hidden] {
+    display: none;
+}
+
+.habit-progress__seg {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+    border-radius: var(--radius-pill);
+    background: var(--bg-card-active);
+}
+
+.habit-progress__seg::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--accent-color);
+    transform: scaleX(0);
+    transform-origin: left center;
+}
+
+.habit-progress__seg--on::after {
+    transform: none;
+}
+
+@keyframes seg-fill {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+}
+
+.habit-progress__seg--fill::after {
+    animation: seg-fill 420ms var(--ease-out) 200ms both;
+}
+
+/* Последняя привычка дня: по всей полоске один раз проходит свет. */
+@keyframes progress-sweep {
+    0%   { opacity: 1; background-position: -40% 0; }
+    85%  { opacity: 1; }
+    100% { opacity: 0; background-position: 140% 0; }
+}
+
+.habit-progress--complete::after {
+    content: "";
+    position: absolute;
+    inset: -3px 0;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.8), transparent) no-repeat;
+    background-size: 30% 100%;
+    animation: progress-sweep 900ms var(--ease-in-out) 560ms both;
+}
+
+.home-widget__counter--complete {
+    color: var(--accent-text);
+    animation: rise-in-sm 260ms var(--ease-out) 600ms both;
+}
+
+/* ─── Тепловая карта: волна до «сегодня» ─── */
+@keyframes heat-in {
+    from { opacity: 0; transform: scale(0.3); }
+    to   { opacity: 1; transform: none; }
+}
+
+@keyframes heat-today {
+    0%, 100% { box-shadow: inset 0 0 0 1.5px var(--text-secondary); transform: none; }
+    50%      { box-shadow: inset 0 0 0 1.5px var(--accent-color), 0 0 0 4px var(--accent-soft); transform: scale(1.25); }
+}
+
+@keyframes heat-ping {
+    from { box-shadow: inset 0 0 0 1.5px var(--accent-color), 0 0 0 7px var(--accent-soft); transform: scale(1.5); }
+    to   { box-shadow: inset 0 0 0 1.5px var(--text-secondary); transform: none; }
+}
+
+.heatmap--wave .heatmap__cell {
+    animation: heat-in 360ms var(--ease-out) both;
+    animation-delay: calc(var(--i, 0) * var(--heat-step, 10ms));
+}
+
+.heatmap--wave .heatmap__cell--today {
+    animation:
+        heat-in 360ms var(--ease-out) calc(var(--i, 0) * var(--heat-step, 10ms)) both,
+        heat-today 1.1s ease-in-out var(--heat-wave-end, 800ms) 2;
+}
+
+.heatmap__cell--ping {
+    animation: heat-ping 700ms var(--ease-out) both;
+}
+
+/* ─── ИИ: луч читает график, вердикт прописывается ─── */
+.habit-ai__chart {
+    overflow: hidden;
+}
+
+.habit-ai__chart canvas {
+    transition: opacity var(--duration-3) var(--ease-out);
+}
+
+.habit-ai__chart--reading canvas {
+    opacity: 0.45;
+}
+
+@keyframes ai-beam {
+    from { transform: translateX(-100%); }
+    to   { transform: translateX(0); }
+}
+
+.habit-ai__beam {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: linear-gradient(90deg,
+        transparent 0%,
+        transparent 65%,
+        color-mix(in srgb, var(--accent-color) 16%, transparent) 96%,
+        var(--accent-color) 99.6%,
+        transparent 100%);
+    animation: ai-beam 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes verdict-write {
+    from { clip-path: inset(0 100% 0 0); }
+    to   { clip-path: inset(0 0 0 0); }
+}
+
+@keyframes verdict-beam {
+    0%   { transform: translateX(-100%); opacity: 1; }
+    85%  { opacity: 1; }
+    100% { transform: translateX(0); opacity: 0; }
+}
+
+.habit-ai__verdict::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0;
+    background: linear-gradient(90deg,
+        transparent calc(100% - 56px),
+        color-mix(in srgb, var(--accent-color) 22%, transparent) calc(100% - 3px),
+        var(--accent-color) calc(100% - 2px));
+}
+
+.habit-ai__report--fresh .habit-ai__verdict {
+    animation: verdict-write 720ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.habit-ai__report--fresh .habit-ai__verdict::after {
+    animation: verdict-beam 720ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.habit-ai__report--fresh .habit-ai__meta,
+.habit-ai__report--fresh .habit-ai__stale {
+    animation: fade-in var(--duration-2) var(--ease-out) both;
+}
+
+.habit-ai__report--fresh :is(.habit-ai__subtitle, .habit-ai__item, .habit-ai__none) {
+    animation: rise-in-sm 320ms var(--ease-out) both;
+    animation-delay: calc(560ms + var(--i, 0) * 45ms);
+}
+
+/* ─── Уменьшить движение ───
+   Без перемещений и вращений: кружок сразу залит, галочка видна, цифра
+   меняется проявлением, карта проступает целиком, луча нет. Цвет и
+   прозрачность, которые говорят «сделано», остаются. */
+@media (prefers-reduced-motion: reduce) {
+    .habit-today--just-done .habit-check {
+        animation: none;
+        background: var(--habit-fill);
+    }
+
+    .habit-today--just-undo .habit-check {
+        animation: none;
+        background: transparent;
+    }
+
+    .habit-today--just-done .habit-check path,
+    .habit-today--just-done .habit-check::after,
+    .habit-today--just-done::before,
+    .habit-streak__flame,
+    .habit-streak--down.habit-streak--cold,
+    .habit-progress--complete::after,
+    .habit-ai__verdict::after {
+        animation: none !important;
+    }
+
+    .habit-ai__beam,
+    .habit-streak__digit--old {
+        display: none;
+    }
+
+    .habit-streak__digit--new,
+    .habit-progress__seg--fill::after,
+    .habit-today--just-missed .habit-today__meta,
+    .home-widget__counter--complete,
+    .heatmap--wave .heatmap__cell,
+    .heatmap--wave .heatmap__cell--today,
+    .heatmap__cell--ping,
+    .habit-ai__report--fresh .habit-ai__verdict,
+    .habit-ai__report--fresh :is(.habit-ai__subtitle, .habit-ai__item, .habit-ai__none) {
+        animation: fade-in var(--duration-2) var(--ease-out) both !important;
+    }
+
+    .habit-progress__seg--fill::after {
+        transform: none;
+    }
+}

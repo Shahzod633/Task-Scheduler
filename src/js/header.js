@@ -140,6 +140,7 @@ function showHelpModal() {
 
     body.appendChild(createElement('h3', { className: 'help-section-title' }, 'Горячие клавиши'));
     const shortcuts = [
+        ['Ctrl + K', 'Поиск по доскам и задачам всего пространства'],
         ['Enter', 'Добавить карточку или колонку'],
         ['Shift + Enter', 'Перенос строки в описании карточки'],
         ['Esc', 'Закрыть форму или модальное окно'],

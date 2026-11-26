@@ -8,10 +8,13 @@
    ============================================ */
 
 :root {
-    /* Приоритет: зелёный → оранжевый → красный, как в брифе. */
-    --priority-low: var(--label-green);
-    --priority-medium: var(--label-orange);
-    --priority-high: var(--label-red);
+    /* Приоритет — формой, а не цветом (палитра «Сигнал», 12.11): высокий —
+       сплошная яркая точка, средний — приглушённая, низкий — пустое кольцо.
+       Раньше было зелёный → оранжевый → красный, и красный высокого
+       приоритета в таблице стоял рядом с красной просрочкой и значил другое. */
+    --priority-low: transparent;
+    --priority-medium: var(--text-muted);
+    --priority-high: var(--text-primary);
 }
 
 /* ─── Аватарка участника ─── */
@@ -30,7 +33,9 @@
     box-shadow: var(--highlight-top);
 }
 
-.member-avatar--sm { width: 22px; height: 22px; font-size: 9px; }
+/* 24 px и 11 px вместо 22 и 9: 9 px — ниже порога читаемости, а инициалы —
+   единственное, что отличает людей на карточке. */
+.member-avatar--sm { width: 24px; height: 24px; font-size: var(--font-size-xs); }
 .member-avatar--md { width: 30px; height: 30px; font-size: var(--font-size-xs); }
 .member-avatar--lg { width: 40px; height: 40px; font-size: var(--font-size-md); }
 
@@ -89,7 +94,7 @@
     background: var(--priority-medium);
 }
 
-.priority-dot--low { background: var(--priority-low); }
+.priority-dot--low { background: var(--priority-low); box-shadow: inset 0 0 0 1.5px var(--text-muted); }
 .priority-dot--medium { background: var(--priority-medium); }
 .priority-dot--high { background: var(--priority-high); }
 
@@ -117,11 +122,13 @@
     background: var(--priority-medium);
 }
 
-.priority-pill--low .priority-pill__dot { background: var(--priority-low); }
+.priority-pill--low .priority-pill__dot { background: var(--priority-low); box-shadow: inset 0 0 0 1.5px var(--text-muted); }
 .priority-pill--medium .priority-pill__dot { background: var(--priority-medium); }
 .priority-pill--high .priority-pill__dot { background: var(--priority-high); }
 
-.priority-pill--high { border-color: var(--danger-border); }
+/* Высокий выделен весом, а не красной рамкой. */
+.priority-pill--high { border-color: var(--border-strong); font-weight: var(--font-weight-semibold); }
+.priority-pill--low { color: var(--text-secondary); }
 
 /* ─── Тулбар фильтров ─── */
 
@@ -344,7 +351,9 @@
 .task-table__th {
     position: sticky;
     top: 0;
-    padding: var(--space-md) var(--space-lg);
+    /* По горизонтали 12, а не 16 px: семь столбцов × 8 px — это ещё один
+       столбец, видимый при окне по умолчанию. */
+    padding: var(--space-md);
     text-align: left;
     font-size: var(--font-size-xs);
     font-weight: var(--font-weight-semibold);
@@ -364,12 +373,12 @@
 .task-table__row:hover { background: var(--bg-card); }
 
 .task-table__td {
-    padding: var(--space-sm) var(--space-lg);
+    padding: var(--space-sm) var(--space-md);
     vertical-align: middle;
     color: var(--text-secondary);
 }
 
-.task-table__td--title { min-width: 260px; }
+.task-table__td--title { min-width: 240px; }
 
 .task-table__title {
     background: none;
@@ -473,10 +482,15 @@
     align-items: center;
     gap: var(--space-xs);
     white-space: nowrap;
+    font-variant-numeric: tabular-nums;
 }
 
-.task-table__due svg { width: 13px; height: 13px; }
+/* `flex-shrink: 0` — столбец «Срок» теперь второй и узкий, и без этого
+   значок часов сжимался в точку раньше, чем таблица расширяла столбец. */
+.task-table__due svg { width: 13px; height: 13px; flex-shrink: 0; }
 .task-table__due--overdue { color: var(--color-danger); }
+/* Срок сегодня или завтра — янтарь «Сигнала»: время, на которое пора смотреть. */
+.task-table__due--soon { color: var(--color-warning); font-weight: var(--font-weight-semibold); }
 .task-table__empty { color: var(--text-muted); }
 
 /* Столбцы из пользовательских полей (§31.4). Длинный текст обрезается
@@ -735,10 +749,10 @@
     white-space: nowrap;
 }
 
-/* Полоса приоритета вдоль левого края карточки. */
-.card--priority-low { box-shadow: inset 3px 0 0 var(--priority-low), var(--shadow-card); }
-.card--priority-medium { box-shadow: inset 3px 0 0 var(--priority-medium), var(--shadow-card); }
-.card--priority-high { box-shadow: inset 3px 0 0 var(--priority-high), var(--shadow-card); }
+/* Полосы приоритета вдоль левого края карточки больше нет (12.11): она была у
+   каждой карточки и красила доску в три цвета, не неся смысла у среднего
+   приоритета. Высокий и низкий теперь — значком в строке под названием
+   (`.card__priority` в board.css), средний не показывается вовсе. */
 
 .card__assignee { margin-left: auto; }
 
@@ -872,18 +886,3 @@
 .card__checklist { font-variant-numeric: tabular-nums; }
 .card__checklist--complete { color: var(--color-success); }
 
-/* Исполнитель / Автор / Приоритет — в один ряд.
-   Класс появился вместе с этими полями, а правило к нему — нет, поэтому
-   поля стояли столбиком и растягивали модалку. */
-
-.card-modal__people {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-md);
-}
-
-.card-modal__field {
-    flex: 1 1 120px;
-    min-width: 0;
-    margin-bottom: 0;
-}

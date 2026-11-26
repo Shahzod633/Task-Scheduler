@@ -790,6 +790,27 @@ fn cards_in(conn: &rusqlite::Connection, column_id: i64) -> CmdResult<Vec<Card>>
 
     let mut res = Vec::new();
     for i in iter { res.push(i.map_err(to_string_err)?); }
+
+    // Метки — одним запросом на колонку, а не на карточку.
+    let mut lstmt = conn.prepare(
+        "SELECT cl.card_id, l.id, l.board_id, l.name, l.color
+           FROM card_labels cl
+           INNER JOIN labels l ON l.id = cl.label_id
+           INNER JOIN cards c ON c.id = cl.card_id
+          WHERE c.column_id = ?1 AND c.archived = 0
+          ORDER BY l.id ASC",
+    ).map_err(to_string_err)?;
+    let rows = lstmt.query_map(params![column_id], |row| {
+        Ok((row.get::<_, i64>(0)?, crate::models::Label {
+            id: row.get(1)?, board_id: row.get(2)?, name: row.get(3)?, color: row.get(4)?,
+        }))
+    }).map_err(to_string_err)?;
+    for r in rows {
+        let (card_id, label) = r.map_err(to_string_err)?;
+        if let Some(card) = res.iter_mut().find(|c| c.id == card_id) {
+            card.labels.push(label);
+        }
+    }
     Ok(res)
 }
 
@@ -2328,25 +2349,65 @@ pub fn get_labels(board_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<cra
     Ok(res)
 }
 
-#[tauri::command]
-pub fn create_label(board_id: i64, name: String, color: String, state: State<'_, DbState>) -> CmdResult<crate::models::Label> {
-    let conn = state.conn.lock().unwrap();
+/// Метка доски: имя до 40 символов (может быть пустым — тогда это просто
+/// цветная полоска), цвет — `#rgb` или `#rrggbb`. Цвет уходит в `style`
+/// лицевой стороны карточки, поэтому произвольную строку туда не пускаем.
+fn create_label_in(conn: &rusqlite::Connection, board_id: i64, name: &str, color: &str) -> CmdResult<crate::models::Label> {
+    let name = name.trim();
+    if name.chars().count() > 40 {
+        return Err("Название метки — не длиннее 40 символов".to_string());
+    }
+    let hex_ok = color.starts_with('#')
+        && (color.len() == 4 || color.len() == 7)
+        && color[1..].chars().all(|c| c.is_ascii_hexdigit());
+    if !hex_ok {
+        return Err("Цвет метки должен быть вида #rrggbb".to_string());
+    }
+    let exists: i64 = conn
+        .query_row("SELECT COUNT(*) FROM boards WHERE id = ?1", params![board_id], |r| r.get(0))
+        .map_err(to_string_err)?;
+    if exists == 0 {
+        return Err("Доска не найдена".to_string());
+    }
     conn.execute(
         "INSERT INTO labels (board_id, name, color) VALUES (?1, ?2, ?3)",
         params![board_id, name, color],
     ).map_err(to_string_err)?;
     let id = conn.last_insert_rowid();
-    Ok(crate::models::Label { id, board_id, name, color })
+    Ok(crate::models::Label { id, board_id, name: name.to_string(), color: color.to_string() })
 }
 
 #[tauri::command]
-pub fn add_label_to_card(card_id: i64, label_id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+pub fn create_label(board_id: i64, name: String, color: String, state: State<'_, DbState>) -> CmdResult<crate::models::Label> {
     let conn = state.conn.lock().unwrap();
+    create_label_in(&conn, board_id, &name, &color)
+}
+
+/// Метку можно повесить только на карточку той же доски, где она создана:
+/// иначе метки чужой доски просочились бы в экспорт и фильтры.
+fn add_label_to_card_in(conn: &rusqlite::Connection, card_id: i64, label_id: i64) -> CmdResult<()> {
+    let same_board: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM cards c
+           INNER JOIN columns col ON col.id = c.column_id
+           INNER JOIN labels l ON l.board_id = col.board_id
+          WHERE c.id = ?1 AND l.id = ?2",
+        params![card_id, label_id],
+        |r| r.get(0),
+    ).map_err(to_string_err)?;
+    if same_board == 0 {
+        return Err("Эта метка принадлежит другой доске".to_string());
+    }
     conn.execute(
         "INSERT OR IGNORE INTO card_labels (card_id, label_id) VALUES (?1, ?2)",
         params![card_id, label_id],
     ).map_err(to_string_err)?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn add_label_to_card(card_id: i64, label_id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let conn = state.conn.lock().unwrap();
+    add_label_to_card_in(&conn, card_id, label_id)
 }
 
 #[tauri::command]
@@ -2357,6 +2418,38 @@ pub fn remove_label_from_card(card_id: i64, label_id: i64, state: State<'_, DbSt
         params![card_id, label_id],
     ).map_err(to_string_err)?;
     Ok(())
+}
+
+/// Метки одной карточки — окно карточки спрашивает их само: экраны вроде
+/// «Списка» приносят карточки без меток.
+#[tauri::command]
+pub fn get_card_labels(card_id: i64, state: State<'_, DbState>) -> CmdResult<Vec<crate::models::Label>> {
+    let conn = state.conn.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT l.id, l.board_id, l.name, l.color FROM card_labels cl
+           INNER JOIN labels l ON l.id = cl.label_id
+          WHERE cl.card_id = ?1 ORDER BY l.id ASC",
+    ).map_err(to_string_err)?;
+    let iter = stmt.query_map(params![card_id], |row| {
+        Ok(crate::models::Label { id: row.get(0)?, board_id: row.get(1)?, name: row.get(2)?, color: row.get(3)? })
+    }).map_err(to_string_err)?;
+    let mut res = Vec::new();
+    for i in iter { res.push(i.map_err(to_string_err)?); }
+    Ok(res)
+}
+
+/// Удаляет метку с доски вместе со снятием её со всех карточек.
+fn delete_label_in(conn: &mut rusqlite::Connection, label_id: i64) -> CmdResult<()> {
+    let tx = conn.transaction().map_err(to_string_err)?;
+    tx.execute("DELETE FROM card_labels WHERE label_id = ?1", params![label_id]).map_err(to_string_err)?;
+    tx.execute("DELETE FROM labels WHERE id = ?1", params![label_id]).map_err(to_string_err)?;
+    tx.commit().map_err(to_string_err)
+}
+
+#[tauri::command]
+pub fn delete_label(label_id: i64, state: State<'_, DbState>) -> CmdResult<()> {
+    let mut conn = state.conn.lock().unwrap();
+    delete_label_in(&mut conn, label_id)
 }
 
 // ─── Notifications ───
@@ -5740,6 +5833,7 @@ const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри п
 - «Какие задачи просрочены?» → используй get_overdue_cards
 - «Сколько времени я потратил на проект X?» → используй get_time_summary
 - «Покажи нагрузку по исполнителям» → используй get_workload
+- «Какие привычки я сорвал на этой неделе?» → используй get_habits
 
 Когда пользователь спрашивает о данных — всегда вызывай инструмент, не придумывай ответ из головы.
 
@@ -5752,11 +5846,36 @@ const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри п
 - Приоритет (если не указан — Medium)
 - Исполнитель (если не указан — текущий пользователь)
 
-Новая карточка всегда создаётся в первой рабочей колонке доски (не в финальной).
+Новая карточка встаёт в первую рабочую колонку доски. Если пользователь назвал колонку («в колонку \
+В работе») — передай её название в параметр column, не называл — column не передавай. В завершающую \
+колонку задачу создать нельзя.
 
-В начале разговора (когда в истории ещё нет ни одной реплики) начни с краткой сводки продуктивности \
-за неделю, используя get_productivity_report. Не перечисляй все числа — выдели 2-3 ключевых, особенно \
-если есть просроченные задачи или задачи в «Требуют внимания».
+Привычки — общие для всех пространств. get_habits — список привычек с id, стриками и отметками за неделю. \
+«Заведи привычку …» → create_habit (передавай только то, что пользователь назвал). «Отметь …, я сделал …» → \
+сначала get_habits, чтобы взять habit_id, потом log_habit: completed — выполнено, fallback — лайт-версия, \
+skipped — пропуск, failed — сорвалось. Привычка заводится и отмечается ТОЛЬКО вызовом инструмента — \
+перед этим пользователь тоже увидит превью и подтвердит.
+
+ВАЖНО: задача создаётся или меняется ТОЛЬКО вызовом инструмента (create_card, move_card и другие). \
+Никогда не пиши «создал», «добавил», «перенёс», «готово», пока не вызвал инструмент и не получил его результат. \
+Если доска и название известны — сразу вызывай create_card, не переспрашивай про необязательное. \
+Если доска в пространстве одна — бери её, не спрашивая. \
+Если чего-то не хватает — задай вопрос, а не делай вид, что задача создана.
+
+Срок (due_date) ставь ТОЛЬКО если пользователь сам его назвал. Не назвал — due_date не передавай вовсе: \
+срок в этом приложении задаётся один раз и потом не меняется, придуманный срок не исправить.
+Названный относительно срок («завтра», «в пятницу», «через неделю») переводи в due_date вида ГГГГ-ММ-ДД по \
+датам, указанным ниже, и не оставляй такие слова в названии задачи: «позвонить маме завтра» — это задача \
+«Позвонить маме» со сроком на завтрашнее число.
+
+Отвечая после изменения, называй доску, колонку и срок так, как их вернул инструмент (поле what_was_done), \
+а не по памяти.
+
+board_id, card_id и другие номера — служебные, для вызова инструментов. Пользователю их не называй: \
+доски и задачи называй по имени.
+
+Сводку продуктивности давай только тогда, когда о ней спрашивают, и только по данным \
+get_productivity_report. Никогда не придумывай числа: нет данных инструмента — нет цифр.
 
 Ты можешь давать рекомендации:
 - Если много просроченных — предложи пересмотреть приоритеты
@@ -5773,6 +5892,16 @@ const AI_MAX_MESSAGE_CHARS: usize = 8000;
 /// команд (`boards_in`, `build_workspace_card_list`, …) без копий запросов.
 #[path = "ai_tools.rs"]
 mod ai_tools;
+
+/// Сверка чисел в ответе модели с результатами инструментов.
+#[path = "ai_facts.rs"]
+mod ai_facts;
+
+/// Трекер привычек — тоже дочерний модуль: даты считает теми же
+/// `days_from_civil`/`parse_day`, а ИИ-анализ ходит в Ollama через те же
+/// `read_ai_settings`/`run_blocking`, что и ассистент.
+#[path = "habits.rs"]
+pub mod habits;
 
 #[tauri::command]
 pub fn get_ai_settings(state: State<'_, DbState>) -> CmdResult<AiSettings> {
@@ -5945,9 +6074,68 @@ pub fn clear_chat_history(
         .map_err(to_string_err)
 }
 
+/// Сколько досок перечислять в системном промпте. Дальше — только число и
+/// отсылка к `get_boards`: сотня досок съела бы окно контекста локальной модели.
+const AI_PROMPT_MAX_BOARDS: usize = 30;
+
+/// Строка промпта со списком досок пространства и их `board_id`.
+///
+/// Без неё модель, услышав «на доске Shady's tasks», подставляла номер наугад
+/// (проверено живьём 12.11: board_id 3 вместо 1) вместо того, чтобы сначала
+/// вызвать `get_boards`, а на просьбу «предложи доску» печатала заглушку
+/// «[список досок из get_boards]».
+fn prompt_boards_line(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<String> {
+    let boards = boards_in(conn, workspace_id)?;
+    if boards.is_empty() {
+        return Ok("Досок в пространстве пока нет — создать задачу некуда.".to_string());
+    }
+    let listed: Vec<String> = boards
+        .iter()
+        .take(AI_PROMPT_MAX_BOARDS)
+        .map(|b| format!("«{}» (board_id {})", b.name, b.id))
+        .collect();
+    let mut line = format!("Доски пространства: {}.", listed.join(", "));
+    if boards.len() > AI_PROMPT_MAX_BOARDS {
+        line.push_str(&format!(
+            " И ещё {} — полный список даёт get_boards.",
+            boards.len() - AI_PROMPT_MAX_BOARDS
+        ));
+    }
+    line.push_str(" Бери board_id только отсюда или из get_boards, не угадывай.");
+    Ok(line)
+}
+
+/// Сколько привычек перечислять в промпте; дальше — отсылка к `get_habits`.
+const AI_PROMPT_MAX_HABITS: usize = 20;
+
+/// Строка промпта с привычками и их `habit_id` — по той же причине, что доски.
+///
+/// Живые прогоны 26.11 (jarvis:latest): на «я вчера сорвал медитацию, отметь
+/// срыв» модель трижды из трёх ответила «отмечено», не вызвав ни `get_habits`,
+/// ни `log_habit`, — второй шаг за номером привычки она пропускает. А
+/// «отметь медитацию за сегодня» в том же разговоре проходил, потому что номер
+/// ещё оставался в контексте с прошлого вызова.
+fn prompt_habits_line(conn: &rusqlite::Connection) -> CmdResult<String> {
+    let habits = habits::list_habits_in(conn, false)?;
+    if habits.is_empty() {
+        return Ok("Привычек пока нет.".to_string());
+    }
+    let listed: Vec<String> = habits
+        .iter()
+        .take(AI_PROMPT_MAX_HABITS)
+        .map(|h| format!("«{}» (habit_id {})", h.title, h.id))
+        .collect();
+    let mut line = format!("Привычки пользователя: {}.", listed.join(", "));
+    if habits.len() > AI_PROMPT_MAX_HABITS {
+        line.push_str(&format!(" И ещё {} — полный список даёт get_habits.", habits.len() - AI_PROMPT_MAX_HABITS));
+    }
+    line.push_str(" Чтобы отметить привычку, сразу вызывай log_habit с habit_id отсюда.");
+    Ok(line)
+}
+
 /// Системный промпт целиком: постоянная часть плюс то, чего модель знать не
-/// может, — сегодняшняя дата (без неё «до 5 октября» не перевести в диапазон)
-/// и название пространства.
+/// может, — сегодняшняя дата (без неё «до 5 октября» не перевести в диапазон),
+/// название пространства и его доски с номерами.
 fn system_prompt(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<String> {
     const WEEKDAYS: [&str; 7] = ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"];
     let (today, weekday): (String, i64) = conn
@@ -5962,12 +6150,35 @@ fn system_prompt(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<St
         .optional()
         .map_err(to_string_err)?
         .ok_or_else(|| "Пространство не найдено".to_string())?;
+    // Ближайшие семь дней — готовыми датами. Считать самой модель ошибалась:
+    // живой прогон 12.11 перевёл «завтра» при сегодняшнем 12-м в 14-е. И
+    // слова «послезавтра» в списке нет намеренно: в нём есть «завтра», и
+    // модель цеплялась за дату после него — тоже 14-е.
+    let mut days = Vec::with_capacity(7);
+    for offset in 1..=7 {
+        let (date, wd): (String, i64) = conn
+            .query_row(
+                "SELECT date('now', 'localtime', ?1), CAST(strftime('%w', 'now', 'localtime', ?1) AS INTEGER)",
+                params![format!("+{} days", offset)],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(to_string_err)?;
+        days.push((WEEKDAYS[wd.rem_euclid(7) as usize], date));
+    }
+    let (tomorrow_name, tomorrow) = &days[0];
+    let week: Vec<String> = days[1..].iter().map(|(name, date)| format!("{} {}", name, date)).collect();
     Ok(format!(
-        "{}\n\nСегодня {}, {}. Текущее пространство — «{}»; инструменты видят только его.",
+        "{}\n\nСегодня {}, {}. «Завтра» — это {} ({}). Следующие дни: {}. \
+         Текущее пространство — «{}»; инструменты видят только его.\n{}\n{}",
         AI_SYSTEM_PROMPT,
         today,
         WEEKDAYS[weekday.rem_euclid(7) as usize],
+        tomorrow,
+        tomorrow_name,
+        week.join(", "),
         workspace,
+        prompt_boards_line(conn, workspace_id)?,
+        prompt_habits_line(conn)?,
     ))
 }
 
@@ -6055,11 +6266,51 @@ struct Turn {
     /// Сколько раз уже спросили модель — предел `MAX_TOOL_ROUNDS` на весь ход,
     /// включая паузы.
     rounds: usize,
+    /// Модели уже напомнили, что она заявила об изменении без инструмента, —
+    /// второй раз за ход не напоминаем.
+    nudged: bool,
+    /// Модель уже поправляли за числа, не сходящиеся с данными инструментов.
+    facts_retried: bool,
+    /// Модель уже просили повторить ответ по-русски.
+    language_retried: bool,
 }
 
 impl Turn {
     fn new(user_text: String, messages: Vec<crate::ollama::Message>) -> Self {
-        Turn { user_text, messages, queue: Default::default(), tools_used: Vec::new(), actions: Vec::new(), rounds: 0 }
+        Turn {
+            user_text,
+            messages,
+            queue: Default::default(),
+            tools_used: Vec::new(),
+            actions: Vec::new(),
+            rounds: 0,
+            nudged: false,
+            facts_retried: false,
+            language_retried: false,
+        }
+    }
+
+    /// Числа из результатов инструментов этого хода — после последней реплики
+    /// человека. Прошлые вопросы не в счёт: данные с тех пор могли измениться.
+    fn facts(&self) -> ai_facts::Facts {
+        let start = self.messages.iter().rposition(|m| m.role == "user").map_or(0, |i| i + 1);
+        let mut facts = ai_facts::Facts::default();
+        for m in &self.messages[start..] {
+            if let (true, Some(tool)) = (m.role == "tool", m.tool_name.as_deref()) {
+                facts.add_tool_result(tool, &m.content);
+            }
+        }
+        // Даты сверяются, только если инструменты хоть что-то вернули: тогда
+        // законны ещё сегодняшняя и названные человеком.
+        if !facts.is_empty() {
+            if let Some(today) = ai_tools::today_from_prompt(&self.messages) {
+                facts.allow_dates_from(&today);
+            }
+            for text in recent_user_texts(&self.messages) {
+                facts.allow_dates_from(text);
+            }
+        }
+        facts
     }
 
     fn executed_anything(&self) -> bool {
@@ -6086,6 +6337,25 @@ enum TurnStep {
     Confirm(ai_tools::Prepared),
 }
 
+/// Две последние реплики человека — текущая и предыдущая. Вторая нужна для
+/// уточнений: на вопрос ассистента «На какой доске?» отвечают просто
+/// «Учёба», и сама просьба («создай задачу … к пятнице») остаётся репликой
+/// раньше.
+fn recent_user_texts(messages: &[crate::ollama::Message]) -> Vec<&str> {
+    messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == "user")
+        .take(2)
+        .map(|m| m.content.as_str())
+        .collect()
+}
+
+/// Просил ли человек изменение — в текущей реплике или в предыдущей.
+fn change_requested(messages: &[crate::ollama::Message]) -> bool {
+    recent_user_texts(messages).into_iter().any(ai_tools::requests_change)
+}
+
 /// Ведёт ход, пока модель не ответит текстом или не попросит изменение.
 ///
 /// `step_tool` решает судьбу каждого вызова: читающий выполняет сразу,
@@ -6098,7 +6368,27 @@ where
     let tools = ai_tools::definitions();
     loop {
         while let Some(call) = turn.queue.pop_front() {
-            match step_tool(&call.function.name, &call.function.arguments)? {
+            // До превью: срок и колонка, которых человек не называл, убираются,
+            // а дата, названная словами («до понедельника», «вчера») и
+            // посчитанная моделью неверно, правится.
+            let user_texts = recent_user_texts(&turn.messages);
+            let name = call.function.name.as_str();
+            let mut args = call.function.arguments.clone();
+            if let Some(cleaned) = ai_tools::drop_unasked_due_date(name, &args, &user_texts) {
+                log::info!("ассистент: срок, о котором не просили, убран из {}", name);
+                args = cleaned;
+            }
+            if let Some(cleaned) = ai_tools::drop_unasked_column(name, &args, &user_texts) {
+                log::info!("ассистент: колонка, о которой не просили, убрана из {}", name);
+                args = cleaned;
+            }
+            if let Some(today) = ai_tools::today_from_prompt(&turn.messages) {
+                if let Some(fixed) = ai_tools::fix_spoken_dates(name, &args, &user_texts, &today) {
+                    log::info!("ассистент: дата в {} поправлена по словам пользователя", name);
+                    args = fixed;
+                }
+            }
+            match step_tool(&call.function.name, &args)? {
                 ai_tools::ToolStep::Result(result) => {
                     log::info!("ассистент: инструмент {} → {} байт", call.function.name, result.len());
                     turn.messages.push(crate::ollama::Message::tool_result(&call.function.name, result));
@@ -6119,8 +6409,65 @@ where
             })
             .await?
         };
+        let mut reply = reply;
         if reply.tool_calls.is_empty() {
-            return Ok(TurnStep::Answer(reply.content));
+            // Вызов, написанный текстом, — всё равно вызов.
+            if let Some(call) = ai_tools::salvage_tool_call(&reply.content) {
+                log::info!("ассистент: вызов {} пришёл текстом — разобран", call.function.name);
+                reply.content.clear();
+                reply.tool_calls.push(call);
+            }
+        }
+        if reply.tool_calls.is_empty() {
+            let can_retry = turn.rounds < ai_tools::MAX_TOOL_ROUNDS;
+            // Ответ не по-русски (иероглифы, английский) — один раз просим
+            // повторить, потом обрезаем иероглифический хвост. Раньше проверки
+            // «сделал ли»: повторный ответ может оказаться и вызовом инструмента.
+            if ai_tools::needs_language_retry(&reply.content) {
+                if !turn.language_retried && can_retry {
+                    log::warn!("ассистент: в ответе текст не на русском — прошу повторить");
+                    turn.language_retried = true;
+                    turn.messages.push(reply);
+                    turn.messages.push(crate::ollama::Message::new("system", ai_tools::NUDGE_LANGUAGE));
+                    continue;
+                }
+                reply.content = ai_tools::cut_foreign_tail(&reply.content);
+            }
+            // Числа и «нет …», не сходящиеся с тем, что вернули инструменты
+            // (ai_facts.rs): один повтор с поправкой, потом — приписка с
+            // настоящими числами.
+            let facts = turn.facts();
+            let problems = ai_facts::check(&reply.content, &facts);
+            if !problems.is_empty() {
+                if !turn.facts_retried && can_retry {
+                    log::warn!("ассистент: ответ расходится с данными инструментов ({}) — прошу исправить", problems.len());
+                    turn.facts_retried = true;
+                    turn.messages.push(reply);
+                    turn.messages.push(crate::ollama::Message::new("system", ai_facts::nudge(&problems, &facts)));
+                    continue;
+                }
+                log::warn!("ассистент: и повтор расходится с данными — ответ поправлен");
+                reply.content = ai_facts::correct(&reply.content, &problems, &facts);
+            }
+            // «Создал», хотя человек просил изменение, а в этом ходе ничего
+            // не выполнено, — модель выдумала. Без просьбы об изменении
+            // проверка не включается: «вы создали 4 задачи» в сводке — это
+            // данные, а не выдумка.
+            if !turn.executed_anything()
+                && change_requested(&turn.messages)
+                && ai_tools::claims_change(&reply.content)
+            {
+                if !turn.nudged && can_retry {
+                    log::warn!("ассистент: заявлено изменение без вызова инструмента — напоминание");
+                    turn.nudged = true;
+                    turn.messages.push(reply);
+                    turn.messages.push(crate::ollama::Message::new("system", ai_tools::NUDGE_NO_TOOL));
+                    continue;
+                }
+                log::warn!("ассистент: изменение заявлено, но не выполнено — ответ помечен");
+                reply.content = format!("{}{}", reply.content, ai_tools::NOTE_NOTHING_CHANGED);
+            }
+            return Ok(TurnStep::Answer(ai_tools::strip_service_ids(&reply.content)));
         }
         turn.queue.extend(reply.tool_calls.iter().cloned());
         turn.messages.push(reply);
@@ -6332,6 +6679,58 @@ fn save_assistant_message(
     .map_err(to_string_err)
 }
 
+/// Текст приветствия: один запрос к модели без инструментов.
+///
+/// Приветствие с иероглифами (было живьём 12.11: «Как я могу помочь
+/// вам今天完成了…») — один повтор с просьбой писать по-русски, затем обрезка
+/// чужого хвоста, как в обычном ответе. Вынесено из команды, чтобы живой тест
+/// гонял тот же путь.
+///
+/// Числа сверяются со сводкой `report` (ai_facts.rs): в обоих живых прогонах
+/// 26.11 приветствие называло сводку за неделю «сегодня». Расхождение — один
+/// повтор с поправкой, потом — правка «сегодня» на период и приписка с
+/// настоящими числами.
+async fn greeting_text(settings: &AiSettings, request: Vec<crate::ollama::Message>, report: &serde_json::Value) -> CmdResult<String> {
+    use crate::ollama::Message;
+    let ask = |messages: Vec<Message>| {
+        let settings = settings.clone();
+        run_blocking(move || {
+            crate::ollama::chat(&settings.ollama_url, &settings.model, &messages, &[], settings.timeout_seconds)
+        })
+    };
+    let mut conversation = request;
+    let first = ask(conversation.clone()).await?;
+    let mut text = first.content.clone();
+    conversation.push(first);
+    if ai_tools::needs_language_retry(&text) {
+        log::warn!("ассистент: приветствие не на русском — прошу повторить");
+        conversation.push(Message::new("system", ai_tools::NUDGE_LANGUAGE));
+        if let Ok(second) = ask(conversation.clone()).await {
+            text = second.content.clone();
+            conversation.push(second);
+        }
+        text = ai_tools::cut_foreign_tail(&text);
+    }
+
+    let mut facts = ai_facts::Facts::default();
+    facts.add_report(report);
+    let problems = ai_facts::check(&text, &facts);
+    if !problems.is_empty() {
+        log::warn!("ассистент: приветствие расходится со сводкой ({}) — прошу исправить", problems.len());
+        conversation.push(Message::new("system", ai_facts::nudge(&problems, &facts)));
+        if let Ok(again) = ask(conversation).await {
+            let again = ai_tools::cut_foreign_tail(&again.content);
+            text = if ai_tools::needs_language_retry(&again) { text } else { again };
+        }
+        let left = ai_facts::check(&text, &facts);
+        if !left.is_empty() {
+            log::warn!("ассистент: и повтор приветствия расходится со сводкой — поправлено");
+            text = ai_facts::correct(&text, &left, &facts);
+        }
+    }
+    Ok(ai_tools::strip_service_ids(&text))
+}
+
 /// Приветствие со сводкой за неделю — только для **пустой** истории: у
 /// начатого разговора есть что продолжать и без него. Возвращает записанную
 /// реплику или `None`, если история уже не пуста или ждёт подтверждение.
@@ -6353,15 +6752,11 @@ pub async fn ollama_greeting(workspace_id: i64, app: tauri::AppHandle) -> CmdRes
         }
         let settings = read_ai_settings(&conn)?;
         let report = ai_tools::productivity_report(&conn, workspace_id, GREETING_REPORT_DAYS)?;
-        (settings.clone(), greeting_request(&system_prompt(&conn, workspace_id)?, &report))
+        (settings.clone(), greeting_request(&system_prompt(&conn, workspace_id)?, &report), report)
     };
-    let (settings, request) = prepared;
+    let (settings, request, report) = prepared;
 
-    let text = run_blocking(move || {
-        crate::ollama::chat(&settings.ollama_url, &settings.model, &request, &[], settings.timeout_seconds)
-    })
-    .await?
-    .content;
+    let text = greeting_text(&settings, request, &report).await?;
 
     let state = app.state::<DbState>();
     let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;

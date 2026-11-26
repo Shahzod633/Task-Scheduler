@@ -9,9 +9,9 @@ const Icons = {
     logo: `<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
         <defs>
             <linearGradient id="tf-logo-fill" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
-                <stop offset="0" stop-color="#7C6BFF"/>
-                <stop offset="0.55" stop-color="#8E5CFF"/>
-                <stop offset="1" stop-color="#B45CFF"/>
+                <stop offset="0" stop-color="#4D7CFF"/>
+                <stop offset="0.55" stop-color="#3366FF"/>
+                <stop offset="1" stop-color="#2149D6"/>
             </linearGradient>
             <linearGradient id="tf-logo-sheen" x1="6" y1="2" x2="20" y2="18" gradientUnits="userSpaceOnUse">
                 <stop offset="0" stop-color="#fff" stop-opacity="0.28"/>
@@ -197,6 +197,18 @@ const Icons = {
         <path d="m6 9 6 6 6-6"/>
     </svg>`,
 
+    // Свернуть / развернуть сайдбар.
+    panelLeft: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2"/>
+        <path d="M9 3v18"/>
+    </svg>`,
+
+    // Высокий приоритет на лицевой стороне карточки: форма вместо цвета.
+    chevronsUp: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m17 11-5-5-5 5"/>
+        <path d="m17 18-5-5-5 5"/>
+    </svg>`,
+
     // Ticked box — the checklist counter on a card face.
     checkSquare: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <rect width="18" height="18" x="3" y="3" rx="2"/><path d="m9 12 2 2 4-4"/>
@@ -234,6 +246,21 @@ const Icons = {
 
     send: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>
+    </svg>`,
+
+    /* Привычки: круг повторения с галочкой */
+    habit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12a9 9 0 1 1-3.5-7.1"/><path d="M21 4v5h-5"/><path d="m8.5 12.5 2.5 2.5 5-5"/>
+    </svg>`,
+
+    /* Стрик привычки */
+    flame: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
+    </svg>`,
+
+    /* Пропуск / срыв привычки */
+    skip: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m5 4 10 8-10 8V4z"/><path d="M19 5v14"/>
     </svg>`,
 };
 

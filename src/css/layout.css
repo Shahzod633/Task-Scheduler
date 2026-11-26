@@ -108,13 +108,11 @@
     width: 26px;
     height: 26px;
     flex-shrink: 0;
-    filter: drop-shadow(0 2px 8px var(--accent-glow));
-    transition: transform var(--transition-spring), filter var(--transition-normal);
+    transition: transform var(--transition-spring);
 }
 
 .header__logo:hover .header__logo-icon {
     transform: rotate(-6deg) scale(1.06);
-    filter: drop-shadow(0 3px 12px var(--accent-glow));
 }
 
 .header__logo-text {
@@ -125,12 +123,11 @@
     letter-spacing: var(--tracking-tight);
 }
 
-/* Вторая половина слова — градиентом в цвет знака */
+/* Вторая половина слова — в цвет знака. Сплошным цветом, а не градиентным
+   текстом: градиент по буквам был украшением и при выделении текста
+   превращался в пустоту. */
 .header__logo-accent {
-    background: var(--accent-gradient);
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    color: var(--accent-text);
 }
 
 /* ─── Nav ─── */
@@ -165,7 +162,7 @@
 .header__create-btn {
     position: relative;
     padding: 7px 16px;
-    background: var(--accent-gradient);
+    background: var(--accent-fill);
     color: var(--text-on-accent);
     border-radius: var(--radius-md);
     font-size: var(--font-size-md);
@@ -177,63 +174,79 @@
 }
 
 .header__create-btn:hover {
-    filter: brightness(1.1);
-    box-shadow: 0 6px 22px -4px var(--accent-glow);
+    background: var(--accent-fill-hover);
+    box-shadow: var(--shadow-md);
     transform: translateY(-1px);
 }
 
 .header__create-btn:active {
+    background: var(--accent-fill-active);
     transform: translateY(0) scale(0.97);
 }
 
 /* ─── Search Bar ─── */
+/* Кнопка, похожая на поле: по ней открывается палитра поиска (Ctrl+K).
+   Вид поля оставлен намеренно — именно там ищут поиск. */
 .header__search {
     flex: 1;
     max-width: 640px;
+    min-width: 0;
     margin: 0 auto;
-    position: relative;
-}
-
-.header__search-input {
-    width: 100%;
     height: 34px;
-    padding: 0 var(--space-md) 0 38px;
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: 0 var(--space-xs) 0 var(--space-md);
     background: var(--bg-input);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-pill);
-    color: var(--text-primary);
+    color: var(--text-muted);
     font-size: var(--font-size-md);
-    transition: background var(--transition-fast), border-color var(--transition-fast), box-shadow var(--transition-normal);
+    text-align: left;
+    cursor: text;
+    transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
 }
 
-.header__search-input::placeholder {
-    color: var(--text-placeholder);
-}
-
-.header__search-input:hover {
+.header__search:hover {
     background: var(--bg-input-focus);
+    border-color: var(--border-hover);
+    color: var(--text-secondary);
 }
 
-.header__search-input:focus {
-    background: var(--bg-input-focus);
-    border-color: var(--accent-border);
-    box-shadow: var(--shadow-focus);
+.header__search:focus-visible {
+    border-radius: var(--radius-pill);
 }
 
 .header__search-icon {
-    position: absolute;
-    left: 13px;
-    top: 50%;
-    transform: translateY(-50%);
+    display: flex;
+    flex-shrink: 0;
     width: 16px;
     height: 16px;
-    color: var(--text-muted);
-    pointer-events: none;
-    transition: color var(--transition-fast);
 }
 
-.header__search:focus-within .header__search-icon {
-    color: var(--accent-text);
+.header__search-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.header__search-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.header__search-kbd {
+    flex-shrink: 0;
+    padding: 2px var(--space-sm);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-pill);
+    font-family: var(--font-family);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+    color: var(--text-muted);
+    background: var(--bg-card);
 }
 
 /* ─── Header Right Section ─── */
@@ -283,17 +296,19 @@
     max-width: 300px;
     padding: 0 var(--space-sm) 0 10px;
     margin-right: var(--space-xs);
-    border: 1px solid var(--accent-border);
+    /* Янтарь — цвет времени в «Сигнале»: идущий таймер, «сегодня», срок
+       близко. Кобальт остаётся за действиями. */
+    border: 1px solid var(--warning-border);
     border-radius: var(--radius-pill);
-    background: var(--accent-soft);
+    background: var(--warning-soft);
     color: var(--text-primary);
     font-size: var(--font-size-sm);
     animation: fade-in var(--duration-3) var(--ease-out) both;
-    transition: background var(--transition-fast), transform var(--transition-fast);
+    transition: border-color var(--transition-fast), transform var(--transition-fast);
 }
 
 .header-timer:hover {
-    background: var(--accent-light);
+    border-color: var(--color-warning);
 }
 
 .header-timer:active {
@@ -305,7 +320,7 @@
     width: 7px;
     height: 7px;
     border-radius: var(--radius-round);
-    background: var(--accent-color);
+    background: var(--color-warning);
     animation: pulse-soft 1.6s var(--ease-in-out) infinite;
 }
 
@@ -327,7 +342,7 @@
 .header-timer__stop {
     display: flex;
     flex: none;
-    color: var(--accent-text);
+    color: var(--color-warning);
 }
 
 .header-timer__stop svg {
@@ -362,7 +377,7 @@
     height: 30px;
     margin-left: var(--space-xs);
     border-radius: var(--radius-round);
-    background: var(--accent-gradient);
+    background: var(--accent-fill);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -410,18 +425,80 @@
     overflow-y: auto;
     overflow-x: hidden;
     padding-bottom: var(--space-lg);
-    /* Скрытие идёт по transform + opacity: ни одно из свойств не вызывает
-       reflow, поэтому переход остаётся плавным даже на слабом железе. */
-    transition: transform var(--transition-normal), opacity var(--transition-normal);
     z-index: 50;
 }
 
-.sidebar--hidden {
-    transform: translateX(-100%);
-    opacity: 0;
-    position: absolute;
-    height: 100%;
-    pointer-events: none;
+/* Последняя открытая доска — под «Досками», с отступом: это не раздел, а
+   место внутри него (12.11, вместо кнопки «Доска» в доке). */
+.sidebar__item--sub {
+    padding-left: 30px;
+    font-size: var(--font-size-ui);
+}
+
+.sidebar__item--sub .sidebar__item-icon {
+    width: 16px;
+    height: 16px;
+}
+
+/* ─── Свёрнутый сайдбар — «рельс» иконок (12.11, sidebar.js) ───
+   Сворачивается кнопкой внизу или сам при окне уже 1100 px. Подписи прячутся,
+   их место занимают подсказки. Ширина меняется мгновенно, без перехода:
+   анимация ширины перестраивала бы весь экран на каждом кадре. */
+.sidebar--rail {
+    width: var(--sidebar-rail-width);
+    min-width: var(--sidebar-rail-width);
+}
+
+.sidebar--rail .sidebar__section,
+.sidebar--rail .sidebar__workspace,
+.sidebar--rail .sidebar__footer {
+    padding-left: var(--space-xs);
+    padding-right: var(--space-xs);
+}
+
+.sidebar--rail .sidebar__section-title,
+.sidebar--rail .sidebar__item-text,
+.sidebar--rail .sidebar__item-action,
+.sidebar--rail .sidebar__workspace-name,
+.sidebar--rail .sidebar__workspace-toggle,
+.sidebar--rail .sidebar__workspace-menu,
+.sidebar--rail .sidebar__collapse-text {
+    display: none;
+}
+
+.sidebar--rail .sidebar__item,
+.sidebar--rail .sidebar__workspace-header,
+.sidebar--rail .sidebar__collapse {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+}
+
+/* Значок «панель» смотрит в сторону, куда панель раскроется. */
+.sidebar--rail .sidebar__collapse .sidebar__item-icon {
+    transform: scaleX(-1);
+}
+
+.sidebar__footer {
+    margin-top: auto;
+    padding: var(--space-sm) var(--space-md) 0;
+}
+
+.sidebar__collapse {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    width: 100%;
+    padding: 8px var(--space-sm) 8px 11px;
+    border-radius: var(--radius-md);
+    color: var(--text-muted);
+    font-size: var(--font-size-ui);
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.sidebar__collapse:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
 }
 
 .sidebar__section {
@@ -447,6 +524,9 @@
     display: flex;
     align-items: center;
     gap: var(--space-md);
+    /* Пункты — кнопки (12.11): во всю ширину и с текстом слева, как были div. */
+    width: 100%;
+    text-align: left;
     padding: 8px var(--space-sm) 8px 11px;
     margin-bottom: 2px;
     border-radius: var(--radius-md);
@@ -466,7 +546,7 @@
     width: 3px;
     height: 18px;
     border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
-    background: var(--accent-gradient);
+    background: var(--accent-500);
     transform: translateY(-50%) scaleY(0);
     opacity: 0;
     transition: transform var(--transition-spring), opacity var(--transition-fast);
@@ -554,6 +634,9 @@
     display: flex;
     align-items: center;
     gap: var(--space-sm);
+    width: 100%;
+    text-align: left;
+    color: var(--text-primary);
     padding: var(--space-sm);
     cursor: pointer;
     border-radius: var(--radius-md);
@@ -568,7 +651,7 @@
     width: 30px;
     height: 30px;
     border-radius: var(--radius-sm);
-    background: var(--gradient-1);
+    background: var(--accent-fill);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -769,7 +852,7 @@
 }
 
 .board-view-switch__option--active {
-    background: var(--accent-gradient);
+    background: var(--accent-fill);
     color: var(--text-on-accent);
     box-shadow: var(--shadow-sm);
 }

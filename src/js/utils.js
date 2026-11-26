@@ -217,6 +217,21 @@ export function isOverdue(dateStr) {
     return date < new Date();
 }
 
+/**
+ * Состояние срока для окраски: `'overdue'` — прошёл, `'soon'` — сегодня или
+ * завтра, `''` — позже или срока нет. Красный в «Сигнале» — только
+ * просрочка, янтарь — время, на которое пора смотреть.
+ */
+export function dueState(dateStr) {
+    if (!dateStr) return '';
+    if (isOverdue(dateStr)) return 'overdue';
+    const date = parseDueDate(dateStr);
+    if (!date) return '';
+    const atMidnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const days = Math.round((atMidnight(date) - atMidnight(new Date())) / 86400000);
+    return days <= 1 ? 'soon' : '';
+}
+
 // ─── Длительность ───
 
 /**
@@ -396,6 +411,72 @@ export function pluralize(n, [one, few, many]) {
     if (mod10 === 1) return one;
     if (mod10 >= 2 && mod10 <= 4) return few;
     return many;
+}
+
+/**
+ * Дробь по-русски: запятая, а не точка («3,0», не «3.0»).
+ *
+ * @param {number} value
+ * @param {number} digits — знаков после запятой
+ */
+export function formatDecimal(value, digits = 1) {
+    return value.toLocaleString('ru-RU', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+const SHORT_DAY = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' });
+
+/**
+ * Ключ дня «ГГГГ-ММ-ДД» → «6 нояб.» — подпись оси графиков.
+ *
+ * Раньше оси подписывались срезом ключа («11-06»), и его читали и как
+ * 11 июня, и как 6 ноября. Дата собирается в местном календаре, как и сами
+ * ключи (`toDateKey`): разбор строки через `new Date('2026-11-06')` дал бы
+ * полночь UTC, то есть в западных поясах — предыдущий день.
+ */
+export function formatShortDay(key) {
+    const [y, m, d] = key.split('-').map(Number);
+    return SHORT_DAY.format(new Date(y, m - 1, d));
+}
+
+// ─── Текст поверх цвета-данных ───────────────────────────────────────────
+//
+// Цвет метки выбирает человек, цвет аватара раздаёт бэкенд по кругу, и белый
+// текст на них читается не всегда: на жёлтой метке это 1,5:1, на янтарном
+// аватаре — 2,2:1. Из двух цветов текста (`--on-data-dark` и `--on-data-light`
+// в variables.css) берётся тот, что контрастнее. Сами значения — в CSS, здесь
+// только выбор между ними.
+
+function luminanceOf(hex) {
+    const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(hex).trim());
+    if (!m) return null;
+    const full = m[1].length === 3 ? m[1].replace(/./g, (c) => c + c) : m[1];
+    const channel = (i) => {
+        const v = parseInt(full.slice(i, i + 2), 16) / 255;
+        return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+}
+
+let dataTextLuminance = null;
+
+/**
+ * Цвет текста для подложки цвета `hex`: `var(--on-data-dark)` или
+ * `var(--on-data-light)` — какой даёт больший контраст.
+ */
+export function textColorOn(hex) {
+    const bg = luminanceOf(hex);
+    if (bg === null) return 'var(--on-data-light)';
+    if (!dataTextLuminance) {
+        const css = getComputedStyle(document.documentElement);
+        dataTextLuminance = {
+            dark: luminanceOf(css.getPropertyValue('--on-data-dark')) ?? 0,
+            light: luminanceOf(css.getPropertyValue('--on-data-light')) ?? 1,
+        };
+    }
+    const contrast = (a, b) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    return contrast(bg, dataTextLuminance.dark) > contrast(bg, dataTextLuminance.light)
+        ? 'var(--on-data-dark)'
+        : 'var(--on-data-light)';
 }
 
 /**

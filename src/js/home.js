@@ -7,7 +7,52 @@ import { createBoardCard } from './hub.js';
 import { renderBarChart } from './charts.js';
 import { createAvatar } from './members.js';
 import { priorityLabel } from './filters.js';
-import { createElement, $, showToast, lastNDays, pluralize } from './utils.js';
+import { createElement, $, showToast, lastNDays, pluralize, formatShortDay, dueState, formatDueDate } from './utils.js';
+import Icons from './icons.js';
+import { showCardEditModal } from './board.js';
+import { renderHabitsTodayWidget } from './habits.js';
+
+/** Сколько горящих задач показывать; остальные — в «Списке». */
+const TODAY_LIMIT = 8;
+
+/**
+ * Строки виджета «Сегодня и просрочено»: срок, название, где лежит, кто
+ * делает. Щелчок открывает карточку прямо здесь.
+ */
+function renderTodayList(list, cards, workspaceId) {
+    list.innerHTML = '';
+    if (!cards.length) {
+        list.appendChild(createElement('p', { className: 'page__empty' },
+            'Просроченных задач нет, на сегодня и завтра сроков тоже.'));
+        return;
+    }
+    for (const card of cards.slice(0, TODAY_LIMIT)) {
+        const state = dueState(card.due_date);
+        const row = createElement('button', { className: 'today-row', type: 'button' });
+        row.appendChild(createElement('span', {
+            className: `due-chip due-chip--${state}`,
+            innerHTML: `${Icons.clock}<span>${formatDueDate(card.due_date)}</span>`,
+        }));
+        const text = createElement('span', { className: 'today-row__text' });
+        text.appendChild(createElement('span', { className: 'today-row__title' }, card.title));
+        text.appendChild(createElement('span', { className: 'today-row__where' }, `${card.board_name} · ${card.column_name}`));
+        row.appendChild(text);
+        if (card.assignee) row.appendChild(createAvatar(card.assignee, { size: 'sm' }));
+        row.addEventListener('click', () => {
+            showCardEditModal(card, { onChange: () => renderHomePage(workspaceId), workspaceId });
+        });
+        list.appendChild(row);
+    }
+    if (cards.length > TODAY_LIMIT) {
+        const rest = cards.length - TODAY_LIMIT;
+        const more = createElement('button', { className: 'btn btn--ghost btn--sm today-list__more', type: 'button' },
+            `Ещё ${rest} ${pluralize(rest, ['задача', 'задачи', 'задач'])} — в «Списке»`);
+        more.addEventListener('click', () => {
+            window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'list', workspaceId } }));
+        });
+        list.appendChild(more);
+    }
+}
 
 export async function renderHomePage(workspaceId) {
     const content = $('#content');
@@ -18,6 +63,26 @@ export async function renderHomePage(workspaceId) {
     page.appendChild(createElement('h2', { className: 'page__title' }, 'Главная страница'));
 
     const widgets = createElement('div', { className: 'home-widgets' });
+
+    // «Сегодня и просрочено» — первым и во всю ширину (12.11): с этого экрана
+    // начинают день, и первый вопрос — что горит.
+    const todayWidget = createElement('section', {
+        className: 'home-widget home-widget--wide',
+        'aria-labelledby': 'home-today-title',
+    });
+    todayWidget.appendChild(createElement('h3', { className: 'home-widget__title', id: 'home-today-title' }, 'Сегодня и просрочено'));
+    const todayList = createElement('div', { className: 'today-list' });
+    todayWidget.appendChild(todayList);
+    widgets.appendChild(todayWidget);
+
+    // «Привычки на сегодня» — сразу за горящими задачами: отметить привычку
+    // можно здесь же в один щелчок, не уходя на экран «Привычки».
+    const habitsWidget = createElement('section', {
+        className: 'home-widget',
+        'aria-labelledby': 'home-habits-title',
+    });
+    widgets.appendChild(habitsWidget);
+    renderHabitsTodayWidget(habitsWidget);
 
     const recentWidget = createElement('div', { className: 'home-widget' });
     recentWidget.appendChild(createElement('h3', { className: 'home-widget__title' }, 'Недавние доски'));
@@ -40,6 +105,23 @@ export async function renderHomePage(workspaceId) {
     page.appendChild(widgets);
     content.appendChild(page);
     setTimeout(() => content.classList.remove('view-enter'), 420);
+
+    // Сегодня и просрочено. Тот же список, что у «Списка» и палитры: в нём
+    // есть доска, колонка и исполнитель каждой задачи, а у досок — какие
+    // колонки финальные. Закрытые и архивные задачи не горят.
+    try {
+        const data = await api.listAllCardsInWorkspace(workspaceId);
+        const finalColumns = new Set(
+            (data.boards || []).flatMap(b => b.columns.filter(c => c.is_final).map(c => c.id))
+        );
+        const urgent = (data.cards || [])
+            .filter(c => !c.archived && c.due_date && !finalColumns.has(c.column_id) && dueState(c.due_date))
+            .sort((a, b) => a.due_date.localeCompare(b.due_date));
+        renderTodayList(todayList, urgent, workspaceId);
+    } catch (e) {
+        console.error('Не удалось собрать задачи на сегодня:', e);
+        todayList.appendChild(createElement('p', { className: 'page__empty' }, 'Ошибка загрузки'));
+    }
 
     // Recent boards
     try {
@@ -69,7 +151,7 @@ export async function renderHomePage(workspaceId) {
         const cards = await api.getMistakeCards(workspaceId);
         const days = lastNDays(7);
         const counts = days.map(day => cards.filter(c => (c.mistake_marked_at || '').slice(0, 10) === day).length);
-        const labels = days.map(d => d.slice(5));
+        const labels = days.map(formatShortDay);
         const openCount = cards.filter(c => !c.mistake_resolved_at).length;
         mistakeHint.textContent = `Открытых ошибок: ${openCount}`;
         renderBarChart(chartCanvas, labels, counts, { color: 'danger', label: 'Новые ошибки' });
@@ -118,8 +200,9 @@ function createWorkloadList(rows) {
 /**
  * Полоса разбивки по приоритету.
  *
- * Цвета — те же `--priority-*`, которыми покрашены полоски на карточках и точки
- * в «Списке» (`list.css`), поэтому второго словаря цветов здесь нет.
+ * Оттенки — те же `--priority-*`, что у точек в «Списке» (`list.css`): с
+ * палитры «Сигнал» это яркость, а не цвет (высокий — светлый, низкий — едва
+ * заметный), поэтому второго словаря здесь нет.
  * Сначала «Высокий»: полосу читают слева направо, и срочное должно попадаться
  * первым.
  */

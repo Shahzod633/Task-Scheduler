@@ -24,6 +24,7 @@
     width: 52px;
     height: 52px;
     border-radius: var(--radius-lg);
+    background: var(--accent-fill);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -153,7 +154,7 @@
    так они не спорят по контрасту с обложками досок ниже. */
 .hub__template-card {
     padding: var(--space-md) var(--space-lg);
-    background: var(--accent-gradient-soft), var(--bg-panel);
+    background: var(--bg-panel);
     backdrop-filter: blur(var(--blur-panel));
     -webkit-backdrop-filter: blur(var(--blur-panel));
     border: 1px solid var(--border-panel);
@@ -368,57 +369,27 @@
 }
 
 /* ─── Create Board Card ─── */
+/* Плитка «Создать доску». Полупрозрачная, как остальные панели: сплошной цвет
+   читался бы на фотографии чёрной заплаткой. Раньше при наведении вокруг неё
+   крутилась радужная conic-рамка — украшение, которого «Сигнал» не держит:
+   теперь отклик — пунктирная рамка в акцент, тот же язык, что у «+ Метка». */
 .hub__create-board {
     height: 112px;
     border-radius: var(--radius-lg);
-    background: var(--bg-card);
+    background: var(--bg-panel);
+    border: 1px dashed var(--border-strong);
     display: flex;
     align-items: center;
     justify-content: center;
     flex-direction: column;
     gap: var(--space-sm);
     cursor: pointer;
-    transition: background var(--transition-normal), transform var(--transition-normal);
-    position: relative;
-    overflow: hidden;
-    isolation: isolate;
-}
-
-/* Вращающаяся градиентная рамка проявляется только при наведении —
-   в покое анимация не крутится и не тратит кадры. */
-.hub__create-board::before {
-    content: '';
-    position: absolute;
-    inset: -60%;
-    background: var(--accent-conic);
-    opacity: 0;
-    transition: opacity var(--transition-normal);
-    z-index: -2;
-    animation: rotate-gradient 4s linear infinite;
-    animation-play-state: paused;
-}
-
-.hub__create-board::after {
-    content: '';
-    position: absolute;
-    inset: 1.5px;
-    border-radius: calc(var(--radius-lg) - 1px);
-    /* Заливка внутри вращающейся рамки — полупрозрачная, как у остальных
-       панелей: сплошной цвет читался бы на фотографии чёрной заплаткой.
-       Своего backdrop-filter здесь нет намеренно — isolation: isolate у
-       родителя обрезал бы ему источник размытия; фон под ним и так размыт. */
-    background: var(--bg-panel);
-    z-index: -1;
-    transition: background var(--transition-normal);
-}
-
-.hub__create-board:hover::before {
-    opacity: 1;
-    animation-play-state: running;
+    transition: background var(--transition-normal), border-color var(--transition-fast), transform var(--transition-normal);
 }
 
 .hub__create-board:hover {
-    background: transparent;
+    background: var(--accent-soft);
+    border-color: var(--accent-border);
     transform: translateY(-3px);
 }
 

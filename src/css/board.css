@@ -12,14 +12,18 @@
     overflow-y: hidden;
     align-items: flex-start;
     scroll-behavior: smooth;
-    padding-bottom: calc(var(--dock-height) + var(--space-2xl));
 }
 
 /* ─── Column ─── */
 .column {
     width: var(--column-width);
     min-width: var(--column-width);
-    max-height: calc(100vh - var(--header-height) - 52px - var(--dock-height) - 52px);
+    /* Высота — от самой доски, а не от окна. Прежняя формула вычитала из
+       100vh шапку доски и панель фильтров по 52 px, а на деле они выше
+       (59 и 51 px), при узком окне шапка доски переносится в две строки — и
+       низ колонки с «Добавить карточку» уходил за край. Здесь 100% — это
+       высота содержимого `.board` за вычетом её нижнего отступа. */
+    max-height: 100%;
     background: var(--bg-column);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-xl);
@@ -302,23 +306,48 @@ body.is-dragging-card .card:hover {
 }
 
 /* ─── Card Labels ─── */
+/* Чипы с названием; цвет — метки, текст — `textColorOn()` (тёмный или
+   белый по контрасту). Метка без названия — короткая полоска. */
 .card__labels {
     display: flex;
     flex-wrap: wrap;
-    gap: 4px;
+    gap: var(--space-xs);
     margin-bottom: var(--space-sm);
 }
 
 .card__label {
-    width: 36px;
-    height: 7px;
+    max-width: 100%;
+    padding: 1px var(--space-sm);
     border-radius: var(--radius-pill);
-    transition: height var(--transition-normal), width var(--transition-normal);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+    line-height: 16px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
-.card:hover .card__label {
-    height: 10px;
-    width: 42px;
+.card__label--bar {
+    width: 32px;
+    height: 8px;
+    padding: 0;
+}
+
+/* ─── Приоритет на лицевой стороне ─── */
+/* Только высокий (две стрелки вверх, яркие) и низкий (стрелка вниз,
+   приглушённая). Формой, а не цветом: цвет в «Сигнале» занят временем,
+   просрочкой и действием. */
+.card__priority svg {
+    width: 15px;
+    height: 15px;
+}
+
+.card__priority--high {
+    color: var(--text-primary);
+}
+
+.card__priority--low {
+    color: var(--text-muted);
 }
 
 /* ─── Card Title ─── */
@@ -359,9 +388,19 @@ body.is-dragging-card .card:hover {
     color: var(--text-secondary);
 }
 
+.card__meta-item--due {
+    font-variant-numeric: tabular-nums;
+}
+
 .card__meta-item--due.overdue {
     background: var(--danger-soft);
     color: var(--color-danger);
+}
+
+/* Сегодня или завтра — янтарь «Сигнала». */
+.card__meta-item--due.soon {
+    background: var(--warning-soft);
+    color: var(--color-warning);
 }
 
 /* ─── Card Action Buttons (появляются при наведении) ─── */
@@ -370,8 +409,8 @@ body.is-dragging-card .card:hover {
 .card__timer-btn {
     position: absolute;
     top: 6px;
-    width: 26px;
-    height: 26px;
+    width: 28px;
+    height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -391,18 +430,23 @@ body.is-dragging-card .card:hover {
 }
 
 .card__menu-btn {
-    right: 36px;
+    right: 38px;
 }
 
 /* Таймер — левее двух прежних кнопок, чтобы карандаш остался на своём месте
    в углу: к нему рука привыкла раньше, чем появился таймер. */
 .card__timer-btn {
-    right: 66px;
+    right: 70px;
 }
 
+/* Видны и при фокусе с клавиатуры (`:focus-within`): раньше кнопки
+   появлялись только под мышью, и Tab ходил по невидимым. */
 .card:hover .card__edit-btn,
 .card:hover .card__menu-btn,
-.card:hover .card__timer-btn {
+.card:hover .card__timer-btn,
+.card:focus-within .card__edit-btn,
+.card:focus-within .card__menu-btn,
+.card:focus-within .card__timer-btn {
     opacity: 1;
     transform: scale(1);
 }
@@ -422,10 +466,10 @@ body.is-dragging-card .card:hover {
     height: 14px;
 }
 
-/* Пока таймер идёт, его кнопка показывает «стоп» в цвете акцента. */
+/* Пока таймер идёт, его кнопка показывает «стоп» в янтаре — цвете времени. */
 .card__timer-btn--running {
-    border-color: var(--accent-border);
-    color: var(--accent-text);
+    border-color: var(--warning-border);
+    color: var(--color-warning);
 }
 
 /* ─── Карточка с идущим таймером ───
@@ -436,7 +480,7 @@ body.is-dragging-card .card:hover {
    Рамка, а не тень: тенью карточка уже рисует полосу приоритета. */
 .card.card--timing,
 .card.card--timing:hover {
-    border-color: var(--accent-border);
+    border-color: var(--warning-border);
 }
 
 .card--timing .card__title {
@@ -451,7 +495,7 @@ body.is-dragging-card .card:hover {
     width: 7px;
     height: 7px;
     border-radius: var(--radius-round);
-    background: var(--accent-color);
+    background: var(--color-warning);
     pointer-events: none;
     animation: pulse-soft 1.6s var(--ease-in-out) infinite;
     transition: opacity var(--transition-fast);
@@ -477,8 +521,10 @@ body.is-dragging-card .card:hover {
     border-radius: var(--radius-pill);
     font-size: var(--font-size-xs);
     font-weight: var(--font-weight-semibold);
-    background: var(--danger-soft);
-    color: var(--color-danger);
+    /* «Требует внимания» — янтарь, а не красный: красный в «Сигнале»
+       остаётся только за просрочкой. */
+    background: var(--warning-soft);
+    color: var(--color-warning);
     width: fit-content;
 }
 
@@ -573,7 +619,7 @@ body.is-dragging-card .card:hover {
 .add-card-form__submit,
 .add-column__submit {
     padding: 7px 16px;
-    background: var(--accent-gradient);
+    background: var(--accent-fill);
     color: var(--text-on-accent);
     border-radius: var(--radius-md);
     font-size: var(--font-size-md);
@@ -584,7 +630,7 @@ body.is-dragging-card .card:hover {
 
 .add-card-form__submit:hover,
 .add-column__submit:hover {
-    filter: brightness(1.1);
+    background: var(--accent-fill-hover);
     transform: translateY(-1px);
 }
 
@@ -709,8 +755,7 @@ body.is-dragging-card .card:hover {
     flex-direction: column;
     min-height: 0;
     gap: var(--space-sm);
-    padding: var(--space-md) var(--space-xl);
-    padding-bottom: calc(var(--dock-height) + var(--space-xl));
+    padding: var(--space-md) var(--space-xl) var(--space-xl);
 }
 
 .board-notes__toolbar {
@@ -749,7 +794,7 @@ body.is-dragging-card .card:hover {
 }
 
 .board-notes__mode--active {
-    background: var(--accent-gradient);
+    background: var(--accent-fill);
     color: var(--text-on-accent);
     box-shadow: var(--shadow-sm);
 }

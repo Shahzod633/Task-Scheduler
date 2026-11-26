@@ -241,8 +241,8 @@
 
 .form-label {
     display: block;
-    font-size: var(--font-size-sm);
-    font-weight: var(--font-weight-semibold);
+    font-size: var(--font-size-ui);
+    font-weight: var(--font-weight-medium);
     color: var(--text-secondary);
     margin-bottom: var(--space-sm);
 }
@@ -329,18 +329,19 @@ select.form-input option {
 }
 
 .btn--primary {
-    background: var(--accent-gradient);
+    background: var(--accent-fill);
     color: var(--text-on-accent);
     box-shadow: var(--shadow-accent);
 }
 
 .btn--primary:hover {
-    filter: brightness(1.1);
-    box-shadow: 0 6px 22px -4px var(--accent-glow);
+    background: var(--accent-fill-hover);
+    box-shadow: var(--shadow-md);
     transform: translateY(-1px);
 }
 
 .btn--primary:active {
+    background: var(--accent-fill-active);
     transform: translateY(0) scale(0.97);
 }
 
@@ -424,7 +425,7 @@ select.form-input option {
 /* ─── Toast Notifications ─── */
 .toast-container {
     position: fixed;
-    bottom: calc(var(--dock-height) + var(--space-xl));
+    bottom: var(--space-xl);
     right: var(--space-xl);
     z-index: 1000;
     display: flex;
@@ -1561,14 +1562,12 @@ select.form-input option {
 }
 
 /* ─── Пользовательские поля в окне карточки ───
-   Две колонки, как ряд «Исполнитель / Автор / Приоритет» над ними: поля
-   короткие, и столбик из них растягивал бы окно в высоту. Пока поля грузятся —
-   и если их у доски нет — блок пуст и места не занимает. */
+   С 12.11 поля стоят в правой колонке свойств, одно под другим, как
+   остальные свойства. Пока поля грузятся — и если их у доски нет — блок
+   пуст и места не занимает. */
 .card-fields {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-md);
-    margin-top: var(--space-lg);
+    display: flex;
+    flex-direction: column;
 }
 
 .card-fields:empty {
@@ -1577,5 +1576,294 @@ select.form-input option {
 
 .card-fields__field {
     min-width: 0;
-    margin-bottom: 0;
+}
+
+/* ─── Чип срока ───
+   Общий вид срока вне доски (виджет «Сегодня и просрочено»): нейтральный,
+   янтарный «сегодня/завтра» или красный «просрочено» — как на карточке. */
+.due-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    flex-shrink: 0;
+    padding: 2px var(--space-sm);
+    border-radius: var(--radius-pill);
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+    font-variant-numeric: tabular-nums;
+}
+
+.due-chip svg {
+    width: 13px;
+    height: 13px;
+    flex-shrink: 0;
+}
+
+.due-chip--overdue {
+    background: var(--danger-soft);
+    color: var(--color-danger);
+}
+
+.due-chip--soon {
+    background: var(--warning-soft);
+    color: var(--color-warning);
+}
+
+/* ─── Окно карточки: две колонки (12.11) ───
+   Шапка и низ закреплены, прокручивается середина. Слева — то, что читают и
+   пишут; справа — свойства. Две колонки помещаются и в самом узком окне
+   приложения (900 px: левая ~540 px); в одну окно складывается только уже
+   760 px — тогда свойства идут первыми, а не под комментариями. */
+.modal--card {
+    width: 880px;
+    max-width: 100%;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.modal--card .modal__header {
+    flex-shrink: 0;
+}
+
+.modal--card .modal__title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.modal--card .modal__body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 0;
+}
+
+.modal--card .modal__footer {
+    flex-shrink: 0;
+    justify-content: space-between;
+}
+
+.card-modal__layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 288px;
+    min-height: 100%;
+}
+
+.card-modal__main {
+    min-width: 0;
+    padding: var(--space-xl);
+}
+
+.card-modal__side {
+    min-width: 0;
+    padding: var(--space-xl) var(--space-lg);
+    border-left: 1px solid var(--border-subtle);
+    background: var(--bg-card);
+}
+
+.card-modal__title-input {
+    font-family: var(--font-display);
+    font-size: var(--font-size-lg);
+    font-weight: var(--font-weight-semibold);
+}
+
+.card-modal__due-row {
+    display: flex;
+    gap: var(--space-sm);
+}
+
+.card-modal__due-row .form-input {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Состояние автосохранения: «Сохраняю…» → «Сохранено». Приглушено — это
+   отчёт о фоновой работе, а не просьба что-то сделать; кроме ошибки. */
+.card-modal__status {
+    flex-shrink: 0;
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.card-modal__status[data-state="error"] {
+    color: var(--color-danger);
+}
+
+@media (max-width: 760px) {
+    .card-modal__layout {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .card-modal__side {
+        order: -1;
+        border-left: 0;
+        border-bottom: 1px solid var(--border-subtle);
+    }
+}
+
+/* ─── Метки в окне карточки ─── */
+/* Цвет чипа — данные (выбрал человек), цвет текста на нём подбирает
+   `textColorOn()`: тени под текстом поэтому не нужно. */
+.card-labels__row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs);
+    align-items: center;
+}
+
+.label-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    min-height: 26px;
+    padding: 2px var(--space-md);
+    border-radius: var(--radius-pill);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+}
+
+.label-chip--add {
+    color: var(--text-secondary);
+    border: 1px dashed var(--border-strong);
+    padding: 2px var(--space-sm);
+    transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.label-chip--add svg {
+    width: 14px;
+    height: 14px;
+}
+
+.label-chip--add:hover {
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+    background: var(--bg-card-hover);
+}
+
+.label-picker {
+    width: 272px;
+    padding: var(--space-sm);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.label-picker__list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.label-picker__empty {
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    padding: var(--space-xs);
+}
+
+.label-picker__item {
+    display: flex;
+    gap: var(--space-xs);
+    align-items: center;
+}
+
+.label-picker__swatch {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: var(--space-sm);
+    min-height: 32px;
+    padding: 2px var(--space-md);
+    border-radius: var(--radius-sm);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    transition: filter var(--transition-fast);
+}
+
+.label-picker__swatch:hover {
+    filter: brightness(1.08);
+}
+
+.label-picker__name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.label-picker__check {
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+.label-picker__check svg {
+    width: 16px;
+    height: 16px;
+}
+
+.label-picker__del {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    transition: color var(--transition-fast), background var(--transition-fast);
+}
+
+.label-picker__del svg {
+    width: 16px;
+    height: 16px;
+}
+
+.label-picker__del:hover {
+    color: var(--text-primary);
+    background: var(--bg-card-hover);
+}
+
+.label-picker__new {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    border-top: 1px solid var(--border-subtle);
+    padding-top: var(--space-sm);
+}
+
+/* Десять цветов — две строки по пять: в строку 24-пиксельные кружки не
+   помещаются, а мельче — уже не попасть мышью. */
+.label-picker__colors {
+    display: grid;
+    grid-template-columns: repeat(5, 28px);
+    gap: var(--space-sm);
+}
+
+.label-picker__color {
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-round);
+    box-shadow: inset 0 0 0 1px var(--border-default);
+    transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.label-picker__color:hover {
+    transform: scale(1.08);
+}
+
+.label-picker__color[aria-pressed="true"] {
+    box-shadow: 0 0 0 2px var(--bg-elevated), 0 0 0 4px var(--accent-400);
+}
+
+.label-picker__new .btn {
+    align-self: flex-start;
 }

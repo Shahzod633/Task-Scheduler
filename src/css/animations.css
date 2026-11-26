@@ -42,10 +42,6 @@
     to { transform: rotate(360deg); }
 }
 
-@keyframes rotate-gradient {
-    to { transform: rotate(360deg); }
-}
-
 /* Мягкая «дышащая» пульсация — индикаторы и бейджи */
 @keyframes pulse-soft {
     0%, 100% { opacity: 1; transform: scale(1); }

@@ -2,9 +2,9 @@
     <!-- Источник иконок приложения. Пересобрать: npx tauri icon src-tauri/app-icon.svg -->
     <defs>
         <linearGradient id="fill" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-            <stop offset="0" stop-color="#7C6BFF"/>
-            <stop offset="0.55" stop-color="#8E5CFF"/>
-            <stop offset="1" stop-color="#B45CFF"/>
+            <stop offset="0" stop-color="#4D7CFF"/>
+            <stop offset="0.55" stop-color="#3366FF"/>
+            <stop offset="1" stop-color="#2149D6"/>
         </linearGradient>
         <linearGradient id="sheen" x1="4" y1="0" x2="20" y2="18" gradientUnits="userSpaceOnUse">
             <stop offset="0" stop-color="#fff" stop-opacity="0.30"/>

@@ -797,3 +797,167 @@ pub struct BackupInfo {
     /// Timestamp parsed out of the file name (`YYYY-MM-DD HH:MM:SS`).
     pub created_at: String,
 }
+
+// ─── Привычки ───
+//
+// Привычки — отдельные таблицы `habits` и `habit_logs`, не карточки: у них нет
+// доски, колонки и срока, зато есть расписание и отметка за каждый день.
+// Привычки общие для всех пространств — это свойство человека, а не проекта.
+
+/// Как часто привычку нужно выполнять. Значение лежит в `habits.frequency_type`.
+pub const HABIT_FREQUENCIES: [&str; 3] = ["daily", "weekly_days", "x_per_week"];
+
+/// Время суток. `anytime` — без привязки.
+pub const HABIT_TIMES_OF_DAY: [&str; 4] = ["morning", "afternoon", "evening", "anytime"];
+
+/// Статус отметки за день: выполнено, выполнена лайт-версия, пропущено
+/// (стрик заморожен), сорвалось (стрик сброшен).
+pub const HABIT_LOG_STATUSES: [&str; 4] = ["completed", "fallback", "skipped", "failed"];
+
+/// Ключи дней недели в `frequency_config` у `weekly_days`, с понедельника.
+pub const WEEKDAY_KEYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+/// Привычка в том виде, в каком её видит интерфейс.
+///
+/// `frequency_config` из базы разобран в два поля: `weekdays` (только у
+/// `weekly_days`) и `target_per_week` (только у `x_per_week`). Последние
+/// четыре поля в базе не хранятся — они считаются на сегодняшний день при
+/// каждом чтении.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Habit {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub frequency_type: String,
+    pub weekdays: Vec<String>,
+    pub target_per_week: Option<i64>,
+    pub time_of_day: String,
+    pub effort_level: i64,
+    pub fallback_title: Option<String>,
+    pub current_streak: i64,
+    pub longest_streak: i64,
+    pub is_archived: bool,
+    pub created_at: String,
+    /// В чём считается стрик: `day` — дни по расписанию, `week` — недели,
+    /// в которые набрана норма (у `x_per_week`).
+    pub streak_unit: String,
+    /// Нужно ли выполнить привычку сегодня: день по расписанию или норма
+    /// недели ещё не набрана.
+    pub due_today: bool,
+    /// Отметка за сегодня, если она есть.
+    pub today: Option<HabitLog>,
+    /// Сколько раз выполнена на этой неделе (выполнено + лайт-версия).
+    pub week_done: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HabitLog {
+    pub id: i64,
+    pub habit_id: i64,
+    pub log_date: String,
+    pub status: String,
+    pub skip_reason: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+/// Поля формы создания и правки привычки.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HabitInput {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub frequency_type: String,
+    #[serde(default)]
+    pub weekdays: Vec<String>,
+    #[serde(default)]
+    pub target_per_week: Option<i64>,
+    pub time_of_day: String,
+    pub effort_level: i64,
+    #[serde(default)]
+    pub fallback_title: Option<String>,
+}
+
+/// Один день тепловой карты. `due` — сколько привычек в этот день стояло по
+/// расписанию (у `x_per_week` в счёт идёт только выполненный день: пропущенный
+/// день такой привычки — не провал).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HabitHeatmapDay {
+    pub date: String,
+    pub due: i64,
+    pub completed: i64,
+    pub fallback: i64,
+    pub skipped: i64,
+    pub failed: i64,
+}
+
+/// Отметка одной привычки за один день — для анализа нагрузки. `missed` —
+/// день по расписанию прошёл, а отметки нет.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HabitMark {
+    pub habit_id: i64,
+    pub habit: String,
+    pub status: String,
+    pub reason: Option<String>,
+}
+
+/// День сводки «задачи + привычки» за последние две недели.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DailyLoad {
+    pub date: String,
+    /// Задачи со сроком на этот день.
+    pub tasks_due: i64,
+    /// Задачи, попавшие в финальную колонку в этот день.
+    pub tasks_completed: i64,
+    /// Задачи со сроком на этот день, не закрытые к его концу.
+    pub tasks_overdue: i64,
+    /// Учтённое время по задачам, минуты.
+    pub tracked_minutes: i64,
+    pub habits_due: i64,
+    pub habits_completed: i64,
+    pub habits_fallback: i64,
+    pub habits_skipped: i64,
+    pub habits_failed: i64,
+    pub habits_missed: i64,
+    pub marks: Vec<HabitMark>,
+}
+
+/// Найденная закономерность. `confidence` — `high`, `medium` или `low`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HabitCorrelation {
+    pub pattern: String,
+    pub evidence: String,
+    pub confidence: String,
+}
+
+/// Конкретное изменение расписания. `habit` пуст, если совет не про одну
+/// привычку.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HabitAdjustment {
+    #[serde(default)]
+    pub habit: String,
+    pub change: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Ответ модели после разбора и проверок.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HabitAnalysis {
+    pub workload_verdict: String,
+    #[serde(default)]
+    pub correlations: Vec<HabitCorrelation>,
+    #[serde(default)]
+    pub actionable_adjustments: Vec<HabitAdjustment>,
+}
+
+/// Последний анализ из кэша. `stale` — данные за период изменились после
+/// него (новая отметка, закрытая задача или просто наступил новый день).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HabitAnalysisReport {
+    pub analysis: HabitAnalysis,
+    pub generated_at: String,
+    pub model: String,
+    pub period_from: String,
+    pub period_to: String,
+    pub stale: bool,
+}

@@ -20,7 +20,7 @@ import {
 import { showCardEditModal, announceRecurringSpawn } from './board.js';
 import { confirmFinalColumnMove } from './dependencies.js';
 import { formatFieldValue } from './fields.js';
-import { createElement, $, showToast, formatDueDate, isOverdue, pluralize } from './utils.js';
+import { createElement, $, showToast, formatDueDate, isOverdue, dueState, pluralize } from './utils.js';
 
 /// Значение `cards.archive_reason` для задач, у которых кончились попытки.
 /// То же строковое значение живёт в `models::ARCHIVE_REASON_MAX_RETRIES`.
@@ -329,7 +329,22 @@ function createGroupSection(title, cards) {
     return section;
 }
 
-const HEADERS = ['Задача', 'Доска', 'Исполнитель', 'Автор', 'Приоритет', 'Статус', 'Срок'];
+/**
+ * Порядок столбцов. Сначала то, ради чего открывают список, — срок и статус;
+ * «Автор» последним. При окне по умолчанию (1280 px) таблица шире видимой
+ * области, и за правый край должен уходить наименее нужный столбец. Раньше
+ * порядок был «Доска, Исполнитель, Автор, Приоритет, Статус, Срок», и за краем
+ * оказывались как раз статус и срок.
+ */
+const COLUMNS = [
+    ['title', 'Задача'],
+    ['due', 'Срок'],
+    ['status', 'Статус'],
+    ['priority', 'Приоритет'],
+    ['assignee', 'Исполнитель'],
+    ['board', 'Доска'],
+    ['author', 'Автор'],
+];
 
 function createTable(cards) {
     const table = createElement('table', { className: 'task-table' });
@@ -337,7 +352,7 @@ function createTable(cards) {
 
     const thead = createElement('thead');
     const headRow = createElement('tr');
-    for (const label of HEADERS) {
+    for (const [, label] of COLUMNS) {
         headRow.appendChild(createElement('th', { className: 'task-table__th' }, label));
     }
     // Поля — после стандартных столбцов: они необязательные и у каждой доски свои.
@@ -394,8 +409,6 @@ function createRow(card) {
                 : 'Задача убрана в архив'
         }, spent ? 'Не выполнено' : 'В архиве'));
     }
-    row.appendChild(titleCell);
-
     // ─── Доска ───
     const boardCell = createElement('td', { className: 'task-table__td' });
     const boardBadge = createElement('button', {
@@ -408,13 +421,6 @@ function createRow(card) {
         }));
     });
     boardCell.appendChild(boardBadge);
-    row.appendChild(boardCell);
-
-    // ─── Исполнитель ───
-    row.appendChild(createPersonCell(card, 'assignee'));
-
-    // ─── Автор ───
-    row.appendChild(createPersonCell(card, 'author'));
 
     // ─── Приоритет ───
     const priorityCell = createElement('td', { className: 'task-table__td' });
@@ -433,7 +439,6 @@ function createRow(card) {
         }
     }));
     priorityCell.appendChild(priorityBtn);
-    row.appendChild(priorityCell);
 
     // ─── Статус ───
     const statusCell = createElement('td', { className: 'task-table__td' });
@@ -442,19 +447,30 @@ function createRow(card) {
     statusBtn.appendChild(createElement('span', { className: 'status-pill__chevron', innerHTML: Icons.chevronDown }));
     statusBtn.addEventListener('click', () => openStatusPicker(statusBtn, card));
     statusCell.appendChild(statusBtn);
-    row.appendChild(statusCell);
 
     // ─── Срок ───
     const dueCell = createElement('td', { className: 'task-table__td' });
     if (card.due_date) {
         dueCell.appendChild(createElement('span', {
-            className: `task-table__due ${isOverdue(card.due_date) ? 'task-table__due--overdue' : ''}`,
+            className: `task-table__due ${dueState(card.due_date) ? `task-table__due--${dueState(card.due_date)}` : ''}`,
             innerHTML: `${Icons.clock} <span>${formatDueDate(card.due_date)}</span>`
         }));
     } else {
         dueCell.appendChild(createElement('span', { className: 'task-table__empty' }, '—'));
     }
-    row.appendChild(dueCell);
+
+    // Ячейки собраны по смыслу, а в строку встают в порядке `COLUMNS` — тот
+    // же список задаёт и шапку, так что разъехаться они не могут.
+    const cells = {
+        title: titleCell,
+        due: dueCell,
+        status: statusCell,
+        priority: priorityCell,
+        assignee: createPersonCell(card, 'assignee'),
+        board: boardCell,
+        author: createPersonCell(card, 'author'),
+    };
+    for (const [key] of COLUMNS) row.appendChild(cells[key]);
 
     return row;
 }

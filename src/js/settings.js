@@ -8,7 +8,7 @@ import Icons from './icons.js';
 import { renderProfileFields } from './header.js';
 import { applyWorkspaceBackground, invalidateBackground, getBackgroundUrl } from './background.js';
 import { confirmDialog } from './dialog.js';
-import { createElement, $, showToast, pluralize } from './utils.js';
+import { createElement, $, showToast, pluralize, formatDecimal } from './utils.js';
 
 export async function renderSettingsPage(workspaceId) {
     const content = $('#content');
@@ -18,13 +18,75 @@ export async function renderSettingsPage(workspaceId) {
     const page = createElement('div', { className: 'page page--settings' });
     page.appendChild(createElement('h2', { className: 'page__title' }, 'Настройки'));
 
+    // Две панели (12.11): слева список разделов, справа сами разделы. Раньше
+    // это была одна колонка в 3,6 тыс. пикселей, и до «Резервных копий»
+    // прокручивали пять экранов.
+    const layout = createElement('div', { className: 'settings-layout' });
+    const nav = createElement('nav', { className: 'settings-nav', 'aria-label': 'Разделы настроек' });
+    const sections = createElement('div', { className: 'settings-sections' });
+    layout.appendChild(nav);
+    layout.appendChild(sections);
+    page.appendChild(layout);
+    const navLinks = new Map();
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+    const addSection = (key, title) => {
+        const section = createElement('section', {
+            className: 'settings-section',
+            id: `settings-${key}`,
+            'aria-labelledby': `settings-${key}-title`,
+        });
+        section.appendChild(createElement('h3', { className: 'settings-section-title', id: `settings-${key}-title` }, title));
+        const card = createElement('div', { className: 'settings-card' });
+        section.appendChild(card);
+        sections.appendChild(section);
+
+        const link = createElement('button', { className: 'settings-nav__item', type: 'button' }, title);
+        link.addEventListener('click', () => {
+            section.scrollIntoView({ behavior: reducedMotion.matches ? 'auto' : 'smooth', block: 'start' });
+        });
+        nav.appendChild(link);
+        navLinks.set(section, link);
+        return { section, card, link };
+    };
+
+    // Подсветка раздела, который сейчас наверху. Прокручивается `.page`,
+    // а не окно.
+    const markCurrent = () => {
+        const top = page.getBoundingClientRect().top + 96;
+        let current = null;
+        for (const section of navLinks.keys()) {
+            if (section.getBoundingClientRect().top <= top) current = section;
+        }
+        current = current || navLinks.keys().next().value;
+        for (const [section, link] of navLinks) {
+            link.classList.toggle('settings-nav__item--active', section === current);
+            if (section === current) link.setAttribute('aria-current', 'true');
+            else link.removeAttribute('aria-current');
+        }
+    };
+    // Не чаще раза в 80 мс: прокрутка шлёт событие на каждый кадр, а
+    // пересчёт трогает разметку всех разделов.
+    let markTimer = null;
+    page.addEventListener('scroll', () => {
+        if (markTimer) return;
+        markTimer = setTimeout(() => { markTimer = null; markCurrent(); }, 80);
+    });
+
+    // Раздел пространства создаётся сразу, чтобы стоять первым, а заполняется,
+    // когда пространство прочитано.
+    const workspaceSection = addSection('workspace', 'Рабочее пространство');
+
     try {
         const workspaces = await api.getWorkspaces();
         const workspace = workspaces.find(w => w.id === workspaceId);
 
-        if (workspace) {
-            page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Рабочее пространство'));
-            const card = createElement('div', { className: 'settings-card' });
+        if (!workspace) {
+            workspaceSection.section.remove();
+            workspaceSection.link.remove();
+            navLinks.delete(workspaceSection.section);
+        } else {
+            const card = workspaceSection.card;
 
             const nameGroup = createElement('div', { className: 'form-group' });
             nameGroup.appendChild(createElement('label', { className: 'form-label' }, 'Название'));
@@ -58,8 +120,6 @@ export async function renderSettingsPage(workspaceId) {
                 }
             });
             card.appendChild(saveBtn);
-
-            page.appendChild(card);
         }
     } catch (e) {
         showToast('Ошибка загрузки пространства', 'error');
@@ -67,31 +127,15 @@ export async function renderSettingsPage(workspaceId) {
 
     // Фон принадлежит пространству, поэтому стоит сразу за его настройками и
     // выше «Профиля» — тот один на всё приложение.
-    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Фон пространства'));
-    const backgroundCard = createElement('div', { className: 'settings-card' });
-    page.appendChild(backgroundCard);
-
-    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Профиль'));
-    const profileCard = createElement('div', { className: 'settings-card' });
-    page.appendChild(profileCard);
-
-    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Напоминания о дедлайнах'));
-    const remindersCard = createElement('div', { className: 'settings-card' });
-    page.appendChild(remindersCard);
-
-    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Email-напоминания'));
-    const emailCard = createElement('div', { className: 'settings-card' });
-    page.appendChild(emailCard);
-
-    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'ИИ-ассистент'));
-    const aiCard = createElement('div', { className: 'settings-card' });
-    page.appendChild(aiCard);
-
-    page.appendChild(createElement('h3', { className: 'settings-section-title' }, 'Резервные копии'));
-    const backupCard = createElement('div', { className: 'settings-card' });
-    page.appendChild(backupCard);
+    const backgroundCard = addSection('background', 'Фон пространства').card;
+    const profileCard = addSection('profile', 'Профиль').card;
+    const remindersCard = addSection('reminders', 'Напоминания о дедлайнах').card;
+    const emailCard = addSection('email', 'Email-напоминания').card;
+    const aiCard = addSection('ai', 'ИИ-ассистент').card;
+    const backupCard = addSection('backup', 'Резервные копии').card;
 
     content.appendChild(page);
+    markCurrent();
     setTimeout(() => content.classList.remove('view-enter'), 420);
 
     renderBackgroundSection(backgroundCard, workspaceId);
@@ -178,7 +222,7 @@ async function renderAiSection(container) {
         const names = models.map(m => m.name);
         for (const m of models) {
             modelSelect.appendChild(createElement('option', { value: m.name },
-                m.size ? `${m.name} — ${(m.size / 1024 ** 3).toFixed(1).replace('.', ',')} ГБ` : m.name));
+                m.size ? `${m.name} — ${formatDecimal(m.size / 1024 ** 3)} ГБ` : m.name));
         }
         if (chosen && !names.includes(chosen)) {
             modelSelect.appendChild(createElement('option', { value: chosen }, known ? `${chosen} — нет в Ollama` : chosen));
@@ -774,5 +818,5 @@ function countPhrase(active, total, forms) {
 function formatBytes(bytes) {
     if (bytes < 1024) return `${bytes} Б`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} КБ`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
+    return `${formatDecimal(bytes / (1024 * 1024))} МБ`;
 }

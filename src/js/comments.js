@@ -11,7 +11,7 @@
 
 import * as api from './api.js';
 import Icons from './icons.js';
-import { createElement, showToast, formatDate } from './utils.js';
+import { createElement, showToast, formatDate, textColorOn } from './utils.js';
 import { confirmDialog } from './dialog.js';
 
 /**
@@ -69,7 +69,10 @@ export async function renderComments(container, cardId) {
 
         const avatar = createElement('div', { className: 'comment__avatar' },
             comment.author ? comment.author.initials : '?');
-        if (comment.author) avatar.style.background = comment.author.color;
+        if (comment.author) {
+            avatar.style.background = comment.author.color;
+            avatar.style.color = textColorOn(comment.author.color);
+        }
         row.appendChild(avatar);
 
         const main = createElement('div', { className: 'comment__main' });
