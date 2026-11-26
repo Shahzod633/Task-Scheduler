@@ -117,6 +117,10 @@ struct ChatRequest<'a> {
     messages: &'a [Message],
     #[serde(skip_serializing_if = "<[serde_json::Value]>::is_empty")]
     tools: &'a [serde_json::Value],
+    /// JSON-схема ответа (structured outputs Ollama). Есть только у запросов,
+    /// которым нужен не текст, а объект, — сейчас это анализ привычек.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<&'a serde_json::Value>,
     stream: bool,
     options: ChatOptions,
 }
@@ -265,6 +269,31 @@ pub fn chat(
     tools: &[serde_json::Value],
     timeout_secs: i64,
 ) -> Result<Message, String> {
+    send_chat(base_url, model, messages, tools, None, timeout_secs)
+}
+
+/// Запрос, ответ на который обязан быть JSON по схеме `schema` (поле `format`
+/// у `/api/chat`). Ollama сама ограничивает генерацию схемой, но маленькая
+/// модель всё равно может прислать неполный объект, поэтому разбор и проверка
+/// ответа — забота вызывающего, а не этой функции.
+pub fn chat_structured(
+    base_url: &str,
+    model: &str,
+    messages: &[Message],
+    schema: &serde_json::Value,
+    timeout_secs: i64,
+) -> Result<Message, String> {
+    send_chat(base_url, model, messages, &[], Some(schema), timeout_secs)
+}
+
+fn send_chat(
+    base_url: &str,
+    model: &str,
+    messages: &[Message],
+    tools: &[serde_json::Value],
+    format: Option<&serde_json::Value>,
+    timeout_secs: i64,
+) -> Result<Message, String> {
     if model.trim().is_empty() {
         return Err("Модель не выбрана — выберите её в Настройках → «ИИ-ассистент»".to_string());
     }
@@ -273,6 +302,7 @@ pub fn chat(
         model,
         messages,
         tools,
+        format,
         stream: false,
         options: ChatOptions { temperature: CHAT_TEMPERATURE },
     };

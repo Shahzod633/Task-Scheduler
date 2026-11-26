@@ -5884,6 +5884,12 @@ const AI_MAX_MESSAGE_CHARS: usize = 8000;
 #[path = "ai_tools.rs"]
 mod ai_tools;
 
+/// Трекер привычек — тоже дочерний модуль: даты считает теми же
+/// `days_from_civil`/`parse_day`, а ИИ-анализ ходит в Ollama через те же
+/// `read_ai_settings`/`run_blocking`, что и ассистент.
+#[path = "habits.rs"]
+pub mod habits;
+
 #[tauri::command]
 pub fn get_ai_settings(state: State<'_, DbState>) -> CmdResult<AiSettings> {
     let conn = state.conn.lock().unwrap();

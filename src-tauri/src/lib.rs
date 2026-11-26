@@ -181,6 +181,18 @@ pub fn run() {
             commands::ollama_confirm_action,
             commands::get_pending_action,
             commands::ollama_greeting,
+
+            commands::habits::list_habits,
+            commands::habits::create_habit,
+            commands::habits::update_habit,
+            commands::habits::set_habit_archived,
+            commands::habits::delete_habit,
+            commands::habits::log_habit,
+            commands::habits::clear_habit_log,
+            commands::habits::get_habit_heatmap,
+            commands::habits::get_habit_task_summary,
+            commands::habits::get_habit_analysis,
+            commands::habits::run_habit_analysis,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

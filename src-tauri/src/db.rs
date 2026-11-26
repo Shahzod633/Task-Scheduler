@@ -437,6 +437,81 @@ pub fn create_schema(conn: &Connection) -> Result<()> {
         (),
     )?;
 
+    // Привычки (трекер привычек). Отдельно от `cards`: у привычки нет доски,
+    // колонки и срока, зато есть расписание и отметка за каждый день.
+    // Привычки общие для всех пространств — это свойство человека.
+    //
+    // `frequency_config` — JSON: у `weekly_days` массив дней (`["mon","wed"]`),
+    // у `x_per_week` — `{"target": 3}`, у `daily` — NULL. Разбирает и
+    // проверяет его `commands::habits`, а `CHECK` здесь держит только то, что
+    // база может проверить сама.
+    //
+    // `current_streak` и `longest_streak` — производные от `habit_logs`:
+    // пересчитываются при каждой отметке и при чтении списка (стрик рвётся и
+    // тогда, когда человек просто не открывал приложение).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS habits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            description TEXT,
+            frequency_type TEXT NOT NULL DEFAULT 'daily'
+                CHECK (frequency_type IN ('daily', 'weekly_days', 'x_per_week')),
+            frequency_config TEXT,
+            time_of_day TEXT NOT NULL DEFAULT 'anytime'
+                CHECK (time_of_day IN ('morning', 'afternoon', 'evening', 'anytime')),
+            effort_level INTEGER NOT NULL DEFAULT 3 CHECK (effort_level BETWEEN 1 AND 5),
+            fallback_title TEXT,
+            current_streak INTEGER NOT NULL DEFAULT 0,
+            longest_streak INTEGER NOT NULL DEFAULT 0,
+            is_archived INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
+        )",
+        (),
+    )?;
+
+    // Одна отметка на привычку в день. `log_date` — местная дата
+    // «ГГГГ-ММ-ДД», а не UTC: «выполнил сегодня» должно значить сегодня по
+    // часам человека.
+    //
+    // Здесь, в отличие от остальной базы, каскад `ON DELETE` есть — так
+    // требует задание, и отметка без привычки ничего не значит. Работает он
+    // потому, что `init` включает `PRAGMA foreign_keys`.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS habit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            habit_id INTEGER NOT NULL,
+            log_date TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('completed', 'fallback', 'skipped', 'failed')),
+            skip_reason TEXT,
+            completed_at TEXT,
+            FOREIGN KEY (habit_id) REFERENCES habits(id) ON DELETE CASCADE
+        )",
+        (),
+    )?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_habit_logs_habit_day
+             ON habit_logs(habit_id, log_date);
+         -- Сводка по дням и тепловая карта читают отметки всех привычек за
+         -- период — по дате.
+         CREATE INDEX IF NOT EXISTS idx_habit_logs_day ON habit_logs(log_date);",
+    )?;
+
+    // Кэш последнего ИИ-анализа привычек и нагрузки — одна строка. `input_json`
+    // — сводка, по которой он сделан: по ней видно, устарел ли анализ, не
+    // спрашивая модель заново.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS habit_ai_reports (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            model TEXT NOT NULL,
+            period_from TEXT NOT NULL,
+            period_to TEXT NOT NULL,
+            input_json TEXT NOT NULL,
+            report_json TEXT NOT NULL
+        )",
+        (),
+    )?;
+
     // ─── Migrations for pre-existing databases ───
     // (CREATE TABLE IF NOT EXISTS above only creates columns on brand-new tables;
     // existing installs need ALTER TABLE for newly introduced columns.)
