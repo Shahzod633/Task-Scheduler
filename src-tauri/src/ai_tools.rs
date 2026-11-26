@@ -90,11 +90,13 @@ pub(super) fn definitions() -> Vec<Value> {
 
         // ─── Изменения: каждое пользователь подтверждает в чате ───
         tool("create_card",
-             "Создать задачу на доске. Она всегда встаёт в первую рабочую колонку. Срок, приоритет и \
+             "Создать задачу на доске. По умолчанию она встаёт в первую рабочую колонку; если \
+              пользователь назвал колонку — передай её название в column. Срок, приоритет и \
               исполнитель необязательны: без срока — без срока, приоритет по умолчанию Medium, \
               исполнитель по умолчанию — сам пользователь.",
              json!({
                  "board_id": id("id доски из get_boards"),
+                 "column": { "type": "string", "description": "название колонки, только если пользователь его назвал" },
                  "title": { "type": "string", "description": "название задачи" },
                  "description": { "type": "string", "description": "описание, можно пустое" },
                  "due_date": { "type": "string", "description": "срок, ГГГГ-ММ-ДД; не раньше сегодняшнего дня" },
@@ -130,14 +132,46 @@ pub(super) fn definitions() -> Vec<Value> {
         tool("stop_timer",
              "Остановить идущий таймер.",
              json!({ "member_id": id("чей таймер; по умолчанию — пользователя") }), &[]),
+
+        // ─── Привычки: общие для всех пространств ───
+        tool("get_habits",
+             "Привычки пользователя: id, расписание, время суток, нагрузка, лайт-версия, стрик, отметка \
+              за сегодня и отметки за последние 7 дней с причинами срывов.",
+             json!({}), &[]),
+        tool("create_habit",
+             "Завести новую привычку. Всё, кроме названия, необязательно: по умолчанию каждый день, \
+              в любое время, нагрузка 3 из 5, без лайт-версии.",
+             json!({
+                 "title": { "type": "string", "description": "название привычки" },
+                 "frequency": { "type": "string", "enum": ["daily", "weekly_days", "x_per_week"],
+                                "description": "daily — каждый день, weekly_days — по дням недели, x_per_week — N раз в неделю" },
+                 "weekdays": { "type": "array", "items": { "type": "string", "enum": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] },
+                               "description": "дни недели для weekly_days" },
+                 "target_per_week": id("сколько раз в неделю для x_per_week, от 1 до 7"),
+                 "time_of_day": { "type": "string", "enum": ["morning", "afternoon", "evening", "anytime"],
+                                  "description": "утро, день, вечер или в любое время" },
+                 "effort_level": id("нагрузка от 1 до 5"),
+                 "fallback_title": { "type": "string", "description": "лайт-версия на тяжёлые дни, если пользователь её назвал" },
+                 "description": { "type": "string", "description": "описание, можно пустое" },
+             }), &["title"]),
+        tool("log_habit",
+             "Отметить привычку за день: completed — выполнено, fallback — выполнена лайт-версия, \
+              skipped — пропуск (стрик заморожен), failed — срыв (стрик сбросится). habit_id — из get_habits.",
+             json!({
+                 "habit_id": id("id привычки из get_habits"),
+                 "status": { "type": "string", "enum": ["completed", "fallback", "skipped", "failed"], "description": "что отметить" },
+                 "date": { "type": "string", "description": "день, ГГГГ-ММ-ДД; по умолчанию сегодня; не в будущем" },
+                 "reason": { "type": "string", "description": "причина пропуска или срыва, если пользователь её назвал" },
+             }), &["habit_id"]),
     ]
 }
 
 /// Инструменты, меняющие данные. Их `ollama_chat` не выполняет сразу, а
 /// показывает человеку превью и ждёт «Да».
-pub(super) const WRITE_TOOLS: [&str; 8] = [
+pub(super) const WRITE_TOOLS: [&str; 10] = [
     "create_card", "move_card", "update_card_priority", "update_card_assignee",
     "add_checklist_item", "toggle_checklist_item", "start_timer", "stop_timer",
+    "create_habit", "log_habit",
 ];
 
 pub(super) fn is_write_tool(name: &str) -> bool {
@@ -241,6 +275,141 @@ pub(super) fn drop_unasked_due_date(tool: &str, args: &Value, user_texts: &[&str
     Some(cleaned)
 }
 
+/// Колонка, которую человек не называл, из предложенного `create_card`
+/// убирается — до превью. Живой прогон 26.11: после появления параметра
+/// модель стала сама писать `"column": "В работе"` на «создай задачу …» без
+/// колонки, а на доске человека первая рабочая колонка — «Новые».
+pub(super) fn drop_unasked_column(tool: &str, args: &Value, user_texts: &[&str]) -> Option<Value> {
+    if tool != "create_card" {
+        return None;
+    }
+    let named = args.get("column").and_then(Value::as_str).map(|c| c.trim().to_lowercase());
+    let has_column = named.as_deref().is_some_and(|c| !c.is_empty())
+        || args.get("column_id").is_some_and(|v| !v.is_null());
+    if !has_column {
+        return None;
+    }
+    let asked = user_texts.iter().any(|t| {
+        let t = t.to_lowercase();
+        t.contains("колонк") || named.as_deref().is_some_and(|c| !c.is_empty() && t.contains(c))
+    });
+    if asked {
+        return None;
+    }
+    let mut cleaned = args.clone();
+    let obj = cleaned.as_object_mut()?;
+    obj.remove("column");
+    obj.remove("column_id");
+    Some(cleaned)
+}
+
+/// Сегодняшняя дата из системного промпта: «Сегодня 2026-11-26, четверг».
+/// Цикл разговора идёт без базы, а дата в промпте — та же, что видит модель.
+pub(super) fn today_from_prompt(messages: &[crate::ollama::Message]) -> Option<String> {
+    let system = messages.iter().find(|m| m.role == "system")?;
+    let start = system.content.find("Сегодня ")? + "Сегодня ".len();
+    let date: String = system.content[start..].chars().take(10).collect();
+    is_calendar_date(&date).then_some(date)
+}
+
+fn shift_day(day: &str, offset: i64) -> Option<String> {
+    let (y, m, d) = parse_day(day)?;
+    Some(format_day(civil_from_days(days_from_civil(y, m, d) + offset)))
+}
+
+/// День недели даты, понедельник — 0.
+fn weekday_index(day: &str) -> Option<i64> {
+    let (y, m, d) = parse_day(day)?;
+    Some((days_from_civil(y, m, d) + 3).rem_euclid(7))
+}
+
+/// День недели, названный словами: «до понедельника», «в среду».
+fn spoken_weekday(text: &str) -> Option<i64> {
+    const STEMS: [(&str, i64); 6] = [
+        ("понедельн", 0), ("вторник", 1), ("четверг", 3), ("пятниц", 4), ("суббот", 5), ("воскресен", 6),
+    ];
+    // «Среда» отдельно: корень «сред» есть и в «средний приоритет».
+    const WEDNESDAY: [&str; 4] = ["среда", "среду", "среды", "среде"];
+    lowercase_words(text).iter().find_map(|w| {
+        if WEDNESDAY.contains(&w.as_str()) {
+            return Some(2);
+        }
+        STEMS.iter().find(|(s, _)| w.starts_with(s)).map(|(_, d)| *d)
+    })
+}
+
+/// Дата, названная словами, а модель посчитала её неверно. Живые прогоны
+/// 26.11 (jarvis:latest), оба раза:
+/// - «срок до понедельника» в четверг 26.11 → `due_date` 03.12 (четверг через
+///   неделю) вместо 30.11;
+/// - «я вчера сорвал медитацию, отметь» → `log_habit` без даты, то есть за
+///   сегодня, — и сегодняшнее «выполнено» заменилось срывом.
+///
+/// Правится только то, в чём сомнения нет: день недели без числа в тексте
+/// (с числом человек назвал дату сам) — ближайший такой день после сегодня;
+/// «вчера» / «позавчера» / «сегодня» у отметки привычки.
+pub(super) fn fix_spoken_dates(tool: &str, args: &Value, user_texts: &[&str], today: &str) -> Option<Value> {
+    let latest = user_texts.first()?;
+    let (key, wanted) = match tool {
+        "create_card" => {
+            let current = args.get("due_date")?.as_str()?;
+            let text = user_texts.iter().find(|t| spoken_weekday(t).is_some())?;
+            if text.chars().any(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            let target = spoken_weekday(text)?;
+            let today_wd = weekday_index(today)?;
+            let ahead = (target - today_wd).rem_euclid(7);
+            let ahead = if ahead == 0 { 7 } else { ahead };
+            let wanted = shift_day(today, ahead)?;
+            if current == wanted {
+                return None;
+            }
+            ("due_date", wanted)
+        }
+        "log_habit" => {
+            let words = lowercase_words(latest);
+            let offset = if words.iter().any(|w| w == "позавчера") {
+                -2
+            } else if words.iter().any(|w| w == "вчера") {
+                -1
+            } else if words.iter().any(|w| w == "сегодня") {
+                0
+            } else {
+                return None;
+            };
+            let wanted = shift_day(today, offset)?;
+            let current = args.get("date").and_then(Value::as_str).unwrap_or(today);
+            if current == wanted {
+                return None;
+            }
+            ("date", wanted)
+        }
+        _ => return None,
+    };
+    let mut fixed = args.clone();
+    fixed.as_object_mut()?.insert(key.to_string(), json!(wanted));
+    Some(fixed)
+}
+
+/// Слово, в котором смешаны латиница и кириллица: «Мeditation» (живой прогон
+/// 26.11 — так модель записала «медитацию»).
+fn mixed_script_word(text: &str) -> Option<&str> {
+    text.split(|c: char| !c.is_alphanumeric()).find(|w| {
+        w.chars().any(|c| c.is_ascii_alphabetic()) && w.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c))
+    })
+}
+
+fn check_title_script(title: &str) -> CmdResult<()> {
+    match mixed_script_word(title) {
+        Some(w) => Err(format!(
+            "В названии «{}» слово «{}» смешивает латиницу и кириллицу — напиши название так, как его сказал пользователь",
+            title, w
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Утверждает ли ответ, что изменение **уже сделано**. Ловятся формы
 /// прошедшего времени («создал», «создана», «перенёс»); не ловятся:
 /// - «создать», «создам» и отрицание («не создана»);
@@ -248,11 +417,11 @@ pub(super) fn drop_unasked_due_date(tool: &str, args: &Value, user_texts: &[&str
 ///   пересказывает действия человека, а о своих говорит в единственном;
 /// - пересказ данных: «было создано», «была создана 5 сентября», «создано 4».
 pub(super) fn claims_change(content: &str) -> bool {
-    const STEMS: [&str; 22] = [
+    const STEMS: [&str; 28] = [
         "создал", "создан", "добавил", "добавлен", "перенёс", "перенес", "перемещ",
         "переместил", "изменил", "изменён", "изменен", "обновил", "обновлён", "обновлен",
         "назначил", "назначен", "установил", "установлен", "запустил", "запущен",
-        "остановил", "остановлен",
+        "остановил", "остановлен", "отметил", "отмечен", "завёл", "завел", "заведен", "заведён",
     ];
     const DESCRIPTIVE_BEFORE: [&str; 5] = ["не", "было", "была", "был", "были"];
     let words = lowercase_words(content);
@@ -311,7 +480,7 @@ pub(super) fn needs_language_retry(text: &str) -> bool {
 /// «(id 12)». Модель повторяла их за списком досок в промпте, хотя просьба
 /// их не называть там же; надёжнее вычистить, чем уговаривать.
 pub(super) fn strip_service_ids(text: &str) -> String {
-    const KEYS: [&str; 6] = ["board_id", "card_id", "column_id", "member_id", "item_id", "id"];
+    const KEYS: [&str; 7] = ["board_id", "card_id", "column_id", "member_id", "item_id", "habit_id", "id"];
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find('(') {
@@ -363,8 +532,10 @@ pub(super) const NUDGE_LANGUAGE: &str = "Проверка приложения: 
 /// Напоминание модели, когда она заявила об изменении, не вызвав инструмент.
 pub(super) const NUDGE_NO_TOOL: &str = "Проверка приложения: в этом ответе ты НЕ вызвал ни одного \
 изменяющего инструмента, поэтому в данных ничего не изменилось. Если пользователь просил создать или \
-изменить задачу — вызови нужный инструмент сейчас (для новой задачи — create_card). Если ты только \
-описывал уже существующие данные — повтори ответ, не утверждая, что что-то сделал.";
+изменить задачу — вызови нужный инструмент сейчас (для новой задачи — create_card). Если он просил \
+завести привычку — вызови create_habit; отметить привычку (выполнил, сорвал, пропустил, в том числе \
+вчера) — сначала get_habits, чтобы взять habit_id, затем log_habit. Если ты только описывал уже \
+существующие данные — повтори ответ, не утверждая, что что-то сделал.";
 
 /// Приписка к ответу, если модель и после напоминания утверждает своё.
 pub(super) const NOTE_NOTHING_CHANGED: &str = "\n\n⚠ Приложение: в этом ответе ничего не было изменено — \
@@ -389,6 +560,7 @@ pub(super) fn run(conn: &rusqlite::Connection, workspace_id: i64, name: &str, ar
         "get_time_summary" => get_time_summary(conn, workspace_id, args),
         "get_productivity_report" => arg_id(args, "period_days")
             .and_then(|days| productivity_report(conn, workspace_id, days)),
+        "get_habits" => get_habits(conn),
         _ => Err(format!("Инструмента «{}» нет. Доступны: {}", name, tool_names().join(", "))),
     };
     match result {
@@ -508,6 +680,45 @@ fn cards_answer(cards: Vec<Value>) -> Value {
 }
 
 // ─── Инструменты ───
+
+/// Привычки и их отметки за неделю. Привычки общие для всех пространств, поэтому
+/// пространства здесь нет. id нужен модели для `log_habit`.
+fn get_habits(conn: &rusqlite::Connection) -> CmdResult<Value> {
+    let habits = super::habits::list_habits_in(conn, false)?;
+    let days = super::habits::daily_load_in(conn, 7)?;
+    let list: Vec<Value> = habits
+        .iter()
+        .map(|h| {
+            let week: Vec<Value> = days
+                .iter()
+                .filter_map(|d| {
+                    d.marks.iter().find(|m| m.habit_id == h.id).map(|m| {
+                        json!({ "date": d.date, "status": m.status, "reason": m.reason })
+                    })
+                })
+                .collect();
+            json!({
+                "id": h.id,
+                "title": h.title,
+                "schedule": super::habits::describe_frequency(h),
+                "time_of_day": h.time_of_day,
+                "effort_level": h.effort_level,
+                "fallback_title": h.fallback_title,
+                "current_streak": h.current_streak,
+                "streak_unit": if h.streak_unit == "week" { "недель" } else { "дней" },
+                "due_today": h.due_today,
+                "today": h.today.as_ref().map(|l| l.status.clone()),
+                "last_7_days": week,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "count": list.len(),
+        "habits": list,
+        "statuses": "completed — выполнено, fallback — лайт-версия, skipped — пропуск, failed — срыв, \
+                     missed — день по расписанию прошёл без отметки",
+    }))
+}
 
 fn get_boards(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<Value> {
     let boards = boards_in(conn, workspace_id)?;
@@ -959,6 +1170,185 @@ fn first_working_column(conn: &rusqlite::Connection, board_id: i64) -> CmdResult
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_CHECKLIST_CHARS: usize = 300;
 
+fn final_column_refusal(column: &str) -> String {
+    format!("«{}» — завершающая колонка: новую задачу туда поставить нельзя. Возьми рабочую колонку", column)
+}
+
+/// Колонка по id — той же доски и не завершающая.
+fn column_on_board(conn: &rusqlite::Connection, workspace_id: i64, board_id: i64, column_id: i64) -> CmdResult<(i64, String)> {
+    let (name, column_board, _) = check_column(conn, workspace_id, column_id)?;
+    if column_board != board_id {
+        return Err("Эта колонка с другой доски — возьми колонку этой доски из get_board_columns".to_string());
+    }
+    if column_is_final(conn, column_id)? {
+        return Err(final_column_refusal(&name));
+    }
+    Ok((column_id, name))
+}
+
+/// Название без регистра, кавычек и лишних пробелов — так его и пишет
+/// человек: «в колонку в работе».
+fn normalized_name(s: &str) -> String {
+    s.trim()
+        .trim_matches(|c: char| matches!(c, '«' | '»' | '"' | '\'' | '“' | '”'))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Колонка доски по названию: точное совпадение, иначе единственная, чьё
+/// название начинается с названного или содержит его. Не нашлась или
+/// подходит несколько — отказ со списком рабочих колонок, чтобы модель
+/// переспросила, а не угадывала.
+fn column_by_name(conn: &rusqlite::Connection, board_id: i64, board: &str, wanted: &str) -> CmdResult<(i64, String)> {
+    let columns: Vec<(i64, String, bool)> = columns_in(conn, board_id)?
+        .into_iter()
+        .map(|c| (c.id, c.name, c.is_final))
+        .collect();
+    let target = normalized_name(wanted);
+    let exact: Vec<&(i64, String, bool)> = columns.iter().filter(|c| normalized_name(&c.1) == target).collect();
+    let found = if exact.len() == 1 {
+        Some(exact[0])
+    } else {
+        let partial: Vec<&(i64, String, bool)> = columns
+            .iter()
+            .filter(|c| {
+                let name = normalized_name(&c.1);
+                !target.is_empty() && (name.starts_with(&target) || name.contains(&target))
+            })
+            .collect();
+        (partial.len() == 1).then(|| partial[0])
+    };
+    match found {
+        Some((_, name, true)) => Err(final_column_refusal(name)),
+        Some((id, name, false)) => Ok((*id, name.clone())),
+        None => {
+            let working: Vec<String> = columns.iter().filter(|c| !c.2).map(|c| format!("«{}»", c.1)).collect();
+            Err(format!(
+                "На доске «{}» нет колонки «{}». Рабочие колонки: {} — уточни у пользователя",
+                board, wanted.trim(), working.join(", ")
+            ))
+        }
+    }
+}
+
+// ─── Привычки: разбор того, что пишет модель ───
+//
+// Схема просит английские коды, но модель пишет и по-русски («утро», «пн»,
+// «выполнено») — принимается и то, и другое.
+
+fn parse_habit_frequency(raw: &str) -> CmdResult<&'static str> {
+    let v = raw.trim().to_lowercase();
+    if v == "daily" || v.contains("кажд") || v.contains("ежеднев") {
+        Ok("daily")
+    } else if v == "weekly_days" || v.contains("по дням") || v.contains("дни недели") {
+        Ok("weekly_days")
+    } else if v == "x_per_week" || v.contains("в неделю") {
+        Ok("x_per_week")
+    } else {
+        Err(format!("Периодичность «{}» неизвестна — daily, weekly_days или x_per_week", raw))
+    }
+}
+
+fn parse_time_of_day(raw: &str) -> CmdResult<&'static str> {
+    let v = raw.trim().to_lowercase();
+    match v.as_str() {
+        "morning" => return Ok("morning"),
+        "afternoon" => return Ok("afternoon"),
+        "evening" => return Ok("evening"),
+        "anytime" => return Ok("anytime"),
+        _ => {}
+    }
+    if v.starts_with("утр") {
+        Ok("morning")
+    } else if v.starts_with("дн") || v.starts_with("ден") || v.contains("обед") {
+        Ok("afternoon")
+    } else if v.starts_with("веч") || v.contains("ночь") || v.contains("перед сном") {
+        Ok("evening")
+    } else if v.contains("любое") || v.contains("любой") {
+        Ok("anytime")
+    } else {
+        Err(format!("Время суток «{}» неизвестно — morning, afternoon, evening или anytime", raw))
+    }
+}
+
+fn parse_weekday(raw: &str) -> CmdResult<&'static str> {
+    let v = raw.trim().to_lowercase();
+    const PREFIXES: [(&str, &str); 21] = [
+        ("mon", "mon"), ("tue", "tue"), ("wed", "wed"), ("thu", "thu"), ("fri", "fri"), ("sat", "sat"), ("sun", "sun"),
+        ("пон", "mon"), ("пн", "mon"), ("вт", "tue"), ("ср", "wed"), ("чет", "thu"), ("чт", "thu"),
+        ("пят", "fri"), ("пт", "fri"), ("суб", "sat"), ("сб", "sat"), ("вос", "sun"), ("вс", "sun"),
+        ("mo", "mon"), ("su", "sun"),
+    ];
+    PREFIXES
+        .iter()
+        .find(|(p, _)| v.starts_with(p))
+        .map(|(_, d)| *d)
+        .ok_or_else(|| format!("День недели «{}» неизвестен — mon, tue, wed, thu, fri, sat, sun", raw))
+}
+
+/// Дни недели: массив строк или одна строка через запятую.
+fn arg_weekdays(args: &Value) -> CmdResult<Vec<String>> {
+    let items: Vec<String> = match args.get("weekdays") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        Some(Value::String(s)) => s.split([',', ' ', ';']).filter(|p| !p.trim().is_empty()).map(str::to_string).collect(),
+        Some(_) => return Err("weekdays — массив дней недели, например [\"mon\", \"wed\"]".to_string()),
+    };
+    items.iter().map(|d| parse_weekday(d).map(str::to_string)).collect()
+}
+
+fn parse_habit_status(raw: &str) -> CmdResult<&'static str> {
+    let v = raw.trim().to_lowercase();
+    if v == "completed" || v == "done" || v.starts_with("выполн") || v.starts_with("сделал") || v.starts_with("сделан") {
+        Ok("completed")
+    } else if v == "fallback" || v.contains("лайт") || v == "light" {
+        Ok("fallback")
+    } else if v == "skipped" || v == "skip" || v.starts_with("пропу") {
+        Ok("skipped")
+    } else if v == "failed" || v == "fail" || v.starts_with("сорв") || v.starts_with("срыв") {
+        Ok("failed")
+    } else {
+        Err(format!("Статус «{}» неизвестен — completed, fallback, skipped или failed", raw))
+    }
+}
+
+fn time_of_day_label(t: &str) -> &'static str {
+    match t {
+        "morning" => "утром",
+        "afternoon" => "днём",
+        "evening" => "вечером",
+        _ => "в любое время",
+    }
+}
+
+/// Расписание словами — так же, как его показывает экран привычек.
+fn schedule_label(frequency: &str, weekdays: &[String], target: Option<i64>) -> String {
+    const RU: [(&str, &str); 7] = [("mon", "пн"), ("tue", "вт"), ("wed", "ср"), ("thu", "чт"), ("fri", "пт"), ("sat", "сб"), ("sun", "вс")];
+    match frequency {
+        "weekly_days" => {
+            let days: Vec<&str> = RU.iter().filter(|(k, _)| weekdays.iter().any(|d| d == k)).map(|(_, r)| *r).collect();
+            format!("по дням: {}", days.join(", "))
+        }
+        "x_per_week" => {
+            let n = target.unwrap_or(1);
+            let word = if (2..=4).contains(&n) { "раза" } else { "раз" };
+            format!("{} {} в неделю", n, word)
+        }
+        _ => "каждый день".to_string(),
+    }
+}
+
+fn habit_status_label(status: &str, fallback: Option<&str>) -> String {
+    match status {
+        "completed" => "выполнено".to_string(),
+        "fallback" => format!("выполнена лайт-версия «{}»", fallback.unwrap_or("")),
+        "skipped" => "пропуск — стрик заморожен".to_string(),
+        _ => "срыв — стрик сбросится".to_string(),
+    }
+}
+
 /// Проверяет изменение и описывает его. Ничего не пишет.
 pub(super) fn prepare(conn: &rusqlite::Connection, workspace_id: i64, name: &str, args: &Value) -> CmdResult<Prepared> {
     let mut warnings = Vec::new();
@@ -966,8 +1356,13 @@ pub(super) fn prepare(conn: &rusqlite::Connection, workspace_id: i64, name: &str
         "create_card" => {
             let board_id = arg_id(args, "board_id")?;
             let board = check_board(conn, workspace_id, board_id)?;
-            let (column_id, column) = first_working_column(conn, board_id)?;
+            let (column_id, column) = match (arg_opt_id(args, "column_id")?, arg_opt_str(args, "column")?) {
+                (Some(id), _) => column_on_board(conn, workspace_id, board_id, id)?,
+                (None, Some(name)) => column_by_name(conn, board_id, &board, &name)?,
+                (None, None) => first_working_column(conn, board_id)?,
+            };
             let title = arg_str(args, "title")?;
+            check_title_script(&title)?;
             if title.chars().count() > MAX_TITLE_CHARS {
                 return Err(format!("Название длиннее {} символов — сократи", MAX_TITLE_CHARS));
             }
@@ -1141,6 +1536,116 @@ pub(super) fn prepare(conn: &rusqlite::Connection, workspace_id: i64, name: &str
             (json!({ "entry_id": active.entry_id, "member_id": member_id }),
              format!("Остановить таймер на задаче «{}»", active.card_title))
         }
+        "create_habit" => {
+            let weekdays = arg_weekdays(args)?;
+            let target = arg_opt_id(args, "target_per_week")?;
+            // Периодичность, которую модель не назвала, выводится из того, что
+            // она всё-таки передала: дни недели — по дням, норма — N раз.
+            let frequency = match arg_opt_str(args, "frequency")? {
+                Some(f) => parse_habit_frequency(&f)?,
+                None if !weekdays.is_empty() => "weekly_days",
+                None if target.is_some() => "x_per_week",
+                None => "daily",
+            };
+            let time_of_day = match arg_opt_str(args, "time_of_day")? {
+                Some(t) => parse_time_of_day(&t)?,
+                None => "anytime",
+            };
+            let title = arg_str(args, "title")?;
+            check_title_script(&title)?;
+            let input = crate::models::HabitInput {
+                title,
+                description: arg_opt_str(args, "description")?,
+                frequency_type: frequency.to_string(),
+                weekdays,
+                target_per_week: target,
+                time_of_day: time_of_day.to_string(),
+                effort_level: arg_opt_id(args, "effort_level")?.unwrap_or(3),
+                fallback_title: arg_opt_str(args, "fallback_title")?,
+            };
+            let normalized = super::habits::normalize_input(&input)?;
+            let wanted = normalized.title.to_lowercase();
+            if super::habits::list_habits_in(conn, false)?.iter().any(|h| h.title.to_lowercase() == wanted) {
+                return Err(format!("Привычка «{}» уже есть — её можно отметить через log_habit", normalized.title));
+            }
+            let weekdays: Vec<String> = if normalized.frequency_type == "weekly_days" {
+                normalized.frequency_config.as_deref()
+                    .and_then(|c| serde_json::from_str(c).ok())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let target = (normalized.frequency_type == "x_per_week").then_some(input.target_per_week).flatten();
+            let mut details = vec![
+                schedule_label(normalized.frequency_type, &weekdays, target),
+                time_of_day_label(normalized.time_of_day).to_string(),
+                format!("нагрузка {} из 5", normalized.effort_level),
+                match &normalized.fallback_title {
+                    Some(f) => format!("лайт-версия «{}»", f),
+                    None => "без лайт-версии".to_string(),
+                },
+            ];
+            if let Some(d) = &normalized.description {
+                details.push(format!("описание: «{}»", d));
+            }
+            (json!({
+                "title": normalized.title, "description": normalized.description,
+                "frequency": normalized.frequency_type, "weekdays": weekdays, "target_per_week": target,
+                "time_of_day": normalized.time_of_day, "effort_level": normalized.effort_level,
+                "fallback_title": normalized.fallback_title,
+            }), format!("Завести привычку «{}»: {}", normalized.title, details.join(", ")))
+        }
+        "log_habit" => {
+            let habit_id = arg_id(args, "habit_id")?;
+            let habit = super::habits::read_habit(conn, habit_id)
+                .map_err(|_| format!("Привычки с id {} нет — возьми id из get_habits", habit_id))?;
+            if habit.is_archived {
+                return Err(format!("Привычка «{}» в архиве — отмечать её нельзя", habit.title));
+            }
+            let status = match arg_opt_str(args, "status")? {
+                Some(s) => parse_habit_status(&s)?,
+                None => "completed",
+            };
+            if status == "fallback" && habit.fallback_title.is_none() {
+                return Err(format!("У привычки «{}» нет лайт-версии — отметь completed или уточни у пользователя", habit.title));
+            }
+            let today = today_local(conn)?;
+            let date = match arg_opt_str(args, "date")? {
+                None => today.clone(),
+                Some(d) if !is_calendar_date(&d) => {
+                    return Err(format!("Дата должна быть ГГГГ-ММ-ДД, получено «{}»", d));
+                }
+                Some(d) if d > today => return Err("Нельзя отметить привычку на будущий день".to_string()),
+                Some(d) => d,
+            };
+            let reason = if status == "completed" || status == "fallback" { None } else { arg_opt_str(args, "reason")? };
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM habit_logs WHERE habit_id = ?1 AND log_date = ?2",
+                    params![habit_id, date],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(to_string_err)?;
+            if let Some(old) = existing {
+                if old == status {
+                    return Err(format!("Привычка «{}» за этот день уже отмечена так же", habit.title));
+                }
+                warnings.push(format!(
+                    "За этот день уже стоит отметка «{}» — она заменится.",
+                    habit_status_label(&old, habit.fallback_title.as_deref())
+                ));
+            }
+            let day = if date == today { format!("сегодня ({})", date_label(&date)) } else { date_label(&date) };
+            let mut text = format!(
+                "Отметить привычку «{}» за {}: {}",
+                habit.title, day, habit_status_label(status, habit.fallback_title.as_deref())
+            );
+            if let Some(r) = &reason {
+                text.push_str(&format!(", причина: «{}»", r));
+            }
+            (json!({ "habit_id": habit_id, "status": status, "date": date, "reason": reason }), text)
+        }
         _ => return Err(format!("Инструмента «{}» нет", name)),
     };
     Ok(Prepared { tool: name.to_string(), args, description, warnings })
@@ -1212,6 +1717,31 @@ pub(super) fn execute(conn: &mut rusqlite::Connection, workspace_id: i64, prepar
             let entry = stop_timer_in(conn, id("entry_id")?)?;
             let seconds = entry.duration_seconds.unwrap_or(0);
             Ok(json!({ "ok": true, "session": format_duration(seconds) }))
+        }
+        "create_habit" => {
+            let input = crate::models::HabitInput {
+                title: a["title"].as_str().unwrap_or_default().to_string(),
+                description: a["description"].as_str().map(str::to_string),
+                frequency_type: a["frequency"].as_str().unwrap_or("daily").to_string(),
+                weekdays: a["weekdays"].as_array().map(|v| v.iter().filter_map(|d| d.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+                target_per_week: a["target_per_week"].as_i64(),
+                time_of_day: a["time_of_day"].as_str().unwrap_or("anytime").to_string(),
+                effort_level: a["effort_level"].as_i64().unwrap_or(3),
+                fallback_title: a["fallback_title"].as_str().map(str::to_string),
+            };
+            let habit = super::habits::create_habit_in(conn, &input)?;
+            Ok(json!({ "ok": true, "habit_id": habit.id }))
+        }
+        "log_habit" => {
+            let habit = super::habits::log_habit_in(
+                conn,
+                id("habit_id")?,
+                a["date"].as_str().unwrap_or_default(),
+                a["status"].as_str().unwrap_or("completed"),
+                a["reason"].as_str().map(str::to_string),
+            )?;
+            Ok(json!({ "ok": true, "current_streak": habit.current_streak,
+                       "streak_unit": if habit.streak_unit == "week" { "недель" } else { "дней" } }))
         }
         other => Err(format!("Инструмента «{}» нет", other)),
     }?;

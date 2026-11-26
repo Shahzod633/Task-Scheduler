@@ -133,7 +133,11 @@ fn correct_answers_from_the_live_runs_pass() {
 #[test]
 fn dates_years_and_periods_are_not_counts() {
     let mut f = Facts::default();
-    f.add_tool_result("get_overdue_cards", &json!({ "count": 1, "cards": [], "today": "2026-11-26" }).to_string());
+    f.add_tool_result("get_overdue_cards", &json!({
+        "count": 1,
+        "cards": [{ "title": "Сдать отчёт по проекту", "due_date": "2026-11-25" }],
+        "today": "2026-11-26",
+    }).to_string());
     for answer in [
         "Просрочена задача «Сдать отчёт по проекту». Эта задача была запланирована на 2026-11-25, но не выполнена.",
         "У вас просрочена задача \"Сдать отчёт по проекту\", срок до 25 ноября 2026 года.",
@@ -165,4 +169,40 @@ fn per_board_values_count_as_known_numbers() {
     let f = report_facts(7, 0);
     // 3 — и итог активных, и значение по доске: принимается.
     assert!(check("На доске «Shady's tasks» 3 активные задачи.", &f).is_empty());
+}
+
+#[test]
+fn a_number_does_not_reach_across_and() {
+    let f = report_facts(7, 0);
+    let answer = "У вас 2 задачи просрочены и 1 требует вашего внимания. Свободного времени сегодня нет.";
+    assert_eq!(check(answer, &f), vec![]);
+    assert!(!check("У вас 2 задачи просрочены и 3 требуют внимания.", &f).is_empty());
+}
+
+#[test]
+fn a_date_the_tool_did_not_write_is_replaced_with_the_written_one() {
+    let mut f = Facts::default();
+    f.add_tool_result("create_card", &json!({
+        "ok": true, "card_id": 5,
+        "what_was_done": "Создать задачу «Купить домен» на доске «Shady's tasks» в колонке «Тестирование»: срок 30.11.2026, приоритет средний",
+    }).to_string());
+    f.allow_dates_from("2026-11-26");
+    let answer = "Задача «Купить домен» создана в колонке «Тестирование». Срок до понедельника 2026-12-03, приоритет — средний.";
+    let problems = check(answer, &f);
+    assert_eq!(problems, vec![Problem::Date { said: "2026-12-03".into(), right: Some("2026-11-30".into()) }]);
+    assert!(nudge(&problems, &f).contains("записано 30.11.2026"));
+    let fixed = correct(answer, &problems, &f);
+    assert!(fixed.contains("до понедельника 30.11.2026"), "{fixed}");
+    // Верная дата в любой записи — без вопросов; сегодняшняя — тоже.
+    assert!(check("Срок — 30.11.2026.", &f).is_empty());
+    assert!(check("Срок — 2026-11-30.", &f).is_empty());
+    assert!(check("Отмечено за сегодня, 26.11.2026.", &f).is_empty());
+}
+
+#[test]
+fn dates_are_found_in_both_spellings_and_not_inside_longer_numbers() {
+    assert_eq!(
+        dates_in("до 2026-12-03 или 30.11.2026, но не 12026-11-30 и не 1.11.2026"),
+        vec![("2026-12-03".to_string(), "2026-12-03".to_string()), ("30.11.2026".to_string(), "2026-11-30".to_string())]
+    );
 }

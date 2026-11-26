@@ -16,7 +16,7 @@
 //! отдельной доске.
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Что посчитано.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,16 +58,71 @@ pub(super) struct Facts {
     items: HashMap<FactKind, Vec<i64>>,
     /// Длина периода сводки, если в ходе была сводка.
     period_days: Option<i64>,
+    /// Все даты из данных хода и из слов человека, «ГГГГ-ММ-ДД».
+    dates: HashSet<String>,
+    /// Даты из выполненных изменений (`what_was_done`) — то, что записано на
+    /// самом деле.
+    written_dates: Vec<String>,
+}
+
+/// Даты в тексте, приведённые к «ГГГГ-ММ-ДД», вместе с тем, как они
+/// написаны: «2026-11-30» и «30.11.2026». Дата словами («30 ноября») не
+/// ищется — её не с чем однозначно сравнить.
+pub(super) fn dates_in(text: &str) -> Vec<(String, String)> {
+    let b: Vec<char> = text.chars().collect();
+    let digit = |i: usize| b.get(i).is_some_and(|c| c.is_ascii_digit());
+    let digits = |from: usize, n: usize| (from..from + n).all(digit);
+    let boundary = |i: Option<usize>| i.map_or(true, |i| !digit(i));
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let before = boundary(i.checked_sub(1));
+        if before && digits(i, 4) && b.get(i + 4) == Some(&'-') && digits(i + 5, 2)
+            && b.get(i + 7) == Some(&'-') && digits(i + 8, 2) && boundary(Some(i + 10))
+        {
+            let raw: String = b[i..i + 10].iter().collect();
+            found.push((raw.clone(), raw));
+            i += 10;
+            continue;
+        }
+        if before && digits(i, 2) && b.get(i + 2) == Some(&'.') && digits(i + 3, 2)
+            && b.get(i + 5) == Some(&'.') && digits(i + 6, 4) && boundary(Some(i + 10))
+        {
+            let raw: String = b[i..i + 10].iter().collect();
+            let iso = format!("{}-{}-{}", &raw[6..10], &raw[3..5], &raw[0..2]);
+            found.push((raw, iso));
+            i += 10;
+            continue;
+        }
+        i += 1;
+    }
+    found
 }
 
 impl Facts {
     pub(super) fn is_empty(&self) -> bool {
-        self.totals.is_empty() && self.items.is_empty()
+        self.totals.is_empty() && self.items.is_empty() && self.dates.is_empty()
+    }
+
+    /// Даты, которые законно появятся в ответе, хотя инструменты их не
+    /// возвращали: сегодняшняя и названные человеком.
+    pub(super) fn allow_dates_from(&mut self, text: &str) {
+        for (_, iso) in dates_in(text) {
+            self.dates.insert(iso);
+        }
     }
 
     /// Результат инструмента `tool` (JSON-строкой, как он ушёл модели).
     pub(super) fn add_tool_result(&mut self, tool: &str, result: &str) {
         let Ok(value) = serde_json::from_str::<Value>(result) else { return };
+        self.allow_dates_from(result);
+        if let Some(done) = value["what_was_done"].as_str() {
+            for (_, iso) in dates_in(done) {
+                if !self.written_dates.contains(&iso) {
+                    self.written_dates.push(iso);
+                }
+            }
+        }
         match tool {
             "get_boards" => {
                 let boards = value["boards"].as_array().cloned().unwrap_or_default();
@@ -150,6 +205,9 @@ pub(super) enum Problem {
     Number { clause: String, kind: FactKind, said: i64 },
     /// «Сегодня» о событиях сводки за несколько дней.
     Period { clause: String, days: i64 },
+    /// Дата, которой нет ни в данных, ни в словах человека. `right` — дата из
+    /// выполненного изменения, если она одна.
+    Date { said: String, right: Option<String> },
 }
 
 /// Вид числа по слову рядом с ним. Корни — без окончаний и без «не…»: у
@@ -219,7 +277,13 @@ fn clauses(answer: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Ближайший к позиции `i` вид: до двух слов до числа или до трёх после.
+/// Слова, через которые число со словом вида не связывается: «2 задачи
+/// просрочены и 1 требует внимания» — единица не о просроченных (живой
+/// прогон 26.11 повесил на верное приветствие ложную приписку).
+const BOUNDARIES: [&str; 4] = ["и", "а", "но", "или"];
+
+/// Ближайший к позиции `i` вид: до двух слов до числа или до трёх после, не
+/// переходя через «и», «а», «но», «или».
 fn nearest_kind(ws: &[String], i: usize) -> Option<FactKind> {
     let mut best: Option<(usize, FactKind)> = None;
     let mut consider = |dist: usize, j: usize| {
@@ -230,14 +294,16 @@ fn nearest_kind(ws: &[String], i: usize) -> Option<FactKind> {
         }
     };
     for d in 1..=2 {
-        if i >= d {
-            consider(d, i - d);
+        if i < d || BOUNDARIES.contains(&ws[i - d].as_str()) {
+            break;
         }
+        consider(d, i - d);
     }
     for d in 1..=3 {
-        if i + d < ws.len() {
-            consider(d, i + d);
+        if i + d >= ws.len() || BOUNDARIES.contains(&ws[i + d].as_str()) {
+            break;
         }
+        consider(d, i + d);
     }
     best.map(|(_, k)| k)
 }
@@ -284,8 +350,24 @@ pub(super) fn check(answer: &str, facts: &Facts) -> Vec<Problem> {
             }
         }
     }
+    // Даты. Живой прогон 26.11: задача записана со сроком 30.11, а модель
+    // ответила «срок до понедельника 2026-12-03» — свою первую, неверную
+    // дату, хотя инструмент вернул ей 30.11.2026.
+    if !facts.dates.is_empty() {
+        for (raw, iso) in dates_in(answer) {
+            if !facts.dates.contains(&iso) {
+                let right = (facts.written_dates.len() == 1).then(|| facts.written_dates[0].clone());
+                problems.push(Problem::Date { said: raw, right });
+            }
+        }
+    }
     problems.dedup();
     problems
+}
+
+/// «2026-11-30» → «30.11.2026».
+fn date_ru(iso: &str) -> String {
+    format!("{}.{}.{}", &iso[8..10], &iso[5..7], &iso[0..4])
 }
 
 /// Напоминание модели: что именно не сходится.
@@ -299,6 +381,10 @@ pub(super) fn nudge(problems: &[Problem], facts: &Facts) -> String {
             Problem::Period { clause, days } => {
                 format!("- «{}» — это сводка за последние {} дней, а не за сегодня", clause, days)
             }
+            Problem::Date { said, right } => match right {
+                Some(r) => format!("- дата «{}» — такой нет в данных; на самом деле записано {}", said, date_ru(r)),
+                None => format!("- дата «{}» — такой нет в данных инструментов", said),
+            },
         })
         .collect();
     format!(
@@ -324,6 +410,15 @@ pub(super) fn correct(answer: &str, problems: &[Problem], facts: &Facts) -> Stri
             }
             Problem::Number { kind, .. } => {
                 let note = format!("{} — {}", kind.label(), facts.actual_text(*kind));
+                if !notes.contains(&note) {
+                    notes.push(note);
+                }
+            }
+            Problem::Date { said, right: Some(r) } => {
+                text = text.replace(said.as_str(), &date_ru(r));
+            }
+            Problem::Date { said, right: None } => {
+                let note = format!("даты {} в данных нет", said);
                 if !notes.contains(&note) {
                     notes.push(note);
                 }

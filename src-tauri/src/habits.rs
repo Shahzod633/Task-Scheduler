@@ -940,7 +940,7 @@ pub(super) fn analysis_schema() -> Value {
 
 const RU_WEEKDAYS: [&str; 7] = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"];
 
-fn describe_frequency(habit: &Habit) -> String {
+pub(super) fn describe_frequency(habit: &Habit) -> String {
     match habit.frequency_type.as_str() {
         "weekly_days" => {
             let days: Vec<&str> = habit

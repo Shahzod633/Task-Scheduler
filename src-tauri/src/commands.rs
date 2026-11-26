@@ -5833,6 +5833,7 @@ const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри п
 - «Какие задачи просрочены?» → используй get_overdue_cards
 - «Сколько времени я потратил на проект X?» → используй get_time_summary
 - «Покажи нагрузку по исполнителям» → используй get_workload
+- «Какие привычки я сорвал на этой неделе?» → используй get_habits
 
 Когда пользователь спрашивает о данных — всегда вызывай инструмент, не придумывай ответ из головы.
 
@@ -5845,7 +5846,15 @@ const AI_SYSTEM_PROMPT: &str = "Ты — ИИ-ассистент внутри п
 - Приоритет (если не указан — Medium)
 - Исполнитель (если не указан — текущий пользователь)
 
-Новая карточка всегда создаётся в первой рабочей колонке доски (не в финальной).
+Новая карточка встаёт в первую рабочую колонку доски. Если пользователь назвал колонку («в колонку \
+В работе») — передай её название в параметр column, не называл — column не передавай. В завершающую \
+колонку задачу создать нельзя.
+
+Привычки — общие для всех пространств. get_habits — список привычек с id, стриками и отметками за неделю. \
+«Заведи привычку …» → create_habit (передавай только то, что пользователь назвал). «Отметь …, я сделал …» → \
+сначала get_habits, чтобы взять habit_id, потом log_habit: completed — выполнено, fallback — лайт-версия, \
+skipped — пропуск, failed — сорвалось. Привычка заводится и отмечается ТОЛЬКО вызовом инструмента — \
+перед этим пользователь тоже увидит превью и подтвердит.
 
 ВАЖНО: задача создаётся или меняется ТОЛЬКО вызовом инструмента (create_card, move_card и другие). \
 Никогда не пиши «создал», «добавил», «перенёс», «готово», пока не вызвал инструмент и не получил его результат. \
@@ -6096,6 +6105,34 @@ fn prompt_boards_line(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResu
     Ok(line)
 }
 
+/// Сколько привычек перечислять в промпте; дальше — отсылка к `get_habits`.
+const AI_PROMPT_MAX_HABITS: usize = 20;
+
+/// Строка промпта с привычками и их `habit_id` — по той же причине, что доски.
+///
+/// Живые прогоны 26.11 (jarvis:latest): на «я вчера сорвал медитацию, отметь
+/// срыв» модель трижды из трёх ответила «отмечено», не вызвав ни `get_habits`,
+/// ни `log_habit`, — второй шаг за номером привычки она пропускает. А
+/// «отметь медитацию за сегодня» в том же разговоре проходил, потому что номер
+/// ещё оставался в контексте с прошлого вызова.
+fn prompt_habits_line(conn: &rusqlite::Connection) -> CmdResult<String> {
+    let habits = habits::list_habits_in(conn, false)?;
+    if habits.is_empty() {
+        return Ok("Привычек пока нет.".to_string());
+    }
+    let listed: Vec<String> = habits
+        .iter()
+        .take(AI_PROMPT_MAX_HABITS)
+        .map(|h| format!("«{}» (habit_id {})", h.title, h.id))
+        .collect();
+    let mut line = format!("Привычки пользователя: {}.", listed.join(", "));
+    if habits.len() > AI_PROMPT_MAX_HABITS {
+        line.push_str(&format!(" И ещё {} — полный список даёт get_habits.", habits.len() - AI_PROMPT_MAX_HABITS));
+    }
+    line.push_str(" Чтобы отметить привычку, сразу вызывай log_habit с habit_id отсюда.");
+    Ok(line)
+}
+
 /// Системный промпт целиком: постоянная часть плюс то, чего модель знать не
 /// может, — сегодняшняя дата (без неё «до 5 октября» не перевести в диапазон),
 /// название пространства и его доски с номерами.
@@ -6132,7 +6169,7 @@ fn system_prompt(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<St
     let week: Vec<String> = days[1..].iter().map(|(name, date)| format!("{} {}", name, date)).collect();
     Ok(format!(
         "{}\n\nСегодня {}, {}. «Завтра» — это {} ({}). Следующие дни: {}. \
-         Текущее пространство — «{}»; инструменты видят только его.\n{}",
+         Текущее пространство — «{}»; инструменты видят только его.\n{}\n{}",
         AI_SYSTEM_PROMPT,
         today,
         WEEKDAYS[weekday.rem_euclid(7) as usize],
@@ -6141,6 +6178,7 @@ fn system_prompt(conn: &rusqlite::Connection, workspace_id: i64) -> CmdResult<St
         week.join(", "),
         workspace,
         prompt_boards_line(conn, workspace_id)?,
+        prompt_habits_line(conn)?,
     ))
 }
 
@@ -6262,6 +6300,16 @@ impl Turn {
                 facts.add_tool_result(tool, &m.content);
             }
         }
+        // Даты сверяются, только если инструменты хоть что-то вернули: тогда
+        // законны ещё сегодняшняя и названные человеком.
+        if !facts.is_empty() {
+            if let Some(today) = ai_tools::today_from_prompt(&self.messages) {
+                facts.allow_dates_from(&today);
+            }
+            for text in recent_user_texts(&self.messages) {
+                facts.allow_dates_from(text);
+            }
+        }
         facts
     }
 
@@ -6320,18 +6368,26 @@ where
     let tools = ai_tools::definitions();
     loop {
         while let Some(call) = turn.queue.pop_front() {
-            // Срок, которого человек не называл, убирается ещё до превью.
-            let args = match ai_tools::drop_unasked_due_date(
-                &call.function.name,
-                &call.function.arguments,
-                &recent_user_texts(&turn.messages),
-            ) {
-                Some(cleaned) => {
-                    log::info!("ассистент: срок, о котором не просили, убран из {}", call.function.name);
-                    cleaned
+            // До превью: срок и колонка, которых человек не называл, убираются,
+            // а дата, названная словами («до понедельника», «вчера») и
+            // посчитанная моделью неверно, правится.
+            let user_texts = recent_user_texts(&turn.messages);
+            let name = call.function.name.as_str();
+            let mut args = call.function.arguments.clone();
+            if let Some(cleaned) = ai_tools::drop_unasked_due_date(name, &args, &user_texts) {
+                log::info!("ассистент: срок, о котором не просили, убран из {}", name);
+                args = cleaned;
+            }
+            if let Some(cleaned) = ai_tools::drop_unasked_column(name, &args, &user_texts) {
+                log::info!("ассистент: колонка, о которой не просили, убрана из {}", name);
+                args = cleaned;
+            }
+            if let Some(today) = ai_tools::today_from_prompt(&turn.messages) {
+                if let Some(fixed) = ai_tools::fix_spoken_dates(name, &args, &user_texts, &today) {
+                    log::info!("ассистент: дата в {} поправлена по словам пользователя", name);
+                    args = fixed;
                 }
-                None => call.function.arguments.clone(),
-            };
+            }
             match step_tool(&call.function.name, &args)? {
                 ai_tools::ToolStep::Result(result) => {
                     log::info!("ассистент: инструмент {} → {} байт", call.function.name, result.len());

@@ -81,7 +81,7 @@ fn every_defined_tool_has_a_handler_and_a_valid_schema() {
         }
         assert_eq!(is_write_tool(name), WRITE_TOOLS.contains(&name));
     }
-    assert_eq!(definitions().len(), 18);
+    assert_eq!(definitions().len(), 21);
     // Каждое изменение описано в схеме, иначе модель о нём не узнает.
     for w in WRITE_TOOLS {
         assert!(definitions().iter().any(|d| d["function"]["name"] == w), "{w}");
@@ -1038,4 +1038,306 @@ fn ordinary_text_and_unknown_tools_are_not_salvaged() {
     assert!(salvage_tool_call(r#"{"name": "drop_database", "arguments": {}}"#).is_none());
     assert!(salvage_tool_call(r#"{"name": "create_card", "arguments": "нет"}"#).is_none());
     assert!(salvage_tool_call(r#"Вызываю {"name": "create_card", "arguments": {}}"#).is_none());
+}
+
+// ─── Колонка при создании задачи ───
+
+fn add_column(f: &Fixture, name: &str, position: i64) -> i64 {
+    f.conn.execute(
+        "INSERT INTO columns (board_id, name, position, is_final) VALUES (?1, ?2, ?3, 0)",
+        params![f.board, name, position],
+    ).unwrap();
+    f.conn.last_insert_rowid()
+}
+
+#[test]
+fn a_named_column_is_used_and_survives_the_recheck() {
+    let mut f = fixture();
+    let testing = add_column(&f, "Тестирование", 1);
+    let p = prepared(&f, "create_card", json!({"board_id": f.board, "title": "Купить домен", "column": "  тестирование "}));
+    assert!(p.description.contains("в колонке «Тестирование»"), "{}", p.description);
+    let id = execute(&mut f.conn, f.ws, &p).unwrap()["card_id"].as_i64().unwrap();
+    let col: i64 = f.conn.query_row("SELECT column_id FROM cards WHERE id = ?1", params![id], |r| r.get(0)).unwrap();
+    assert_eq!(col, testing);
+}
+
+#[test]
+fn a_column_can_be_named_partly_or_by_id() {
+    let f = fixture();
+    let testing = add_column(&f, "Тестирование", 1);
+    let p = prepared(&f, "create_card", json!({"board_id": f.board, "title": "А", "column": "«тест»"}));
+    assert!(p.description.contains("«Тестирование»"));
+    let p = prepared(&f, "create_card", json!({"board_id": f.board, "title": "А", "column_id": testing}));
+    assert!(p.description.contains("«Тестирование»"));
+}
+
+#[test]
+fn bad_columns_are_refused_with_the_real_list() {
+    let f = fixture();
+    let missing = refused(&f, "create_card", json!({"board_id": f.board, "title": "А", "column": "Бэклог"}));
+    assert!(missing.contains("нет колонки «Бэклог»") && missing.contains("«В работе»"), "{missing}");
+    assert!(!missing.contains("«Закрыто»"), "завершающая не предлагается: {missing}");
+    let fin = refused(&f, "create_card", json!({"board_id": f.board, "title": "А", "column": "Закрыто"}));
+    assert!(fin.contains("завершающая"), "{fin}");
+    let fin_id = refused(&f, "create_card", json!({"board_id": f.board, "title": "А", "column_id": f.final_col}));
+    assert!(fin_id.contains("завершающая"), "{fin_id}");
+    let other = refused(&f, "create_card", json!({"board_id": f.board, "title": "А", "column_id": f.other_col}));
+    assert!(other.contains("нет"), "чужая колонка: {other}");
+    // Два подходящих — не угадываем.
+    add_column(&f, "Ревью кода", 2);
+    add_column(&f, "Ревью дизайна", 3);
+    let ambiguous = refused(&f, "create_card", json!({"board_id": f.board, "title": "А", "column": "ревью"}));
+    assert!(ambiguous.contains("нет колонки"), "{ambiguous}");
+}
+
+#[test]
+fn without_a_column_the_first_working_one_is_used() {
+    let f = fixture();
+    add_column(&f, "Тестирование", 1);
+    let p = prepared(&f, "create_card", json!({"board_id": f.board, "title": "А"}));
+    assert!(p.description.contains("в колонке «В работе»"), "{}", p.description);
+}
+
+// ─── Привычки ───
+
+#[test]
+fn a_habit_is_created_from_what_the_model_wrote_in_russian() {
+    let mut f = fixture();
+    let p = prepared(&f, "create_habit", json!({
+        "title": "Медитация", "time_of_day": "утро", "weekdays": ["пн", "среда", "пт"], "fallback_title": "3 минуты дыхания",
+    }));
+    assert_eq!(
+        p.description,
+        "Завести привычку «Медитация»: по дням: пн, ср, пт, утром, нагрузка 3 из 5, лайт-версия «3 минуты дыхания»"
+    );
+    let id = execute(&mut f.conn, f.ws, &p).unwrap()["habit_id"].as_i64().unwrap();
+    let (freq, cfg, time, fallback): (String, String, String, Option<String>) = f.conn.query_row(
+        "SELECT frequency_type, frequency_config, time_of_day, fallback_title FROM habits WHERE id = ?1",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).unwrap();
+    assert_eq!((freq.as_str(), cfg.as_str(), time.as_str(), fallback.as_deref()),
+               ("weekly_days", r#"["mon","wed","fri"]"#, "morning", Some("3 минуты дыхания")));
+}
+
+#[test]
+fn habit_defaults_and_refusals() {
+    let mut f = fixture();
+    let p = prepared(&f, "create_habit", json!({"title": "Чтение"}));
+    assert_eq!(p.description, "Завести привычку «Чтение»: каждый день, в любое время, нагрузка 3 из 5, без лайт-версии");
+    let p3 = prepared(&f, "create_habit", json!({"title": "Английский", "target_per_week": 3}));
+    assert!(p3.description.contains("3 раза в неделю"), "{}", p3.description);
+    execute(&mut f.conn, f.ws, &p).unwrap();
+    assert!(refused(&f, "create_habit", json!({"title": "чтение"})).contains("уже есть"));
+    assert!(refused(&f, "create_habit", json!({"title": "Бег", "time_of_day": "когда-нибудь"})).contains("неизвестно"));
+    assert!(refused(&f, "create_habit", json!({"title": "Бег", "effort_level": 9})).contains("от 1 до 5"));
+    assert!(refused(&f, "create_habit", json!({"title": "Бег", "frequency": "weekly_days"})).contains("день недели"));
+    let count: i64 = f.conn.query_row("SELECT COUNT(*) FROM habits", [], |r| r.get(0)).unwrap();
+    assert_eq!(count, 1, "превью ничего не пишет");
+}
+
+fn seed_habit(f: &mut Fixture, title: &str, fallback: Option<&str>) -> i64 {
+    let p = prepared(f, "create_habit", json!({"title": title, "fallback_title": fallback}));
+    execute(&mut f.conn, f.ws, &p).unwrap()["habit_id"].as_i64().unwrap()
+}
+
+#[test]
+fn a_habit_is_logged_for_today_and_reports_the_streak() {
+    let mut f = fixture();
+    let h = seed_habit(&mut f, "Пробежка", None);
+    let today = date_offset(&f.conn, 0);
+    let p = prepared(&f, "log_habit", json!({"habit_id": h, "status": "выполнено"}));
+    assert!(p.description.starts_with("Отметить привычку «Пробежка» за сегодня ("), "{}", p.description);
+    assert!(p.description.ends_with(": выполнено"), "{}", p.description);
+    let result = execute(&mut f.conn, f.ws, &p).unwrap();
+    assert_eq!(result["current_streak"], 1);
+    assert!(result["what_was_done"].as_str().unwrap().contains("Пробежка"));
+    let status: String = f.conn.query_row(
+        "SELECT status FROM habit_logs WHERE habit_id = ?1 AND log_date = ?2", params![h, today], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(status, "completed");
+
+    // Та же отметка второй раз — отказ; другая — с предупреждением о замене.
+    assert!(refused(&f, "log_habit", json!({"habit_id": h, "status": "completed"})).contains("уже отмечена"));
+    let p = prepared(&f, "log_habit", json!({"habit_id": h, "status": "failed", "reason": "дождь"}));
+    assert!(p.description.contains("срыв") && p.description.contains("причина: «дождь»"), "{}", p.description);
+    assert!(p.warnings.iter().any(|w| w.contains("заменится")), "{:?}", p.warnings);
+}
+
+#[test]
+fn bad_habit_marks_are_refused() {
+    let mut f = fixture();
+    let h = seed_habit(&mut f, "Пробежка", None);
+    let tomorrow = date_offset(&f.conn, 1);
+    assert!(refused(&f, "log_habit", json!({"habit_id": h, "date": tomorrow})).contains("будущий"));
+    assert!(refused(&f, "log_habit", json!({"habit_id": h, "status": "fallback"})).contains("нет лайт-версии"));
+    assert!(refused(&f, "log_habit", json!({"habit_id": 999})).contains("get_habits"));
+    assert!(refused(&f, "log_habit", json!({"habit_id": h, "status": "почти"})).contains("неизвестен"));
+    let yesterday = date_offset(&f.conn, -1);
+    let p = prepared(&f, "log_habit", json!({"habit_id": h, "date": yesterday, "status": "пропуск"}));
+    assert!(p.description.contains("пропуск — стрик заморожен") && !p.description.contains("сегодня"), "{}", p.description);
+}
+
+#[test]
+fn get_habits_shows_ids_streaks_and_the_week() {
+    let mut f = fixture();
+    let h = seed_habit(&mut f, "Медитация", Some("3 минуты"));
+    let yesterday = date_offset(&f.conn, -1);
+    let p = prepared(&f, "log_habit", json!({"habit_id": h, "date": yesterday, "status": "failed", "reason": "аврал"}));
+    execute(&mut f.conn, f.ws, &p).unwrap();
+    let v = call(&f, "get_habits", json!({}));
+    assert_eq!(v["count"], 1);
+    let habit = &v["habits"][0];
+    assert_eq!((habit["id"].as_i64(), habit["title"].as_str()), (Some(h), Some("Медитация")));
+    assert_eq!(habit["fallback_title"], "3 минуты");
+    let week = habit["last_7_days"].as_array().unwrap();
+    assert!(week.iter().any(|d| d["date"] == yesterday.as_str() && d["status"] == "failed" && d["reason"] == "аврал"), "{week:?}");
+}
+
+#[test]
+fn habit_claims_count_as_claimed_changes() {
+    assert!(claims_change("Привычка «Медитация» отмечена как выполненная."));
+    assert!(claims_change("Я завёл привычку «Чтение»."));
+    assert!(!claims_change("Вы отметили 3 привычки за неделю."));
+}
+
+// ─── Живой тест колонки и привычек ───
+
+/// Колонка по названию, срок «до понедельника», привычка с лайт-версией,
+/// отметка и вопрос о неделе — тем же `advance`, что у чата.
+///
+/// `cargo test --lib ai_tools_live_column_and_habits -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn ai_tools_live_column_and_habits() {
+    let settings = live_settings();
+    let mut f = fixture();
+    add_column(&f, "Тестирование", 1);
+    let mut history: Vec<ChatMessage> = Vec::new();
+    for question in [
+        "создай задачу купить домен для себя на доске Shady's tasks в колонке Тестирование, срок до понедельника",
+        "заведи привычку медитация каждое утро, лайт-версия 3 минуты дыхания",
+        "отметь медитацию за сегодня как выполненную",
+        "я вчера сорвал медитацию, отметь срыв, причина: аврал на работе",
+        "какие привычки я сорвал на этой неделе?",
+    ] {
+        // Промпт — заново на каждый вопрос, как в `ollama_chat`: в нём список
+        // привычек, а он меняется по ходу разговора.
+        let system = system_prompt(&f.conn, f.ws).unwrap();
+        let mut turn = Turn::new(question.into(), build_chat_request(&system, &history, question));
+        let started = std::time::Instant::now();
+        let answer = loop {
+            let step_result = {
+                let conn = &f.conn;
+                tauri::async_runtime::block_on(advance(&settings, &mut turn, |name, args| {
+                    println!("    → {name}({args})");
+                    Ok(step(conn, f.ws, name, args))
+                })).unwrap()
+            };
+            match step_result {
+                TurnStep::Answer(a) => break a,
+                TurnStep::Confirm(p) => {
+                    println!("ПРЕВЬЮ: {}", p.description);
+                    let outcome = execute(&mut f.conn, f.ws, &p);
+                    resolve_action(&mut turn, &p, outcome, true);
+                }
+            }
+        };
+        println!("ВОПРОС: {question}\nОТВЕТ ({:.1} с): {answer}\n", started.elapsed().as_secs_f32());
+        assert!(turn.executed_anything() || !claims_change(&answer) || answer.contains("ничего не было изменено"),
+                "ответ утверждает изменение, которого нет: {answer}");
+        for (role, content) in [("user", question.to_string()), ("assistant", answer)] {
+            history.push(ChatMessage {
+                id: history.len() as i64 + 1, workspace_id: f.ws, role: role.into(), content,
+                created_at: String::new(), tools_used: Vec::new(), actions: Vec::new(),
+            });
+        }
+    }
+
+    let card: Option<(String, Option<String>)> = f.conn
+        .query_row(
+            "SELECT col.name, c.due_date FROM cards c JOIN columns col ON col.id = c.column_id WHERE c.title LIKE '%омен%'",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .unwrap();
+    let monday: String = f.conn.query_row("SELECT date('now', 'localtime', '+1 day', 'weekday 1')", [], |r| r.get(0)).unwrap();
+    println!("ЗАДАЧА: {card:?}, понедельник — {monday}");
+    let habit: Option<(String, String, Option<String>)> = f.conn
+        .query_row("SELECT title, time_of_day, fallback_title FROM habits", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .optional()
+        .unwrap();
+    let marks: Vec<(String, String)> = {
+        let mut stmt = f.conn.prepare("SELECT log_date, status FROM habit_logs ORDER BY log_date").unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    };
+    println!("ПРИВЫЧКА: {habit:?}\nОТМЕТКИ: {marks:?}");
+    assert_eq!(card, Some(("Тестирование".to_string(), Some(monday))));
+    assert!(habit.is_some_and(|(_, time, fallback)| time == "morning" && fallback.is_some()));
+    let yesterday = date_offset(&f.conn, -1);
+    let today = date_offset(&f.conn, 0);
+    assert!(marks.contains(&(today, "completed".to_string())), "сегодняшняя отметка: {marks:?}");
+    assert!(marks.contains(&(yesterday, "failed".to_string())), "вчерашний срыв: {marks:?}");
+}
+
+// ─── Правки аргументов до превью (живые прогоны 26.11) ───
+
+#[test]
+fn a_weekday_deadline_is_counted_from_today() {
+    // Четверг 26.11: «до понедельника» — 30.11, а модель писала 03.12.
+    let args = json!({"board_id": 1, "title": "Купить домен", "due_date": "2026-12-03"});
+    let fixed = fix_spoken_dates("create_card", &args, &["создай задачу купить домен, срок до понедельника"], "2026-11-26").unwrap();
+    assert_eq!(fixed["due_date"], "2026-11-30");
+    // Уже верно — не трогаем; в тот же день недели — через неделю.
+    let ok = json!({"due_date": "2026-11-30"});
+    assert!(fix_spoken_dates("create_card", &ok, &["до понедельника"], "2026-11-26").is_none());
+    let thursday = fix_spoken_dates("create_card", &json!({"due_date": "2026-11-26"}), &["к четвергу"], "2026-11-26").unwrap();
+    assert_eq!(thursday["due_date"], "2026-12-03");
+    // Число в тексте — дату назвал человек, не правим.
+    assert!(fix_spoken_dates("create_card", &json!({"due_date": "2026-12-07"}), &["в понедельник 7 декабря"], "2026-11-26").is_none());
+    // «Средний приоритет» — не среда.
+    assert!(fix_spoken_dates("create_card", &json!({"due_date": "2026-12-01"}), &["приоритет средний"], "2026-11-26").is_none());
+    // День недели из уточнения в предыдущей реплике.
+    let fixed = fix_spoken_dates("create_card", &json!({"due_date": "2026-12-09"}), &["Учёба", "создай задачу к среде"], "2026-11-26").unwrap();
+    assert_eq!(fixed["due_date"], "2026-12-02");
+}
+
+#[test]
+fn yesterday_goes_to_yesterday_for_habit_marks() {
+    let args = json!({"habit_id": 1, "status": "failed"});
+    let fixed = fix_spoken_dates("log_habit", &args, &["я вчера сорвал медитацию, отметь срыв"], "2026-11-26").unwrap();
+    assert_eq!(fixed["date"], "2026-11-25");
+    let fixed = fix_spoken_dates("log_habit", &json!({"habit_id": 1, "date": "2026-11-26"}), &["позавчера пропустил"], "2026-11-26").unwrap();
+    assert_eq!(fixed["date"], "2026-11-24");
+    assert!(fix_spoken_dates("log_habit", &args, &["отметь медитацию"], "2026-11-26").is_none());
+    assert!(fix_spoken_dates("log_habit", &json!({"date": "2026-11-25"}), &["вчера сделал"], "2026-11-26").is_none());
+}
+
+#[test]
+fn an_unasked_column_is_dropped() {
+    let args = json!({"board_id": 1, "title": "Сделать презентацию", "column": "В работе"});
+    let cleaned = drop_unasked_column("create_card", &args, &["Создай задачу Сделать презентацию на доске Shady's tasks"]).unwrap();
+    assert!(cleaned.get("column").is_none());
+    assert!(drop_unasked_column("create_card", &args, &["создай … в колонке В работе"]).is_none());
+    assert!(drop_unasked_column("create_card", &args, &["создай задачу в работе"]).is_none(), "название колонки названо");
+    assert!(drop_unasked_column("create_card", &json!({"board_id": 1, "title": "А"}), &["создай"]).is_none());
+}
+
+#[test]
+fn today_is_read_from_the_system_prompt() {
+    let f = fixture();
+    let system = system_prompt(&f.conn, f.ws).unwrap();
+    let messages = build_chat_request(&system, &[], "привет");
+    assert_eq!(today_from_prompt(&messages), Some(date_offset(&f.conn, 0)));
+}
+
+#[test]
+fn mixed_script_titles_are_refused() {
+    let f = fixture();
+    let habit = refused(&f, "create_habit", json!({"title": "Мeditation"}));
+    assert!(habit.contains("смешивает латиницу и кириллицу"), "{habit}");
+    let card = refused(&f, "create_card", json!({"board_id": f.board, "title": "Купить дoмен"}));
+    assert!(card.contains("смешивает"), "{card}");
+    // Латиница отдельными словами — законно.
+    prepared(&f, "create_card", json!({"board_id": f.board, "title": "Обновить API на сервере"}));
 }
