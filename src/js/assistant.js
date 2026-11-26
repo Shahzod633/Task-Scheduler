@@ -18,6 +18,7 @@
 import * as api from './api.js';
 import Icons from './icons.js';
 import { confirmDialog } from './dialog.js';
+import { openPopover, closePopovers } from './popover.js';
 import { renderMarkdown } from './markdown.js';
 import { refreshTimer } from './timer.js';
 import { createElement, $, showToast, parseTimestamp, autoResize } from './utils.js';
@@ -59,6 +60,48 @@ const TOOL_LABELS = {
 /** Изменения, после которых стоит перечитать таймер в шапке. */
 const TIMER_TOOLS = new Set(['start_timer', 'stop_timer']);
 
+/**
+ * Кнопка «Пространство ▾» в шапке чата и её меню. Пространства читаются
+ * отдельно: в маршрут приходит только id.
+ */
+async function renderWorkspaceSwitch(button, workspaceId) {
+    const paint = (name) => {
+        button.innerHTML = '';
+        button.appendChild(createElement('span', { className: 'assistant__workspace-label' }, 'Пространство'));
+        button.appendChild(createElement('span', { className: 'assistant__workspace-name' }, name));
+        button.appendChild(createElement('span', { className: 'assistant__workspace-chevron', innerHTML: Icons.chevronDown }));
+    };
+    let workspaces = [];
+    try {
+        workspaces = (await api.getWorkspaces()).filter(ws => !ws.archived);
+    } catch (e) {
+        console.error('Не удалось прочитать пространства:', e);
+    }
+    const current = workspaces.find(ws => ws.id === workspaceId);
+    paint(current ? current.name : '—');
+    button.setAttribute('aria-label', `Пространство ассистента: ${current ? current.name : 'неизвестно'}. Сменить`);
+
+    button.addEventListener('click', () => {
+        const menu = createElement('div', { className: 'context-menu', role: 'menu' });
+        for (const ws of workspaces) {
+            const item = createElement('button', {
+                className: `context-menu__item${ws.id === workspaceId ? ' context-menu__item--current' : ''}`,
+                type: 'button',
+                role: 'menuitemradio',
+                'aria-checked': String(ws.id === workspaceId),
+            }, ws.name);
+            item.addEventListener('click', () => {
+                closePopovers();
+                if (ws.id === workspaceId) return;
+                window.dispatchEvent(new CustomEvent('navigate', { detail: { view: 'assistant', workspaceId: ws.id } }));
+            });
+            menu.appendChild(item);
+        }
+        if (!workspaces.length) menu.appendChild(createElement('div', { className: 'context-menu__item' }, 'Пространств нет'));
+        openPopover(menu, button, { placement: 'bottom', align: 'start', gap: 4 });
+    });
+}
+
 export async function renderAssistantPage(workspaceId) {
     const content = $('#content');
     content.innerHTML = '';
@@ -69,7 +112,21 @@ export async function renderAssistantPage(workspaceId) {
     // ─── Шапка ───
     const header = createElement('div', { className: 'assistant__header' });
     const titleBox = createElement('div', { className: 'assistant__title-box' });
-    titleBox.appendChild(createElement('h2', { className: 'page__title assistant__title' }, 'ИИ-ассистент'));
+    const titleRow = createElement('div', { className: 'assistant__title-row' });
+    titleRow.appendChild(createElement('h2', { className: 'page__title assistant__title' }, 'ИИ-ассистент'));
+    // В каком пространстве ассистент ищет и создаёт задачи — прямо в шапке, с
+    // переключателем: раньше это было видно только по сайдбару, и просьба
+    // «создай на доске X» в чужом пространстве просто не находила доску.
+    // У каждого пространства своя история чата, поэтому смена — это переход.
+    const wsButton = createElement('button', {
+        className: 'assistant__workspace',
+        type: 'button',
+        'aria-haspopup': 'menu',
+        'data-tooltip': 'Задачи ассистент ищет и создаёт в этом пространстве. Привычки — общие для всех',
+    });
+    titleRow.appendChild(wsButton);
+    titleBox.appendChild(titleRow);
+    renderWorkspaceSwitch(wsButton, workspaceId);
     const subtitle = createElement('p', { className: 'assistant__subtitle' }, 'Проверяем подключение к Ollama…');
     titleBox.appendChild(subtitle);
     header.appendChild(titleBox);
@@ -147,8 +204,9 @@ export async function renderAssistantPage(workspaceId) {
         if (history.length === 0 && !busy() && !awaiting && !greeting_busy()) {
             list.appendChild(createElement('div', { className: 'assistant__empty' },
                 createElement('span', { className: 'assistant__empty-icon', innerHTML: Icons.sparkles }),
-                createElement('p', {}, 'Здесь пока пусто. Спросите о своих задачах — например, «Какие задачи просрочены?» ' +
-                'или попросите: «Создай задачу „Подготовить отчёт“ на доске …»'),
+                createElement('p', {}, 'Здесь пока пусто. Спросите о своих задачах — например, «Какие задачи просрочены?» — ' +
+                'или попросите: «Создай задачу „Подготовить отчёт“ на доске … в колонке В работе, срок до пятницы». ' +
+                'С привычками тоже: «Заведи привычку медитация каждое утро», «Отметь пробежку как выполненную».'),
             ));
         }
         for (const message of history) list.appendChild(messageBubble(message));
