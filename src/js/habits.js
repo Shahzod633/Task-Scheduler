@@ -51,6 +51,10 @@ const HEATMAP_MAX_WEEKS = 53;
 /** Ширина недели (клетка 13 px + зазор 3 px) и колонки подписей дней — как в habits.css. */
 const HEATMAP_WEEK_PX = 16;
 const HEATMAP_LABELS_PX = 27;
+/** Внутренний отступ панели (`--space-lg`) — ширина карты до первой отрисовки. */
+const HEATMAP_PANEL_PADDING_PX = 16;
+/** Сколько идёт волна по всей карте, мс. */
+const HEATMAP_WAVE_MS = 640;
 
 function timeLabel(value) {
     return TIMES_OF_DAY.find(t => t.value === value)?.label ?? value;
@@ -74,8 +78,47 @@ function streakWord(habit, n) {
         : pluralize(n, ['день', 'дня', 'дней']);
 }
 
-/** Огонёк со стриком; погашен, пока стрик нулевой. */
-function createStreakBadge(habit) {
+// ─── Движение: «сигнал времени» ───
+// Отметка — стрелка обходит циферблат кружка и оставляет галочку, по строке
+// к огоньку пробегает свет, цифра стрика перекатывается, как на счётчике, а
+// огонёк вспыхивает (при срыве — гаснет). Разыгрывается один раз: сразу после
+// отметки строка перерисовывается, поэтому переход ставится в очередь здесь и
+// забирается той строкой, что рисуется следующей. Сами кадры — в habits.css.
+
+/** id привычки → что с ней только что случилось: { kind, from, to }. */
+const pendingMotion = new Map();
+/** Отметка была — на экране «Привычки» сегодняшняя клетка карты мигнёт. */
+let pendingHeatPing = false;
+
+const isDoneLog = (log) => Boolean(log) && (log.status === 'completed' || log.status === 'fallback');
+
+function queueMotion(before, after) {
+    const was = isDoneLog(before.today);
+    const now = isDoneLog(after.today);
+    let kind = null;
+    if (now && !was) kind = 'done';
+    else if (!now && was) kind = 'undo';
+    else if (after.today && !now && !before.today) kind = 'missed';
+    if (!kind && before.current_streak === after.current_streak) return;
+    pendingMotion.set(after.id, { kind, from: before.current_streak, to: after.current_streak });
+    pendingHeatPing = true;
+}
+
+function takeMotion(id) {
+    const motion = pendingMotion.get(id) || null;
+    pendingMotion.delete(id);
+    return motion;
+}
+
+/** Галочка с `pathLength="1"`: её прорисовку задаёт `stroke-dashoffset` в CSS. */
+const CHECK_MARK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path pathLength="1" d="M6 12.5l4 4L18 8.5"/></svg>`;
+
+/**
+ * Огонёк со стриком; погашен, пока стрик нулевой. Если стрик только что
+ * изменился, цифра перекатывается со старой на новую.
+ */
+function createStreakBadge(habit, motion = null) {
     const n = habit.current_streak;
     const badge = createElement('span', {
         className: `habit-streak${n ? '' : ' habit-streak--cold'}`,
@@ -84,7 +127,18 @@ function createStreakBadge(habit) {
             : `Стрика нет · рекорд ${habit.longest_streak}`,
         'aria-label': `Стрик ${n} ${streakWord(habit, n)}`,
     });
-    badge.innerHTML = `${Icons.flame}<span>${n}</span>`;
+    badge.appendChild(createElement('span', { className: 'habit-streak__flame', innerHTML: Icons.flame }));
+    const num = createElement('span', { className: 'habit-streak__num' });
+    if (motion && motion.from !== motion.to) {
+        badge.classList.add(motion.to > motion.from ? 'habit-streak--up' : 'habit-streak--down');
+        num.append(
+            createElement('span', { className: 'habit-streak__digit habit-streak__digit--old', 'aria-hidden': 'true' }, String(motion.from)),
+            createElement('span', { className: 'habit-streak__digit habit-streak__digit--new' }, String(n)),
+        );
+    } else {
+        num.textContent = String(n);
+    }
+    badge.appendChild(num);
     return badge;
 }
 
@@ -106,6 +160,7 @@ function createEffortDots(level) {
 async function mark(habit, status, reason, onChange) {
     try {
         const updated = await api.logHabit(habit.id, todayKey(), status, reason);
+        queueMotion(habit, updated);
         onChange(updated);
     } catch (e) {
         showToast(String(e), 'error');
@@ -114,7 +169,9 @@ async function mark(habit, status, reason, onChange) {
 
 async function unmark(habit, onChange) {
     try {
-        onChange(await api.clearHabitLog(habit.id, todayKey()));
+        const updated = await api.clearHabitLog(habit.id, todayKey());
+        queueMotion(habit, updated);
+        onChange(updated);
     } catch (e) {
         showToast(String(e), 'error');
     }
@@ -177,9 +234,16 @@ const STATUS_TEXT = {
  */
 function createTodayRow(habit, onChange, { compact = false } = {}) {
     const log = habit.today;
-    const done = log && (log.status === 'completed' || log.status === 'fallback');
+    const done = isDoneLog(log);
+    const motion = takeMotion(habit.id);
     const row = createElement('div', {
-        className: `habit-today${done ? ' habit-today--done' : ''}${log && !done ? ' habit-today--missed' : ''}`,
+        className: [
+            'habit-today',
+            done ? 'habit-today--done' : '',
+            log?.status === 'fallback' ? 'habit-today--light' : '',
+            log && !done ? 'habit-today--missed' : '',
+            motion?.kind ? `habit-today--just-${motion.kind}` : '',
+        ].filter(Boolean).join(' '),
     });
 
     const check = createElement('button', {
@@ -188,7 +252,7 @@ function createTodayRow(habit, onChange, { compact = false } = {}) {
         'aria-pressed': String(Boolean(done)),
         'aria-label': done ? `Снять отметку «${habit.title}»` : `Отметить «${habit.title}» выполненной`,
         'data-tooltip': done ? 'Снять отметку' : 'Выполнено',
-        innerHTML: Icons.check,
+        innerHTML: CHECK_MARK,
     });
     check.addEventListener('click', () => (done ? unmark(habit, onChange) : mark(habit, 'completed', null, onChange)));
     row.appendChild(check);
@@ -208,7 +272,7 @@ function createTodayRow(habit, onChange, { compact = false } = {}) {
     if (meta.length) text.appendChild(createElement('span', { className: 'habit-today__meta' }, meta.join(' · ')));
     row.appendChild(text);
 
-    row.appendChild(createStreakBadge(habit));
+    row.appendChild(createStreakBadge(habit, motion));
 
     const actions = createElement('div', { className: 'habit-today__actions' });
     if (!log) {
@@ -261,6 +325,16 @@ export async function renderHabitsTodayWidget(widget) {
     head.appendChild(all);
     widget.appendChild(head);
 
+    // Полоска дня: отрезок на каждую привычку, в порядке строк. Отмеченная
+    // заливает свой отрезок, а последняя пускает по всей полоске свет.
+    const bar = createElement('div', {
+        className: 'habit-progress',
+        role: 'progressbar',
+        'aria-valuemin': '0',
+        'aria-label': 'Выполнено за сегодня',
+    });
+    widget.appendChild(bar);
+
     const list = createElement('div', { className: 'habit-today-list' });
     widget.appendChild(list);
 
@@ -276,8 +350,26 @@ export async function renderHabitsTodayWidget(widget) {
     const draw = () => {
         list.innerHTML = '';
         const today = habits.filter(h => h.due_today || h.today);
-        const done = today.filter(h => h.today && (h.today.status === 'completed' || h.today.status === 'fallback')).length;
-        progress.textContent = today.length ? `${done} из ${today.length}` : '';
+        const done = today.filter(h => isDoneLog(h.today)).length;
+        const justDone = today.find(h => pendingMotion.get(h.id)?.kind === 'done');
+        const complete = Boolean(justDone) && done === today.length;
+        progress.textContent = today.length ? (complete ? 'Всё на сегодня' : `${done} из ${today.length}`) : '';
+        progress.classList.toggle('home-widget__counter--complete', complete);
+
+        bar.innerHTML = '';
+        bar.hidden = !today.length;
+        bar.classList.toggle('habit-progress--complete', complete);
+        bar.setAttribute('aria-valuemax', String(today.length));
+        bar.setAttribute('aria-valuenow', String(done));
+        for (const h of today) {
+            bar.appendChild(createElement('span', {
+                className: [
+                    'habit-progress__seg',
+                    isDoneLog(h.today) ? 'habit-progress__seg--on' : '',
+                    h === justDone ? 'habit-progress__seg--fill' : '',
+                ].filter(Boolean).join(' '),
+            }));
+        }
 
         if (!habits.length) {
             const empty = createElement('div', { className: 'page__empty habit-empty' });
@@ -336,6 +428,7 @@ export async function renderHabitsPage() {
     setTimeout(() => content.classList.remove('view-enter'), 420);
 
     let habits = [];
+    let firstPaint = true;
     const state = {
         reload: async () => {
             try {
@@ -348,7 +441,8 @@ export async function renderHabitsPage() {
             }
             renderToolbar();
             renderList();
-            renderHeatmapSection(heatSection, habits.filter(h => !h.is_archived));
+            renderHeatmapSection(heatSection, habits.filter(h => !h.is_archived), { wave: firstPaint });
+            firstPaint = false;
         },
     };
 
@@ -723,7 +817,32 @@ function heatTooltip(cell) {
     return `${formatShortDay(cell.date)}: ${parts.length ? parts.join(', ') : 'ничего по расписанию'}`;
 }
 
-async function renderHeatmapSection(section, activeHabits) {
+/**
+ * Карта активности. `wave` — первый показ (или другая привычка в списке):
+ * клетки загораются волной от старых недель к сегодняшней, как будто время
+ * прокручивается до «сейчас», и сегодняшняя клетка дважды вспыхивает. После
+ * отметки карта перерисовывается без волны — мигает только сегодняшний день.
+ */
+async function renderHeatmapSection(section, activeHabits, { wave = false } = {}) {
+    // Данные — до очистки: иначе при каждой отметке панель на миг
+    // схлопывалась бы до заголовка и прыгала по высоте.
+    const width = section.querySelector('.heatmap-holder')?.clientWidth
+        || section.clientWidth - 2 * HEATMAP_PANEL_PADDING_PX;
+    const weekCount = Math.max(HEATMAP_MIN_WEEKS, Math.min(HEATMAP_MAX_WEEKS,
+        Math.floor((width - HEATMAP_LABELS_PX) / HEATMAP_WEEK_PX)));
+    // Целыми неделями с понедельника: последняя колонка — текущая неделя до
+    // сегодняшнего дня.
+    const weekday = (new Date().getDay() + 6) % 7;
+    const days = (weekCount - 1) * 7 + weekday + 1;
+    let cells = null;
+    try {
+        cells = await api.getHabitHeatmap(heatmapHabitId, days);
+    } catch (e) {
+        console.error('Не удалось построить карту:', e);
+    }
+    const ping = !wave && pendingHeatPing;
+    pendingHeatPing = false;
+
     section.innerHTML = '';
     const head = createElement('div', { className: 'habits-panel__head' });
     head.appendChild(createElement('h3', { className: 'habits-section__title', id: 'habits-heat-title' }, 'Активность'));
@@ -735,31 +854,23 @@ async function renderHeatmapSection(section, activeHabits) {
     select.value = heatmapHabitId ? String(heatmapHabitId) : '';
     select.addEventListener('change', () => {
         heatmapHabitId = select.value ? Number(select.value) : null;
-        renderHeatmapSection(section, activeHabits);
+        renderHeatmapSection(section, activeHabits, { wave: true });
     });
     head.appendChild(select);
     section.appendChild(head);
 
     const holder = createElement('div', { className: 'heatmap-holder' });
     section.appendChild(holder);
-
-    // Целыми неделями с понедельника: последняя колонка — текущая неделя до
-    // сегодняшнего дня.
-    const weekCount = Math.max(HEATMAP_MIN_WEEKS, Math.min(HEATMAP_MAX_WEEKS,
-        Math.floor((holder.clientWidth - HEATMAP_LABELS_PX) / HEATMAP_WEEK_PX)));
-    const now = new Date();
-    const weekday = (now.getDay() + 6) % 7;
-    const days = (weekCount - 1) * 7 + weekday + 1;
-
-    let cells;
-    try {
-        cells = await api.getHabitHeatmap(heatmapHabitId, days);
-    } catch (e) {
+    if (!cells) {
         holder.appendChild(createElement('p', { className: 'page__empty' }, 'Не удалось построить карту'));
         return;
     }
 
-    const grid = createElement('div', { className: 'heatmap', role: 'img' });
+    const grid = createElement('div', { className: `heatmap${wave ? ' heatmap--wave' : ''}`, role: 'img' });
+    // Шаг волны — так, чтобы вся она уложилась в HEATMAP_WAVE_MS при любой ширине.
+    const step = HEATMAP_WAVE_MS / (weekCount + 3);
+    grid.style.setProperty('--heat-step', `${step.toFixed(1)}ms`);
+    grid.style.setProperty('--heat-wave-end', `${Math.round(HEATMAP_WAVE_MS + 200)}ms`);
     const months = createElement('div', { className: 'heatmap__months', 'aria-hidden': 'true' });
     const body = createElement('div', { className: 'heatmap__body' });
     const labels = createElement('div', { className: 'heatmap__weekdays', 'aria-hidden': 'true' });
@@ -790,10 +901,20 @@ async function renderHeatmapSection(section, activeHabits) {
             total += done;
             if (done) activeDays++;
             const idle = !cell.due && !done && !cell.skipped && !cell.failed;
-            col.appendChild(createElement('span', {
-                className: `heatmap__cell heatmap__cell--l${heatLevel(cell)}${idle ? ' heatmap__cell--idle' : ''}${cell.date === todayKey() ? ' heatmap__cell--today' : ''}`,
+            const isToday = cell.date === todayKey();
+            const el = createElement('span', {
+                className: [
+                    'heatmap__cell',
+                    `heatmap__cell--l${heatLevel(cell)}`,
+                    idle ? 'heatmap__cell--idle' : '',
+                    isToday ? 'heatmap__cell--today' : '',
+                    isToday && ping ? 'heatmap__cell--ping' : '',
+                ].filter(Boolean).join(' '),
                 'data-tooltip': heatTooltip(cell),
-            }));
+            });
+            // Фронт волны идёт по неделям с лёгким наклоном по дням.
+            if (wave) el.style.setProperty('--i', String(w + d * 0.45));
+            col.appendChild(el);
         }
         weeks.appendChild(col);
     }
@@ -831,8 +952,14 @@ function formatGenerated(report) {
     return `Сделан ${when} · ${report.model} · ${formatShortDay(report.period_from)} — ${formatShortDay(report.period_to)}`;
 }
 
-function renderReport(holder, report) {
+/**
+ * `fresh` — отчёт только что пришёл от модели: вердикт «прописывается» лучом
+ * слева направо (тот же луч, что читал график), пункты встают по одному.
+ * Отчёт из кэша показывается сразу — его уже видели.
+ */
+function renderReport(holder, report, { fresh = false } = {}) {
     holder.innerHTML = '';
+    holder.classList.toggle('habit-ai__report--fresh', fresh);
     if (!report) {
         holder.appendChild(createElement('p', { className: 'habit-ai__placeholder' },
             'Анализ ещё не запускался. Модель получит сводку за 14 дней — задачи со сроком, закрытые и просроченные, ' +
@@ -849,14 +976,19 @@ function renderReport(holder, report) {
     }
 
     holder.appendChild(createElement('p', { className: 'habit-ai__verdict' }, analysis.workload_verdict));
+    let order = 0;
+    const cue = (el) => {
+        el.style.setProperty('--i', String(Math.min(order++, 10)));
+        return el;
+    };
 
-    holder.appendChild(createElement('h4', { className: 'habit-ai__subtitle' }, 'Закономерности'));
+    holder.appendChild(cue(createElement('h4', { className: 'habit-ai__subtitle' }, 'Закономерности')));
     if (!analysis.correlations.length) {
-        holder.appendChild(createElement('p', { className: 'habit-ai__none' }, 'Связей между нагрузкой и срывами не найдено.'));
+        holder.appendChild(cue(createElement('p', { className: 'habit-ai__none' }, 'Связей между нагрузкой и срывами не найдено.')));
     } else {
         const list = createElement('ul', { className: 'habit-ai__list' });
         for (const c of analysis.correlations) {
-            const item = createElement('li', { className: 'habit-ai__item' });
+            const item = cue(createElement('li', { className: 'habit-ai__item' }));
             item.appendChild(createElement('span', {
                 className: `habit-ai__confidence habit-ai__confidence--${c.confidence}`,
                 'data-tooltip': 'Уверенность',
@@ -870,13 +1002,13 @@ function renderReport(holder, report) {
         holder.appendChild(list);
     }
 
-    holder.appendChild(createElement('h4', { className: 'habit-ai__subtitle' }, 'Что изменить'));
+    holder.appendChild(cue(createElement('h4', { className: 'habit-ai__subtitle' }, 'Что изменить')));
     if (!analysis.actionable_adjustments.length) {
-        holder.appendChild(createElement('p', { className: 'habit-ai__none' }, 'Предложений нет.'));
+        holder.appendChild(cue(createElement('p', { className: 'habit-ai__none' }, 'Предложений нет.')));
     } else {
         const list = createElement('ul', { className: 'habit-ai__list' });
         for (const a of analysis.actionable_adjustments) {
-            const item = createElement('li', { className: 'habit-ai__item' });
+            const item = cue(createElement('li', { className: 'habit-ai__item' }));
             item.appendChild(createElement('span', { className: 'habit-ai__habit' }, a.habit || 'Общее'));
             const text = createElement('div', { className: 'habit-ai__text' });
             text.appendChild(createElement('span', { className: 'habit-ai__pattern' }, a.change));
@@ -931,8 +1063,18 @@ async function renderAiSection(section) {
             : `${Icons.sparkles}<span>${report ? 'Обновить анализ' : 'Запустить анализ'}</span>`;
     };
 
+    // Пока модель думает, по графику за 14 дней ходит луч: модель читает
+    // именно эти дни, слева направо.
+    const beam = createElement('span', { className: 'habit-ai__beam', 'aria-hidden': 'true' });
+    const reading = (on) => {
+        chartWrap.classList.toggle('habit-ai__chart--reading', on);
+        if (on) chartWrap.appendChild(beam);
+        else beam.remove();
+    };
+
     const start = async () => {
         paintButton(true);
+        reading(true);
         status.innerHTML = '';
         status.appendChild(createElement('p', { className: 'form-hint' },
             'Модель читает сводку за 14 дней. На локальной Ollama это минута-две, первый запуск дольше.'));
@@ -941,14 +1083,17 @@ async function renderAiSection(section) {
             report = await analysisRunning;
             if (!section.isConnected) return;
             status.innerHTML = '';
-            renderReport(holder, report);
+            renderReport(holder, report, { fresh: true });
         } catch (e) {
             if (!section.isConnected) return;
             status.innerHTML = '';
             status.appendChild(createElement('p', { className: 'habit-ai__error' }, String(e)));
         } finally {
             analysisRunning = null;
-            if (section.isConnected) paintButton(false);
+            if (section.isConnected) {
+                reading(false);
+                paintButton(false);
+            }
         }
     };
     run.addEventListener('click', start);
