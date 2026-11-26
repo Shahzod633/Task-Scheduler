@@ -22,6 +22,7 @@ import { renderFavoritesPage } from './favorites.js';
 import { renderMistakesPage } from './mistakes.js';
 import { renderListPage } from './list.js';
 import { renderMembersPage } from './members.js';
+import { renderHabitsPage } from './habits.js';
 import { applyWorkspaceBackground } from './background.js';
 import { initTheme } from './theme.js';
 import { openPalette, closePalette, isPaletteOpen } from './palette.js';
@@ -41,6 +42,7 @@ const SIDEBAR_ITEM_IDS = {
     board: 'sidebar-current-board',
     list: 'sidebar-list',
     planner: 'sidebar-planner',
+    habits: 'sidebar-habits',
     inbox: 'sidebar-inbox',
     mistakes: 'sidebar-mistakes',
     assistant: 'sidebar-assistant',
@@ -73,6 +75,8 @@ const ROUTES = {
     mistakes: (params) => renderMistakesPage(params.workspaceId || defaultWorkspaceId),
     list: (params) => renderListPage(params.workspaceId || defaultWorkspaceId),
     members: (params) => renderMembersPage(params.workspaceId || defaultWorkspaceId),
+    // Привычки общие для всех пространств — экрану id пространства не нужен.
+    habits: () => renderHabitsPage(),
 };
 
 /**
@@ -223,6 +227,10 @@ function renderLayout() {
                         <span class="sidebar__item-icon">${Icons.calendar}</span>
                         <span class="sidebar__item-text">Планировщик</span>
                     </button>
+                    <button type="button" class="sidebar__item" id="sidebar-habits" data-rail-label="Привычки">
+                        <span class="sidebar__item-icon">${Icons.habit}</span>
+                        <span class="sidebar__item-text">Привычки</span>
+                    </button>
                     <button type="button" class="sidebar__item" id="sidebar-inbox" data-rail-label="Inbox">
                         <span class="sidebar__item-icon">${Icons.inbox}</span>
                         <span class="sidebar__item-text">Inbox</span>
@@ -305,6 +313,10 @@ function renderLayout() {
 
     $('#sidebar-planner').addEventListener('click', () => {
         navigateTo('planner', { workspaceId: defaultWorkspaceId });
+    });
+
+    $('#sidebar-habits').addEventListener('click', () => {
+        navigateTo('habits', { workspaceId: defaultWorkspaceId });
     });
 
     $('#sidebar-inbox').addEventListener('click', () => {

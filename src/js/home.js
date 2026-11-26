@@ -10,6 +10,7 @@ import { priorityLabel } from './filters.js';
 import { createElement, $, showToast, lastNDays, pluralize, formatShortDay, dueState, formatDueDate } from './utils.js';
 import Icons from './icons.js';
 import { showCardEditModal } from './board.js';
+import { renderHabitsTodayWidget } from './habits.js';
 
 /** Сколько горящих задач показывать; остальные — в «Списке». */
 const TODAY_LIMIT = 8;
@@ -73,6 +74,15 @@ export async function renderHomePage(workspaceId) {
     const todayList = createElement('div', { className: 'today-list' });
     todayWidget.appendChild(todayList);
     widgets.appendChild(todayWidget);
+
+    // «Привычки на сегодня» — сразу за горящими задачами: отметить привычку
+    // можно здесь же в один щелчок, не уходя на экран «Привычки».
+    const habitsWidget = createElement('section', {
+        className: 'home-widget',
+        'aria-labelledby': 'home-habits-title',
+    });
+    widgets.appendChild(habitsWidget);
+    renderHabitsTodayWidget(habitsWidget);
 
     const recentWidget = createElement('div', { className: 'home-widget' });
     recentWidget.appendChild(createElement('h3', { className: 'home-widget__title' }, 'Недавние доски'));

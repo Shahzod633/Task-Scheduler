@@ -759,3 +759,69 @@ export async function ollamaGreeting(workspaceId) {
 export async function getPendingAction(workspaceId) {
     return await invoke('get_pending_action', { workspaceId });
 }
+
+// ─── Привычки ───
+// Привычки общие для всех пространств, поэтому workspaceId здесь нет.
+
+/**
+ * Привычки с отметкой за сегодня, стриком и `due_today`.
+ * @param {boolean} includeArchived — вместе с архивными (они в конце)
+ */
+export async function listHabits(includeArchived = false) {
+    return await invoke('list_habits', { includeArchived });
+}
+
+/**
+ * @param {object} input — { title, description, frequency_type, weekdays,
+ *   target_per_week, time_of_day, effort_level, fallback_title }
+ */
+export async function createHabit(input) {
+    return await invoke('create_habit', { input });
+}
+
+export async function updateHabit(id, input) {
+    return await invoke('update_habit', { id, input });
+}
+
+export async function setHabitArchived(id, archived) {
+    return await invoke('set_habit_archived', { id, archived });
+}
+
+/** Удаляет привычку вместе со всеми отметками. */
+export async function deleteHabit(id) {
+    return await invoke('delete_habit', { id });
+}
+
+/**
+ * Отметка за день. Повторная за тот же день заменяет прежнюю.
+ * @param {'completed'|'fallback'|'skipped'|'failed'} status
+ * @param {string|null} skipReason — только для skipped/failed
+ * @returns {Promise<object>} привычка после отметки (со свежим стриком)
+ */
+export async function logHabit(habitId, logDate, status, skipReason = null) {
+    return await invoke('log_habit', { habitId, logDate, status, skipReason });
+}
+
+export async function clearHabitLog(habitId, logDate) {
+    return await invoke('clear_habit_log', { habitId, logDate });
+}
+
+/** Тепловая карта за `days` дней: одна привычка или все активные (null). */
+export async function getHabitHeatmap(habitId, days) {
+    return await invoke('get_habit_heatmap', { habitId, days });
+}
+
+/** Задачи и привычки по дням за 14 дней. */
+export async function getHabitTaskSummary() {
+    return await invoke('get_habit_task_summary');
+}
+
+/** Последний ИИ-анализ из кэша (с флагом `stale`) или null. */
+export async function getHabitAnalysis() {
+    return await invoke('get_habit_analysis');
+}
+
+/** Новый ИИ-анализ через Ollama. Может идти минуту-две. */
+export async function runHabitAnalysis() {
+    return await invoke('run_habit_analysis');
+}

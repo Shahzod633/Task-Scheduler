@@ -1,0 +1,611 @@
+/* ============================================
+   TaskFlow — Привычки: экран, виджет главной, тепловая карта, ИИ-аналитика
+   ============================================
+   Палитра «Сигнал»: кобальт — действие и выполненное, янтарь — стрик и
+   внимание (время), красный здесь не появляется вовсе — он только у
+   просроченных задач. Сорванная привычка — приглушённая, а не тревожная. */
+
+.habits-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+}
+
+/* ─── Шапка виджета на главной ─── */
+.home-widget__head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-md);
+}
+
+.home-widget__head .home-widget__title {
+    margin-bottom: 0;
+    margin-right: auto;
+}
+
+.home-widget__counter {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ─── Строка «сегодня» ─── */
+.habit-today-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.habit-today {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md);
+    min-height: 44px;
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: var(--radius-md);
+    transition: background var(--transition-fast);
+}
+
+.habit-today-list .habit-today:hover {
+    background: var(--bg-card-hover);
+}
+
+.habit-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    border-radius: var(--radius-round);
+    border: 1.5px solid var(--border-strong);
+    background: transparent;
+    color: transparent;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.habit-check svg {
+    width: 15px;
+    height: 15px;
+}
+
+.habit-check:hover {
+    border-color: var(--accent-border);
+    color: var(--accent-text);
+}
+
+.habit-today--done .habit-check {
+    background: var(--accent-fill);
+    border-color: var(--accent-fill);
+    color: var(--text-on-accent);
+}
+
+.habit-check--off {
+    border-style: dashed;
+    cursor: default;
+}
+
+.habit-today__text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.habit-today__title,
+.habit-today__meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.habit-today__title {
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+}
+
+.habit-today__meta {
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+}
+
+.habit-today--done .habit-today__title {
+    color: var(--text-secondary);
+}
+
+.habit-today--missed .habit-today__title,
+.habit-today--off .habit-today__title {
+    color: var(--text-muted);
+}
+
+.habit-today__actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+/* ─── Стрик и нагрузка ─── */
+.habit-streak {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+    min-width: 44px;
+    justify-content: flex-end;
+    color: var(--color-warning);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+    font-variant-numeric: tabular-nums;
+}
+
+.habit-streak svg {
+    width: 15px;
+    height: 15px;
+}
+
+.habit-streak--cold {
+    color: var(--text-muted);
+    font-weight: var(--font-weight-normal);
+}
+
+.habit-effort {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.habit-effort__dot {
+    width: 6px;
+    height: 6px;
+    border-radius: var(--radius-round);
+    background: var(--border-strong);
+}
+
+.habit-effort__dot--on {
+    background: var(--text-secondary);
+}
+
+/* ─── Окошко пропуска ─── */
+.habit-skip {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+}
+
+.habit-skip__title {
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.habit-skip__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-xs);
+}
+
+.habit-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-md);
+}
+
+/* ─── Экран «Привычки» ─── */
+.page--habits {
+    max-width: 1080px;
+}
+
+.habits-section + .habits-section {
+    margin-top: var(--space-xl);
+}
+
+.habits-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-md);
+}
+
+.habits-toolbar__archived {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    font-size: var(--font-size-sm);
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.habits-toolbar__add {
+    margin-left: auto;
+}
+
+.habits-toolbar__add svg {
+    width: 16px;
+    height: 16px;
+}
+
+.habit-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.habit-row {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+    padding: var(--space-sm) calc(var(--space-sm) + 34px) var(--space-md) var(--space-sm);
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
+    border-radius: var(--radius-lg);
+    transition: border-color var(--transition-fast);
+}
+
+.habit-row:hover {
+    border-color: var(--border-hover);
+}
+
+.habit-row--archived {
+    opacity: 0.7;
+}
+
+.habit-row__details {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-xs) var(--space-lg);
+    /* Под текстом строки, а не под кружком. */
+    padding-left: calc(26px + var(--space-md) + var(--space-sm));
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+}
+
+.habit-row__fallback {
+    color: var(--text-secondary);
+}
+
+.habit-row__description {
+    flex-basis: 100%;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.habit-row__more {
+    position: absolute;
+    top: var(--space-sm);
+    right: var(--space-sm);
+}
+
+/* ─── Форма ─── */
+.habit-form {
+    width: 520px;
+}
+
+.habit-form .theme-toggle {
+    flex-wrap: wrap;
+}
+
+.habit-form__extra {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+}
+
+.habit-form__extra:empty {
+    display: none;
+}
+
+.habit-form__inline-hint {
+    margin-top: 0;
+}
+
+.habit-form__error {
+    min-height: 1em;
+    font-size: var(--font-size-sm);
+    color: var(--color-warning);
+}
+
+.habit-form__error:empty {
+    display: none;
+}
+
+/* ─── Панели: тепловая карта и ИИ ─── */
+.habits-panel {
+    background: var(--bg-panel);
+    backdrop-filter: blur(var(--blur-panel));
+    -webkit-backdrop-filter: blur(var(--blur-panel));
+    border: 1px solid var(--border-panel);
+    border-radius: var(--radius-xl);
+    padding: var(--space-lg);
+    box-shadow: var(--highlight-top);
+}
+
+.habits-panel__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-md);
+}
+
+.habits-section__title {
+    margin-right: auto;
+    font-family: var(--font-display);
+    font-size: var(--font-size-lg);
+    font-weight: var(--font-weight-semibold);
+    letter-spacing: var(--tracking-tight);
+    color: var(--text-primary);
+}
+
+/* `select.form-input` в components.css растягивает список на всю ширину и
+   весит больше одного класса. */
+select.habits-panel__select {
+    width: auto;
+    min-width: 200px;
+    /* Иначе ширину задаёт самое длинное название привычки. */
+    max-width: 280px;
+}
+
+/* ─── Тепловая карта ─── */
+.heatmap-holder {
+    overflow-x: auto;
+}
+
+.heatmap {
+    --heat-cell: 13px;
+    --heat-gap: 3px;
+    display: inline-flex;
+    flex-direction: column;
+    gap: var(--space-xs);
+}
+
+.heatmap__months {
+    display: flex;
+    gap: var(--heat-gap);
+    padding-left: calc(24px + var(--heat-gap));
+}
+
+.heatmap__month {
+    width: var(--heat-cell);
+    overflow: visible;
+    white-space: nowrap;
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+}
+
+.heatmap__body {
+    display: flex;
+    gap: var(--heat-gap);
+}
+
+.heatmap__weekdays {
+    display: grid;
+    grid-template-rows: repeat(7, var(--heat-cell));
+    gap: var(--heat-gap);
+    width: 24px;
+    font-size: var(--font-size-xs);
+    line-height: var(--heat-cell);
+    color: var(--text-muted);
+}
+
+.heatmap__weeks {
+    display: flex;
+    gap: var(--heat-gap);
+}
+
+.heatmap__week {
+    display: grid;
+    grid-template-rows: repeat(7, var(--heat-cell));
+    gap: var(--heat-gap);
+}
+
+.heatmap__cell {
+    display: inline-block;
+    width: var(--heat-cell);
+    height: var(--heat-cell);
+    border-radius: 3px;
+    background: var(--bg-card);
+}
+
+.heatmap__cell--l1 { background: color-mix(in srgb, var(--accent-color) 28%, transparent); }
+.heatmap__cell--l2 { background: color-mix(in srgb, var(--accent-color) 50%, transparent); }
+.heatmap__cell--l3 { background: color-mix(in srgb, var(--accent-color) 74%, transparent); }
+.heatmap__cell--l4 { background: var(--accent-color); }
+
+/* День, когда ничего не стояло по расписанию, — пустая рамка, а не
+   «ноль»: ноль значит «мог, но не сделал». */
+.heatmap__cell--idle {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--border-subtle);
+}
+
+.heatmap__cell--future {
+    background: transparent;
+}
+
+.heatmap__cell--today {
+    box-shadow: inset 0 0 0 1.5px var(--text-secondary);
+}
+
+.heatmap__foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    margin-top: var(--space-md);
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+}
+
+.heatmap__legend {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.heatmap__legend .heatmap__cell {
+    width: 11px;
+    height: 11px;
+}
+
+/* ─── ИИ-аналитика ─── */
+.habit-ai__chart {
+    position: relative;
+    height: 200px;
+    margin-bottom: var(--space-lg);
+}
+
+.habit-ai__spinner {
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+    border-color: rgba(255, 255, 255, 0.35);
+    border-top-color: var(--text-on-accent);
+}
+
+.habit-ai__status {
+    margin-bottom: var(--space-md);
+}
+
+.habit-ai__status:empty {
+    display: none;
+}
+
+.habit-ai__error {
+    padding: var(--space-sm) var(--space-md);
+    border-radius: var(--radius-md);
+    background: var(--warning-soft);
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    line-height: 1.5;
+}
+
+.habit-ai__placeholder,
+.habit-ai__none {
+    color: var(--text-muted);
+    font-size: var(--font-size-md);
+    line-height: 1.6;
+    max-width: 72ch;
+}
+
+.habit-ai__meta {
+    font-size: var(--font-size-sm);
+    color: var(--text-muted);
+    margin-bottom: var(--space-sm);
+}
+
+.habit-ai__stale {
+    display: inline-block;
+    padding: var(--space-xs) var(--space-md);
+    margin-bottom: var(--space-md);
+    border-radius: var(--radius-pill);
+    background: var(--warning-soft);
+    color: var(--color-warning);
+    font-size: var(--font-size-sm);
+}
+
+.habit-ai__verdict {
+    padding-left: var(--space-md);
+    border-left: 3px solid var(--accent-color);
+    color: var(--text-primary);
+    font-size: var(--font-size-lg);
+    line-height: 1.5;
+    max-width: 72ch;
+}
+
+.habit-ai__subtitle {
+    margin: var(--space-xl) 0 var(--space-sm);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+    letter-spacing: var(--tracking-caps);
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.habit-ai__list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+    list-style: none;
+}
+
+.habit-ai__item {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-md);
+}
+
+.habit-ai__confidence,
+.habit-ai__habit {
+    flex-shrink: 0;
+    min-width: 84px;
+    padding: 2px var(--space-sm);
+    border-radius: var(--radius-pill);
+    font-size: var(--font-size-xs);
+    font-weight: var(--font-weight-semibold);
+    text-align: center;
+    background: var(--bg-card);
+    color: var(--text-secondary);
+}
+
+.habit-ai__confidence--high {
+    background: var(--accent-fill);
+    color: var(--text-on-accent);
+}
+
+.habit-ai__confidence--medium {
+    background: var(--accent-soft);
+    color: var(--accent-text);
+}
+
+.habit-ai__habit {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: var(--accent-soft);
+    color: var(--accent-text);
+}
+
+.habit-ai__text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    max-width: 72ch;
+}
+
+.habit-ai__pattern {
+    color: var(--text-primary);
+    font-size: var(--font-size-md);
+    line-height: 1.5;
+}
+
+.habit-ai__evidence {
+    color: var(--text-muted);
+    font-size: var(--font-size-sm);
+    line-height: 1.5;
+}
+
+@media (max-width: 1099px) {
+    .page--habits {
+        max-width: none;
+    }
+}

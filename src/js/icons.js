@@ -247,6 +247,21 @@ const Icons = {
     send: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>
     </svg>`,
+
+    /* Привычки: круг повторения с галочкой */
+    habit: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12a9 9 0 1 1-3.5-7.1"/><path d="M21 4v5h-5"/><path d="m8.5 12.5 2.5 2.5 5-5"/>
+    </svg>`,
+
+    /* Стрик привычки */
+    flame: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>
+    </svg>`,
+
+    /* Пропуск / срыв привычки */
+    skip: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m5 4 10 8-10 8V4z"/><path d="M19 5v14"/>
+    </svg>`,
 };
 
 export default Icons;
