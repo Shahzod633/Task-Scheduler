@@ -870,7 +870,7 @@ fn ai_tools_live_report_greeting_and_month_question() {
     println!("СВОДКА: {report}");
     let started = std::time::Instant::now();
     // Тот же путь, что у команды: с повтором, если модель ушла в иероглифы.
-    let greeting = tauri::async_runtime::block_on(greeting_text(&settings, greeting_request(&system, &report))).unwrap();
+    let greeting = tauri::async_runtime::block_on(greeting_text(&settings, greeting_request(&system, &report), &report)).unwrap();
     println!("ПРИВЕТСТВИЕ ({:.1} с):\n{greeting}\n", started.elapsed().as_secs_f32());
     assert!(greeting.contains('2'), "в приветствии должны быть реальные числа (2 просроченные)");
     assert!(!has_foreign_script(&greeting), "приветствие не на русском: {greeting}");

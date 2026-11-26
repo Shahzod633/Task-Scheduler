@@ -5884,6 +5884,10 @@ const AI_MAX_MESSAGE_CHARS: usize = 8000;
 #[path = "ai_tools.rs"]
 mod ai_tools;
 
+/// Сверка чисел в ответе модели с результатами инструментов.
+#[path = "ai_facts.rs"]
+mod ai_facts;
+
 /// Трекер привычек — тоже дочерний модуль: даты считает теми же
 /// `days_from_civil`/`parse_day`, а ИИ-анализ ходит в Ollama через те же
 /// `read_ai_settings`/`run_blocking`, что и ассистент.
@@ -6227,13 +6231,38 @@ struct Turn {
     /// Модели уже напомнили, что она заявила об изменении без инструмента, —
     /// второй раз за ход не напоминаем.
     nudged: bool,
+    /// Модель уже поправляли за числа, не сходящиеся с данными инструментов.
+    facts_retried: bool,
     /// Модель уже просили повторить ответ по-русски.
     language_retried: bool,
 }
 
 impl Turn {
     fn new(user_text: String, messages: Vec<crate::ollama::Message>) -> Self {
-        Turn { user_text, messages, queue: Default::default(), tools_used: Vec::new(), actions: Vec::new(), rounds: 0, nudged: false, language_retried: false }
+        Turn {
+            user_text,
+            messages,
+            queue: Default::default(),
+            tools_used: Vec::new(),
+            actions: Vec::new(),
+            rounds: 0,
+            nudged: false,
+            facts_retried: false,
+            language_retried: false,
+        }
+    }
+
+    /// Числа из результатов инструментов этого хода — после последней реплики
+    /// человека. Прошлые вопросы не в счёт: данные с тех пор могли измениться.
+    fn facts(&self) -> ai_facts::Facts {
+        let start = self.messages.iter().rposition(|m| m.role == "user").map_or(0, |i| i + 1);
+        let mut facts = ai_facts::Facts::default();
+        for m in &self.messages[start..] {
+            if let (true, Some(tool)) = (m.role == "tool", m.tool_name.as_deref()) {
+                facts.add_tool_result(tool, &m.content);
+            }
+        }
+        facts
     }
 
     fn executed_anything(&self) -> bool {
@@ -6347,6 +6376,22 @@ where
                     continue;
                 }
                 reply.content = ai_tools::cut_foreign_tail(&reply.content);
+            }
+            // Числа и «нет …», не сходящиеся с тем, что вернули инструменты
+            // (ai_facts.rs): один повтор с поправкой, потом — приписка с
+            // настоящими числами.
+            let facts = turn.facts();
+            let problems = ai_facts::check(&reply.content, &facts);
+            if !problems.is_empty() {
+                if !turn.facts_retried && can_retry {
+                    log::warn!("ассистент: ответ расходится с данными инструментов ({}) — прошу исправить", problems.len());
+                    turn.facts_retried = true;
+                    turn.messages.push(reply);
+                    turn.messages.push(crate::ollama::Message::new("system", ai_facts::nudge(&problems, &facts)));
+                    continue;
+                }
+                log::warn!("ассистент: и повтор расходится с данными — ответ поправлен");
+                reply.content = ai_facts::correct(&reply.content, &problems, &facts);
             }
             // «Создал», хотя человек просил изменение, а в этом ходе ничего
             // не выполнено, — модель выдумала. Без просьбы об изменении
@@ -6584,23 +6629,50 @@ fn save_assistant_message(
 /// вам今天完成了…») — один повтор с просьбой писать по-русски, затем обрезка
 /// чужого хвоста, как в обычном ответе. Вынесено из команды, чтобы живой тест
 /// гонял тот же путь.
-async fn greeting_text(settings: &AiSettings, request: Vec<crate::ollama::Message>) -> CmdResult<String> {
-    let ask = |messages: Vec<crate::ollama::Message>| {
+///
+/// Числа сверяются со сводкой `report` (ai_facts.rs): в обоих живых прогонах
+/// 26.11 приветствие называло сводку за неделю «сегодня». Расхождение — один
+/// повтор с поправкой, потом — правка «сегодня» на период и приписка с
+/// настоящими числами.
+async fn greeting_text(settings: &AiSettings, request: Vec<crate::ollama::Message>, report: &serde_json::Value) -> CmdResult<String> {
+    use crate::ollama::Message;
+    let ask = |messages: Vec<Message>| {
         let settings = settings.clone();
         run_blocking(move || {
             crate::ollama::chat(&settings.ollama_url, &settings.model, &messages, &[], settings.timeout_seconds)
         })
     };
-    let first = ask(request.clone()).await?;
-    if !ai_tools::needs_language_retry(&first.content) {
-        return Ok(ai_tools::strip_service_ids(&first.content));
+    let mut conversation = request;
+    let first = ask(conversation.clone()).await?;
+    let mut text = first.content.clone();
+    conversation.push(first);
+    if ai_tools::needs_language_retry(&text) {
+        log::warn!("ассистент: приветствие не на русском — прошу повторить");
+        conversation.push(Message::new("system", ai_tools::NUDGE_LANGUAGE));
+        if let Ok(second) = ask(conversation.clone()).await {
+            text = second.content.clone();
+            conversation.push(second);
+        }
+        text = ai_tools::cut_foreign_tail(&text);
     }
-    log::warn!("ассистент: приветствие не на русском — прошу повторить");
-    let mut retry = request;
-    retry.push(first.clone());
-    retry.push(crate::ollama::Message::new("system", ai_tools::NUDGE_LANGUAGE));
-    let second = ask(retry).await.map(|m| m.content).unwrap_or(first.content);
-    Ok(ai_tools::strip_service_ids(&ai_tools::cut_foreign_tail(&second)))
+
+    let mut facts = ai_facts::Facts::default();
+    facts.add_report(report);
+    let problems = ai_facts::check(&text, &facts);
+    if !problems.is_empty() {
+        log::warn!("ассистент: приветствие расходится со сводкой ({}) — прошу исправить", problems.len());
+        conversation.push(Message::new("system", ai_facts::nudge(&problems, &facts)));
+        if let Ok(again) = ask(conversation).await {
+            let again = ai_tools::cut_foreign_tail(&again.content);
+            text = if ai_tools::needs_language_retry(&again) { text } else { again };
+        }
+        let left = ai_facts::check(&text, &facts);
+        if !left.is_empty() {
+            log::warn!("ассистент: и повтор приветствия расходится со сводкой — поправлено");
+            text = ai_facts::correct(&text, &left, &facts);
+        }
+    }
+    Ok(ai_tools::strip_service_ids(&text))
 }
 
 /// Приветствие со сводкой за неделю — только для **пустой** истории: у
@@ -6624,11 +6696,11 @@ pub async fn ollama_greeting(workspace_id: i64, app: tauri::AppHandle) -> CmdRes
         }
         let settings = read_ai_settings(&conn)?;
         let report = ai_tools::productivity_report(&conn, workspace_id, GREETING_REPORT_DAYS)?;
-        (settings.clone(), greeting_request(&system_prompt(&conn, workspace_id)?, &report))
+        (settings.clone(), greeting_request(&system_prompt(&conn, workspace_id)?, &report), report)
     };
-    let (settings, request) = prepared;
+    let (settings, request, report) = prepared;
 
-    let text = greeting_text(&settings, request).await?;
+    let text = greeting_text(&settings, request, &report).await?;
 
     let state = app.state::<DbState>();
     let conn = state.conn.lock().map_err(|_| "База занята".to_string())?;
