@@ -321,7 +321,7 @@
     height: 7px;
     border-radius: var(--radius-round);
     background: var(--color-warning);
-    animation: pulse-soft 1.6s var(--ease-in-out) infinite;
+    animation: pulse-soft 1.6s var(--ease-in-out) 3;
 }
 
 .header-timer__title {

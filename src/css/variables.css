@@ -1,128 +1,114 @@
 /* ============================================
    TaskFlow Design System — Design Tokens
+   Визуальный мир «Тёплое приложение» (с 2026-11-27)
    --------------------------------------------
-   Две темы: «graphite + indigo» (тёмная) и её
-   светлая пара. Переключаются атрибутом
-   `data-theme` на <html>, который проставляет
-   js/theme.js.
+   Планировщик, который ощущается как дружелюбное
+   потребительское приложение:
 
-   Порядок блоков не случаен:
+   • мягкие пухлые карточки на тёплом фоне —
+     крупные радиусы и тени со смещением и
+     размытием, а не плоские плёнки;
+   • один сочный цвет — мандариновый — только у
+     того, что можно нажать (главная кнопка,
+     выбранное, фокус);
+   • цвет данных — пастелью: у каждой доски свой
+     оттенок обложки, у состояний свой: просрочка
+     — малиновый, «сегодня/завтра» — солнечный
+     янтарь, сделано — мята;
+   • обе темы на равных: абрикосовый день и
+     тёплый уголь вечером.
 
-   1. `:root` — то, что от темы не зависит
-      (размеры, шрифты, движение), и сразу за
-      ним ТЁМНАЯ палитра. Тёмная — это база, а
-      не «одна из двух»: пока JS не проставил
-      атрибут, приложение выглядит как раньше,
-      без белой вспышки на старте.
-   2. `:root[data-theme="light"]` —
-      переопределяет только то, что завязано на
-      цвет фона.
-
-   Отсюда следствие: `data-theme="dark"` ничего
-   не переопределяет и не должен — это тот же
-   `:root`. Дублировать тёмную палитру во второй
-   блок значило бы держать два списка, которые
-   рано или поздно разъедутся.
-
-   Светлая тема — не инверсия. Плёнки меняют
-   знак (белое поверх тёмного → тёмное поверх
-   светлого), тени слабеют втрое, а статусные
-   цвета берутся другие: #3ecf8e на белом даёт
-   контраст 2.0:1 и как текст не читается.
+   Порядок блоков:
+   1. `:root` — общее (размеры, шрифты, движение)
+      и тёмная тема: она база, чтобы до того, как
+      JS проставит `data-theme`, окно не вспыхнуло
+      белым.
+   2. `:root[data-theme="light"]` — светлая тема.
    ============================================ */
+
+/* Nunito — скруглённый гуманистический гротеск для заголовков (OFL 1.1,
+   лицензия рядом: assets/fonts/Nunito-OFL.txt). Файл лежит в проекте: сети
+   у приложения нет. Переменный, вес 200–1000, кириллица полностью. */
+@font-face {
+    font-family: 'Nunito';
+    src: url('../assets/fonts/Nunito-Variable.ttf') format('truetype');
+    font-weight: 200 1000;
+    font-style: normal;
+    font-display: swap;
+}
 
 :root {
     /* ═══════════════════════════════════════
        ЧАСТЬ 1. Не зависит от темы
        ═══════════════════════════════════════ */
 
-    /* ─── Палитра «Сигнал» (с 2026-11-12, DESIGN_AUDIT.md п. 5) ───
-       Цвет несёт смысл, а не украшает:
-         • кобальт   — действие: кнопки, ссылки, выбранное, фокус;
-         • янтарь    — время и внимание: «сегодня», срок близко, идущий
-                       таймер, «требует внимания» (`--color-warning`);
-         • красный   — только просрочка и опасные действия;
-         • приоритет — не цветом, а формой (см. list.css `--priority-*`).
-       Раньше всё это было фиолетовым градиентом со свечением, а красный
-       значил сразу высокий приоритет, просрочку, ошибку и удаление. */
-
-    /* ─── Accent Ramp: кобальт ─── */
-    /* Лестница одна на обе темы. Разное — только то, каким её звеном писать
-       текст, см. `--accent-text` ниже. */
-    --accent-100: #dbe4ff;
-    --accent-300: #8fa8ff;
-    --accent-400: #5c85ff;
-    --accent-500: #3366ff;
-    --accent-600: #2b5cf0;
-    --accent-700: #2149d6;
+    /* ─── Действие: мандарин ─── */
+    /* Заливка — яркая ступень 500, текст на ней тёмный (#2a1208, 5,5:1):
+       белый на мандарине даёт лишь 2,9:1. */
+    --accent-100: #ffe2d6;
+    --accent-300: #ffab8a;
+    --accent-400: #ff8a5f;
+    --accent-500: #ff6a3d;
+    --accent-600: #f25424;
+    --accent-700: #b8430f;
 
     --accent-color: var(--accent-500);
     --accent-hover: var(--accent-400);
     --accent-active: var(--accent-600);
-
-    /* Заливка под белым текстом: главные кнопки, активный переключатель,
-       реплика человека в чате, буквенные значки пространств. Ступени выбраны
-       по контрасту с белым: 600 — 5,4:1, 500 — 4,7:1, 700 — 6,9:1. */
-    --accent-fill: var(--accent-600);
-    --accent-fill-hover: var(--accent-500);
-    --accent-fill-active: var(--accent-700);
+    --accent-fill: var(--accent-500);
+    --accent-fill-hover: var(--accent-400);
+    --accent-fill-active: var(--accent-600);
+    --text-on-accent: #2a1208;
 
     /* ─── Ярлыки ─── */
-    /* Цвета данных, а не оформления: человек сам выбрал их для своих меток, и
-       менять выбранное при смене темы нельзя. */
-    --label-green: #4cc38a;
-    --label-yellow: #f5cf5b;
-    --label-orange: #ff9f45;
-    --label-red: #f4685f;
-    --label-purple: #b07df0;
-    --label-blue: #5b8def;
-    --label-sky: #45c8e8;
-    --label-lime: #63e6a1;
-    --label-pink: #ff7ec8;
-    --label-black: #3b4557;
+    /* Цвета данных: человек сам выбрал их для своих меток. */
+    --label-green: #3ccf91;
+    --label-yellow: #ffc53d;
+    --label-orange: #ff8a5b;
+    --label-red: #f25c78;
+    --label-purple: #b18cff;
+    --label-blue: #4f9dff;
+    --label-sky: #3cc7e8;
+    --label-lime: #9bd94a;
+    --label-pink: #ff7aa8;
+    --label-black: #4a3f3a;
 
-    /* Текст поверх цвета-данных (метки, аватары участников). Какой из двух
-       взять, решает `textColorOn()` в utils.js по контрасту: белый на жёлтой
-       метке — 1,5:1, тёмный — 11,8:1. От темы не зависят, как и сами
-       цвета-данные под ними. */
-    --on-data-dark: #111827;
+    --on-data-dark: #2a211c;
     --on-data-light: #ffffff;
 
     /* ─── Обложки досок ─── */
-    --gradient-1: linear-gradient(135deg, #6c5cff 0%, #b45cff 100%);
-    --gradient-2: linear-gradient(135deg, #f0567a 0%, #ff9f45 100%);
-    --gradient-3: linear-gradient(135deg, #2f8bff 0%, #45e0e0 100%);
-    --gradient-4: linear-gradient(135deg, #12b981 0%, #7ee7a3 100%);
-    --gradient-5: linear-gradient(135deg, #ff5f8f 0%, #ffc94d 100%);
-    --gradient-6: linear-gradient(135deg, #8b5cf6 0%, #ec7fd0 100%);
-    --gradient-7: linear-gradient(135deg, #f97362 0%, #ffb37a 100%);
-    --gradient-8: linear-gradient(135deg, #3b6dff 0%, #7bb8ff 100%);
+    /* Данные человека: строка обложки хранится в базе. Плитка доски и шапка
+       доски берут её пастелью (world.css, `--cover`). Новые — плоские цвета
+       (js/utils.js, тот же список). */
+    --gradient-1: #ff8a5b;
+    --gradient-2: #ffc53d;
+    --gradient-3: #3ccf91;
+    --gradient-4: #4f9dff;
+    --gradient-5: #b18cff;
+    --gradient-6: #ff7aa8;
+    --gradient-7: #23c4b4;
+    --gradient-8: #8b9bb4;
 
-    /* ─── Поверх обложки и поверх акцента ─── */
-    /* Эти лежат не на фоне страницы, а на цветной плитке или на акцентной
-       кнопке — под ними всегда одно и то же независимо от темы, поэтому и
-       значения одни. Меняются они вместе с обложками, а не вместе с темой. */
     --cover-text: #ffffff;
-    --cover-text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-    /* Затемнение снизу — гарантирует читаемость названия на любой обложке */
-    --cover-shade: linear-gradient(180deg, rgba(0, 0, 0, 0.05) 35%, rgba(0, 0, 0, 0.62) 100%);
-    /* Мягкий блик, «проявляющийся» при наведении */
-    --cover-sheen: radial-gradient(120% 90% at 50% 0%, rgba(255, 255, 255, 0.22), transparent 65%);
-    --cover-chip: rgba(0, 0, 0, 0.28);
-    --cover-chip-hover: rgba(0, 0, 0, 0.45);
-    --cover-ring: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-    --cover-ring-hover: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
-    --cover-mark-shadow: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.4));
-    --ring-on-accent: 0 0 0 1px rgba(255, 255, 255, 0.1);
-    --ring-on-accent-top: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    --cover-text-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+    --cover-shade: linear-gradient(180deg, rgba(0, 0, 0, 0) 40%, rgba(0, 0, 0, 0.35) 100%);
+    --cover-sheen: none;
+    --cover-chip: rgba(255, 255, 255, 0.85);
+    --cover-chip-hover: #ffffff;
+    --cover-ring: 0 0 0 0 transparent;
+    --cover-ring-hover: 0 0 0 0 transparent;
+    --cover-mark-shadow: none;
+    --ring-on-accent: 0 0 0 0 transparent;
+    --ring-on-accent-top: inset 0 1px 0 rgba(255, 255, 255, 0.35);
 
     /* ─── Radius ─── */
-    --radius-xs: 4px;
-    --radius-sm: 6px;
-    --radius-md: 10px;
-    --radius-lg: 14px;
-    --radius-xl: 20px;
-    --radius-2xl: 28px;
+    /* Крупные и мягкие: карточка 18, окно 22, кнопка 12, чип — пилюля. */
+    --radius-xs: 6px;
+    --radius-sm: 10px;
+    --radius-md: 12px;
+    --radius-lg: 16px;
+    --radius-xl: 18px;
+    --radius-2xl: 22px;
     --radius-round: 50%;
     --radius-pill: 999px;
 
@@ -137,15 +123,15 @@
     --space-3xl: 48px;
 
     /* ─── Typography ─── */
-    --font-family: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Inter, 'Helvetica Neue', sans-serif;
-    --font-display: 'Segoe UI Variable Display', 'Segoe UI Variable Text', 'Segoe UI', -apple-system, Inter, sans-serif;
-    --font-mono: 'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', monospace;
+    /* Заголовки — Nunito: скруглённые окончания дают миру его дружелюбный
+       голос. Всё остальное — Segoe UI Variable Text: рабочий шрифт Windows 11
+       с табличными цифрами (у Nunito их нет, а сроки и счётчики должны
+       стоять ровной колонкой). */
+    --font-family: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
+    --font-display: 'Nunito', 'Segoe UI Variable Display', 'Segoe UI', -apple-system, sans-serif;
+    --font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'SF Mono', monospace;
+    --font-data: var(--font-family);
 
-    /* Шкала (12.11, DESIGN_AUDIT.md п. 6). 11 px — нижняя граница: счётчики,
-       шапки таблиц прописными. 13 px (`ui`) — новый шаг между 12 и 14:
-       подписи полей и вторичный текст, которым раньше было тесно в 12.
-       Заголовки разведены сильнее: страница 28 (было 25), раздел 20 (19),
-       чтобы уровни читались без подсказки жирностью. */
     --font-size-xs: 11px;
     --font-size-sm: 12px;
     --font-size-ui: 13px;
@@ -153,7 +139,7 @@
     --font-size-lg: 16px;
     --font-size-xl: 20px;
     --font-size-2xl: 28px;
-    --font-size-3xl: 34px;
+    --font-size-3xl: 36px;
 
     --font-weight-normal: 400;
     --font-weight-medium: 500;
@@ -162,317 +148,210 @@
 
     --tracking-tight: -0.02em;
     --tracking-normal: 0;
-    --tracking-wide: 0.04em;
-    --tracking-caps: 0.08em;
+    --tracking-wide: 0.02em;
+    --tracking-caps: 0.06em;
 
     /* ─── Motion ─── */
-    /* Кривые: плавный выход, симметричная и «пружина» для появления */
+    /* Живой интерфейс: пружина `--ease-press` — только на нажатие и
+       отпускание (world.css). Всё, что появляется, — плавным выходом без
+       подпрыгивания: `--ease-spring` с «Тёплого приложения» без перелёта,
+       им пользуются входы модалок, тостов и меню. */
     --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
     --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
-    --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+    --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+    --ease-press: cubic-bezier(0.34, 1.56, 0.64, 1);
     --ease-swift: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-step: steps(4, end);
 
     --duration-1: 120ms;
     --duration-2: 180ms;
-    --duration-3: 260ms;
-    --duration-4: 380ms;
-    --duration-5: 560ms;
+    --duration-3: 240ms;
+    --duration-4: 360ms;
+    --duration-5: 520ms;
 
     --transition-fast: var(--duration-1) var(--ease-out);
     --transition-normal: var(--duration-3) var(--ease-out);
     --transition-slow: var(--duration-4) var(--ease-out);
     --transition-spring: var(--duration-4) var(--ease-spring);
 
-    /* Шаг задержки для каскадного появления элементов */
-    --stagger-step: 34ms;
+    --stagger-step: 28ms;
 
     /* ─── Layout ─── */
-    --header-height: 52px;
-    --sidebar-width: 264px;
-    --sidebar-rail-width: 56px;
+    --header-height: 56px;
+    --sidebar-width: 256px;
+    --sidebar-rail-width: 64px;
     --column-width: 288px;
-
-    --blur-glass: 22px;
-    --blur-panel: 16px;
+    --blur-glass: 18px;
+    --blur-panel: 0px;
 
     /* ═══════════════════════════════════════
-       ЧАСТЬ 2. Тёмная палитра (она же база)
+       ЧАСТЬ 2. Тёмная тема — тёплый уголь
        ═══════════════════════════════════════ */
 
     color-scheme: dark;
 
-    /* ─── Акцент, зависящий от фона ─── */
-    /* Акцентом пишут текст (ссылки, активный пункт меню), и для этого нужна
-       не та же ступень, что для заливки кнопки: #3366ff на графите даёт
-       около 4:1, а #8fa8ff — 7,3–8:1. */
-    --accent-text: var(--accent-300);
-    /* Текст на акцентной подложке (`--accent-soft` / `--accent-light`):
-       активный пункт меню, включённый фильтр. В тёмной теме —
-       почти белый голубой; в светлой он же на почти белом не читался. */
-    --accent-on-soft: var(--accent-100);
-    --accent-light: rgba(51, 102, 255, 0.18);
-    --accent-soft: rgba(51, 102, 255, 0.12);
-    --accent-border: rgba(51, 102, 255, 0.48);
+    --accent-text: #ff9a6b;
+    --accent-on-soft: #ffb08e;
+    --accent-light: rgba(255, 106, 61, 0.22);
+    --accent-soft: rgba(255, 106, 61, 0.14);
+    --accent-border: rgba(255, 138, 95, 0.6);
 
-    /* ─── Background Layers ─── */
-    --bg-base: #0a0c11;
-    --bg-primary: #0d1016;
-    --bg-secondary: #12161e;
-    /* Сайдбар — полупрозрачная панель: сквозь неё виден общий фон
-       пространства. Цвет тот же, что был сплошным (#0b0e14), поэтому без
-       картинки поверх --bg-base он выглядит по-прежнему. */
-    --bg-sidebar: rgba(11, 14, 20, 0.55);
-    /* Затемнение поверх картинки-фона пространства, на всё окно. Тот же цвет,
-       что у панелей, чтобы текст читался одинаково с фоном и без него.
-       Меньше значение — ярче фото и хуже читаемость. */
-    --bg-app-veil: rgba(11, 14, 20, 0.75);
-    /* Доска показывает фон чётким, и вуаль там нужна не для читаемости текста
-       (его поверх фото нет — колонки, карточки и шапка непрозрачные), а чтобы
-       светлое фото не спорило по яркости с интерфейсом. 0.35 на насыщенном
-       кадре оказалось мало — колонки тонули в цвете; 0.45 гасит его ровно
-       настолько, чтобы фотография осталась фотографией, а не главным героем
-       экрана. Против 0.75 на остальных экранах разница видна сразу. */
-    --bg-app-veil-board: rgba(11, 14, 20, 0.45);
-    --bg-elevated: #171c26;
-    --bg-column: #141922;
-    --bg-overlay: rgba(6, 8, 12, 0.68);
-
-    /* Цветного «атмосферного» свечения по углам окна больше нет: в «Сигнале»
-       цвет только по делу. Токен оставлен, чтобы reset.css не трогать, а
-       пространство с фото и так получает свой фон. */
+    --bg-base: #18120f;
+    --bg-primary: #18120f;
+    --bg-secondary: #221a16;
+    --bg-sidebar: #1d1612;
+    --bg-app-veil: rgba(24, 18, 15, 0.8);
+    --bg-app-veil-board: rgba(24, 18, 15, 0.5);
+    --bg-elevated: #31261f;
+    --bg-column: #221a16;
+    --bg-overlay: rgba(12, 8, 6, 0.6);
     --bg-body-glow: none;
+    --bg-glass: rgba(42, 33, 28, 0.82);
+    --bg-glass-strong: rgba(49, 38, 31, 0.94);
+    --bg-panel: #2a211c;
+    --border-panel: rgba(255, 238, 228, 0.08);
 
-    /* Стеклянные поверхности (поверх фоновых слоёв) */
-    --bg-glass: rgba(20, 25, 34, 0.72);
-    --bg-glass-strong: rgba(23, 28, 38, 0.88);
+    --bg-card: rgba(255, 238, 228, 0.05);
+    --bg-card-hover: rgba(255, 238, 228, 0.09);
+    --bg-card-active: rgba(255, 238, 228, 0.13);
+    --bg-input: rgba(255, 238, 228, 0.05);
+    --bg-input-focus: rgba(255, 238, 228, 0.08);
 
-    /* Панель поверх фона пространства: матовое стекло, а не плоская плёнка.
-       Размытие здесь заметно слабее, чем у самого фона (16px против 40px), —
-       фон уже размыт, панели остаётся лишь отделиться от него собственным
-       слоем. Без картинки фон под панелью сплошной, и backdrop-filter не даёт
-       никакого видимого эффекта: регрессии для пространств без фона нет. */
-    --bg-panel: rgba(24, 26, 31, 0.55);
-    --border-panel: rgba(255, 255, 255, 0.08);
+    --bg-board-card: #2a211c;
+    --bg-board-card-hover: #30261f;
 
-    /* Плоские плёнки: наведение, чипы, поля ввода. В тёмной теме это белое
-       поверх тёмного — то есть «светлее окружения». */
-    --bg-card: rgba(255, 255, 255, 0.045);
-    --bg-card-hover: rgba(255, 255, 255, 0.085);
-    --bg-card-active: rgba(255, 255, 255, 0.12);
-    --bg-input: rgba(255, 255, 255, 0.05);
-    --bg-input-focus: rgba(255, 255, 255, 0.09);
+    --skeleton-gradient: linear-gradient(90deg, rgba(255, 238, 228, 0.05) 25%, rgba(255, 238, 228, 0.1) 37%, rgba(255, 238, 228, 0.05) 63%);
+    --scrollbar-thumb: rgba(255, 238, 228, 0.14);
+    --scrollbar-thumb-hover: rgba(255, 238, 228, 0.28);
 
-    /* Карточка на доске — единственное место, где плёнка означает не
-       «наведение», а «поднятая поверхность». В тёмной теме это та же белая
-       плёнка, в светлой — белый лист на сером столбце, поэтому токен свой. */
-    --bg-board-card: rgba(255, 255, 255, 0.045);
-    --bg-board-card-hover: rgba(255, 255, 255, 0.085);
+    /* Текст: #f7eee8 / #cdbdb3 / #a89488 на #18120f — 16,4 / 10,3 / 6,4:1. */
+    --text-primary: #f7eee8;
+    --text-secondary: #cdbdb3;
+    --text-muted: #a89488;
+    --text-placeholder: #a89488;
 
-    --skeleton-gradient: linear-gradient(
-        90deg,
-        rgba(255, 255, 255, 0.04) 25%,
-        rgba(255, 255, 255, 0.09) 37%,
-        rgba(255, 255, 255, 0.04) 63%
-    );
-
-    --scrollbar-thumb: rgba(255, 255, 255, 0.10);
-    --scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
-
-    /* ─── Text ─── */
-    /* Приглушённый был #6a7488: 3,3–4,2:1 на панелях и карточках, а им
-       набраны подписи 11–12 px по всему приложению. #8a94a8 даёт 4,6–6,4:1
-       на тех же поверхностях. Вторичный поднят следом (#9aa5b8 → #a3acbb),
-       чтобы между ними осталась ступень. */
-    --text-primary: #eef1f7;
-    --text-secondary: #a3acbb;
-    --text-muted: #8a94a8;
-    /* Плейсхолдер — та же ступень, что приглушённый текст: #566073 на поле
-       ввода давал 2,4–2,6:1. От введённого текста его по-прежнему отделяет
-       разница с --text-primary. В светлой теме ссылка подхватывает светлый
-       приглушённый сама — переопределять её там не нужно. */
-    --text-placeholder: var(--text-muted);
-    --text-on-accent: #ffffff;
-
-    /* ─── Borders ─── */
-    --border-default: rgba(255, 255, 255, 0.07);
-    --border-subtle: rgba(255, 255, 255, 0.045);
-    --border-hover: rgba(255, 255, 255, 0.14);
-    --border-strong: rgba(255, 255, 255, 0.2);
+    --border-default: rgba(255, 238, 228, 0.09);
+    --border-subtle: rgba(255, 238, 228, 0.06);
+    --border-hover: rgba(255, 238, 228, 0.18);
+    --border-strong: rgba(255, 238, 228, 0.26);
     --border-active: var(--accent-border);
-    /* Верхняя световая грань — даёт поверхностям объём */
-    --highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 
-    /* ─── Status ─── */
-    /* `--color-warning` в «Сигнале» — янтарь времени и внимания: сегодня,
-       срок близко, идущий таймер, «требует внимания». Звёздочка избранного —
-       тот же янтарь: отдельный жёлтый рядом читался бы как третий смысл. */
-    /* Красный — #ff6b63, а не #ff5a52 из DESIGN_AUDIT.md: чип «просрочено»
-       пишет им по собственной подложке, и там #ff5a52 давал 4,3:1, а
-       #ff6b63 — 4,6:1. */
-    --color-success: #3ecf8e;
-    --color-warning: #ffb224;
-    --color-danger: #ff6b63;
-    --color-info: #45c8e8;
+    --highlight-top: inset 0 1px 0 rgba(255, 238, 228, 0.05);
 
-    --success-soft: rgba(62, 207, 142, 0.14);
-    --warning-soft: rgba(255, 178, 36, 0.14);
-    --warning-border: rgba(255, 178, 36, 0.45);
-    --danger-soft: rgba(255, 107, 99, 0.14);
-    --danger-soft-hover: rgba(255, 107, 99, 0.24);
-    --info-soft: rgba(69, 200, 232, 0.14);
-    --danger-border: rgba(255, 107, 99, 0.38);
-    --danger-glow: rgba(255, 107, 99, 0.5);
+    /* Состояния: мята — сделано, солнечный янтарь — время и внимание,
+       малиновый — просрочка и опасное. Малиновый, а не красно-оранжевый,
+       чтобы не путался с мандариновым действием. */
+    --color-success: #4fd39a;
+    --color-warning: #ffc14d;
+    --color-danger: #ff6b8b;
+    --color-info: #6fb2ff;
+    --success-soft: rgba(79, 211, 154, 0.14);
+    --warning-soft: rgba(255, 193, 77, 0.15);
+    --warning-border: rgba(255, 193, 77, 0.45);
+    --danger-soft: rgba(255, 107, 139, 0.15);
+    --danger-soft-hover: rgba(255, 107, 139, 0.24);
+    --info-soft: rgba(111, 178, 255, 0.14);
+    --danger-border: rgba(255, 107, 139, 0.45);
+    --danger-glow: rgba(255, 107, 139, 0.35);
 
-    /* ─── Elevation ─── */
+    /* Тени: смещение и размытие — карточка «лежит» на фоне. */
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
-    --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.3), 0 8px 20px -8px rgba(0, 0, 0, 0.5);
-    --shadow-lg: 0 4px 12px rgba(0, 0, 0, 0.32), 0 18px 40px -14px rgba(0, 0, 0, 0.6);
-    --shadow-xl: 0 8px 20px rgba(0, 0, 0, 0.35), 0 32px 72px -20px rgba(0, 0, 0, 0.75);
-    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.28);
-    --shadow-card-hover: 0 2px 6px rgba(0, 0, 0, 0.3), 0 10px 24px -12px rgba(0, 0, 0, 0.6);
-    /* Клон карточки под курсором: тень глубже всех остальных — он один
-       действительно «оторван» от плоскости. */
-    --shadow-drag: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
-    /* Тень главной кнопки — обычная, без цветного ореола: свечение акцентом
-       было украшением, а не глубиной. */
-    --shadow-accent: var(--shadow-sm);
+    --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.3), 0 10px 24px -10px rgba(0, 0, 0, 0.55);
+    --shadow-lg: 0 4px 10px rgba(0, 0, 0, 0.32), 0 22px 44px -16px rgba(0, 0, 0, 0.6);
+    --shadow-xl: 0 8px 20px rgba(0, 0, 0, 0.35), 0 34px 70px -20px rgba(0, 0, 0, 0.7);
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 12px -6px rgba(0, 0, 0, 0.45);
+    --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.3), 0 14px 28px -12px rgba(0, 0, 0, 0.6);
+    --shadow-drag: 0 18px 40px -8px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 238, 228, 0.08);
+    /* На тёмном цветная тень читается как свечение — здесь она нейтральная. */
+    --shadow-accent: 0 4px 12px -4px rgba(0, 0, 0, 0.6);
     --shadow-focus: 0 0 0 3px var(--accent-light);
 
-    /* ─── Графики ─── */
-    /* Chart.js рисует на canvas и CSS-переменных не видит — js/charts.js
-       вычитывает эти три через getComputedStyle при отрисовке. */
-    --chart-grid: rgba(255, 255, 255, 0.06);
-    --chart-tooltip-bg: rgba(23, 28, 38, 0.95);
-    --chart-tooltip-border: rgba(255, 255, 255, 0.08);
+    --chart-grid: rgba(255, 238, 228, 0.07);
+    --chart-tooltip-bg: rgba(49, 38, 31, 0.97);
+    --chart-tooltip-border: rgba(255, 238, 228, 0.1);
 }
 
 /* ═══════════════════════════════════════════
-   ЧАСТЬ 3. Светлая палитра
-   ═══════════════════════════════════════════
-   Переопределяется только то, что зависит от
-   цвета фона. Всё из части 1 — размеры,
-   шрифты, движение, обложки — общее.
+   ЧАСТЬ 3. Светлая тема — абрикосовый день
    ═══════════════════════════════════════════ */
 
 :root[data-theme="light"] {
     color-scheme: light;
 
-    /* Заливка та же, что в тёмной теме. А акцентом ПО светлому фону пишут
-       ступенью 700: #2149d6 держит 5,6–7:1 и на белом, и на сером столбце
-       доски, где 600 опускался к 4,4:1. */
+    /* Мандарином по светлому пишут ступенью 700: #b8430f держит 5,0:1. */
     --accent-text: var(--accent-700);
-    --accent-on-soft: var(--accent-700);
-    --accent-light: rgba(51, 102, 255, 0.14);
-    --accent-soft: rgba(51, 102, 255, 0.08);
-    --accent-border: rgba(51, 102, 255, 0.45);
+    --accent-on-soft: #a13a0c;
+    --accent-light: rgba(255, 106, 61, 0.2);
+    --accent-soft: rgba(255, 106, 61, 0.12);
+    --accent-border: rgba(242, 84, 36, 0.5);
 
-    /* ─── Background Layers ─── */
-    /* База — не чистый белый: белым остаются поднятые поверхности (панели,
-       модалки, карточки доски), и без серой подложки им не от чего
-       отделиться. */
-    --bg-base: #eef0f4;
-    --bg-primary: #f4f6f9;
+    /* Фон — абрикос, а не пергамент: розовато-персиковый #fff3ec. Белым
+       остаются карточки — им есть от чего отделиться. */
+    --bg-base: #fff3ec;
+    --bg-primary: #fff3ec;
     --bg-secondary: #ffffff;
-    --bg-sidebar: rgba(255, 255, 255, 0.62);
-    /* Вуаль светлая, но чуть плотнее тёмной: тёмный текст поверх фотографии
-       теряет читаемость быстрее светлого — на снимке всегда найдётся светлое
-       пятно, на котором #111827 держится, а вот тёмное пятно съедает его
-       целиком. */
-    --bg-app-veil: rgba(240, 242, 246, 0.80);
-    --bg-app-veil-board: rgba(240, 242, 246, 0.55);
+    --bg-sidebar: #fdebe1;
+    --bg-app-veil: rgba(255, 243, 236, 0.82);
+    --bg-app-veil-board: rgba(255, 243, 236, 0.55);
     --bg-elevated: #ffffff;
-    /* Столбец доски серее подложки — на нём лежат белые карточки. */
-    --bg-column: #e4e7ee;
-    /* Подложка модалок остаётся тёмной и в светлой теме: её работа —
-       притушить всё, что позади, а светлая плёнка поверх светлого ничего не
-       притушит. */
-    --bg-overlay: rgba(15, 23, 42, 0.38);
+    --bg-column: #fbe7dc;
+    --bg-overlay: rgba(43, 33, 29, 0.32);
+    --bg-glass: rgba(255, 255, 255, 0.82);
+    --bg-glass-strong: rgba(255, 255, 255, 0.96);
+    --bg-panel: #ffffff;
+    --border-panel: #f2dfd4;
 
-    --bg-glass: rgba(255, 255, 255, 0.78);
-    --bg-glass-strong: rgba(255, 255, 255, 0.94);
+    --bg-card: rgba(120, 60, 30, 0.05);
+    --bg-card-hover: rgba(120, 60, 30, 0.08);
+    --bg-card-active: rgba(120, 60, 30, 0.12);
+    --bg-input: #ffffff;
+    --bg-input-focus: #ffffff;
 
-    --bg-panel: rgba(255, 255, 255, 0.62);
-    --border-panel: rgba(15, 23, 42, 0.10);
-
-    /* Плёнки меняют знак: тёмное поверх светлого. Белая плёнка на белом
-       невидима — именно на этом ломается «инверсия один в один». */
-    --bg-card: rgba(15, 23, 42, 0.045);
-    --bg-card-hover: rgba(15, 23, 42, 0.075);
-    --bg-card-active: rgba(15, 23, 42, 0.11);
-    --bg-input: rgba(15, 23, 42, 0.045);
-    --bg-input-focus: rgba(15, 23, 42, 0.075);
-
-    /* А карточка доски — наоборот, белый лист на сером столбце. Наведение
-       здесь несёт не фон, а рамка и тень: белое на белом подсветить нечем, и
-       затемнять карточку под курсором значило бы читать наведение как
-       нажатие. */
     --bg-board-card: #ffffff;
     --bg-board-card-hover: #ffffff;
 
-    --skeleton-gradient: linear-gradient(
-        90deg,
-        rgba(15, 23, 42, 0.05) 25%,
-        rgba(15, 23, 42, 0.09) 37%,
-        rgba(15, 23, 42, 0.05) 63%
-    );
+    --skeleton-gradient: linear-gradient(90deg, rgba(120, 60, 30, 0.05) 25%, rgba(120, 60, 30, 0.1) 37%, rgba(120, 60, 30, 0.05) 63%);
+    --scrollbar-thumb: rgba(120, 60, 30, 0.18);
+    --scrollbar-thumb-hover: rgba(120, 60, 30, 0.32);
 
-    --scrollbar-thumb: rgba(15, 23, 42, 0.18);
-    --scrollbar-thumb-hover: rgba(15, 23, 42, 0.30);
+    /* Текст: #2b211d / #5e5049 / #7a6a61 на #fff3ec — 15,2 / 7,2 / 4,7:1. */
+    --text-primary: #2b211d;
+    --text-secondary: #5e5049;
+    --text-muted: #7a6a61;
+    --text-placeholder: #7a6a61;
 
-    /* ─── Text ─── */
-    /* Не чёрный: #111827 на #eff1f5 даёт 15.7:1, а чистый чёрный на белом
-       режет глаз на длинных списках. */
-    --text-primary: #111827;
-    --text-secondary: #4b5568;
-    --text-muted: #5d6675;
-    --text-on-accent: #ffffff;
-
-    /* ─── Borders ─── */
-    --border-default: rgba(15, 23, 42, 0.11);
-    --border-subtle: rgba(15, 23, 42, 0.07);
-    --border-hover: rgba(15, 23, 42, 0.20);
-    --border-strong: rgba(15, 23, 42, 0.30);
+    --border-default: #f0dcd0;
+    --border-subtle: #f6e8df;
+    --border-hover: #e3c6b5;
+    --border-strong: #d6b19c;
     --border-active: var(--accent-border);
-    /* Световая грань сверху на светлом фоне не видна — она и есть белая.
-       Гасим, но валидным значением тени: токен подставляется в списки вида
-       `box-shadow: var(--shadow-sm), var(--highlight-top)`, где `none`
-       сломало бы всё правило. */
-    --highlight-top: 0 0 0 0 transparent;
 
-    /* ─── Status ─── */
-    /* Другие цвета, а не те же: как текст на светлом фоне тёмные варианты
-       дают 4.7–5.2:1, а исходные — от 1.5:1 (жёлтый) до 3.0:1 (красный).
-       Белый текст на них тоже читается, поэтому они годятся и заливкой. */
-    --color-success: #0f7a4f;
+    --highlight-top: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+
+    --color-success: #13805a;
     --color-warning: #8a5a00;
-    --color-danger: #c0362c;
-    --color-info: #0d6f8a;
+    --color-danger: #c2264b;
+    --color-info: #1f62c4;
+    --success-soft: #ddf5ea;
+    --warning-soft: #fff0c7;
+    --warning-border: #f2d38a;
+    --danger-soft: #fde3e9;
+    --danger-soft-hover: #fbd0da;
+    --info-soft: #e1eeff;
+    --danger-border: #f2a7b8;
+    --danger-glow: rgba(194, 38, 75, 0.3);
 
-    --success-soft: rgba(15, 122, 79, 0.12);
-    /* Подложка янтаря — от самого янтаря (#ffb224), а не от тёмного текста:
-       так «сегодня» на светлом остаётся тёплым, а не грязно-бурым. Текст на
-       ней (#8a5a00) — 5,2:1. */
-    --warning-soft: rgba(255, 178, 36, 0.20);
-    --warning-border: rgba(138, 90, 0, 0.35);
-    --danger-soft: rgba(192, 54, 44, 0.10);
-    --danger-soft-hover: rgba(192, 54, 44, 0.18);
-    --info-soft: rgba(13, 111, 138, 0.12);
-    --danger-border: rgba(192, 54, 44, 0.35);
-    --danger-glow: rgba(192, 54, 44, 0.35);
+    /* Тени — тёплые (коричневые, а не серые): на абрикосе серая тень грязнит. */
+    --shadow-sm: 0 1px 2px rgba(110, 50, 20, 0.07);
+    --shadow-md: 0 2px 4px rgba(110, 50, 20, 0.06), 0 10px 24px -10px rgba(110, 50, 20, 0.18);
+    --shadow-lg: 0 4px 10px rgba(110, 50, 20, 0.07), 0 22px 44px -16px rgba(110, 50, 20, 0.22);
+    --shadow-xl: 0 8px 20px rgba(110, 50, 20, 0.08), 0 34px 70px -20px rgba(110, 50, 20, 0.26);
+    --shadow-card: 0 1px 2px rgba(110, 50, 20, 0.06), 0 4px 12px -6px rgba(110, 50, 20, 0.14);
+    --shadow-card-hover: 0 2px 4px rgba(110, 50, 20, 0.07), 0 14px 28px -12px rgba(110, 50, 20, 0.24);
+    --shadow-drag: 0 18px 40px -8px rgba(110, 50, 20, 0.3), 0 0 0 1px rgba(110, 50, 20, 0.06);
+    --shadow-accent: 0 6px 16px -6px rgba(242, 84, 36, 0.5);
 
-    /* ─── Elevation ─── */
-    /* Тени втрое слабее: на светлом фоне та же непрозрачность читается как
-       грязь, а не как высота. */
-    --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
-    --shadow-md: 0 2px 6px rgba(15, 23, 42, 0.06), 0 8px 20px -8px rgba(15, 23, 42, 0.14);
-    --shadow-lg: 0 4px 12px rgba(15, 23, 42, 0.07), 0 18px 40px -14px rgba(15, 23, 42, 0.18);
-    --shadow-xl: 0 8px 20px rgba(15, 23, 42, 0.08), 0 32px 72px -20px rgba(15, 23, 42, 0.22);
-    --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.07);
-    --shadow-card-hover: 0 2px 6px rgba(15, 23, 42, 0.08), 0 10px 24px -12px rgba(15, 23, 42, 0.18);
-    --shadow-drag: 0 16px 36px rgba(15, 23, 42, 0.22), 0 0 0 1px rgba(15, 23, 42, 0.06);
-
-    /* ─── Графики ─── */
-    --chart-grid: rgba(15, 23, 42, 0.08);
-    --chart-tooltip-bg: rgba(255, 255, 255, 0.97);
-    --chart-tooltip-border: rgba(15, 23, 42, 0.12);
+    --chart-grid: rgba(120, 60, 30, 0.08);
+    --chart-tooltip-bg: rgba(255, 255, 255, 0.98);
+    --chart-tooltip-border: #f0dcd0;
 }

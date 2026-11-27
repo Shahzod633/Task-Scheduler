@@ -223,7 +223,9 @@ function createBoardsSection(boards) {
 export function createBoardCard(board, index = 0) {
     const card = createElement('div', {
         className: 'hub__board-card',
-        style: { background: board.gradient },
+        // Обложка — данные человека; плитка показывает её корешком слева
+        // (world.css), а не фоном всей плитки.
+        style: { '--cover': board.gradient },
         dataset: { boardId: board.id }
     });
     staggerIn(card, index);

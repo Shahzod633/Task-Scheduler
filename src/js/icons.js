@@ -3,29 +3,20 @@
 // ============================================
 
 const Icons = {
-    /* Логотип TaskFlow: строка задачи, превращающаяся в галочку с «потоком».
-       Градиент живёт внутри самого SVG, поэтому знак одинаково выглядит на
-       любом фоне и не зависит от currentColor. */
+    /* Логотип TaskFlow («Тёплое приложение», 27.11): строка задачи,
+       превращающаяся в галочку, — прежняя идея знака, — на мягком
+       мандариновом квадрате. Штрихи тёмные (#2a1208), как текст на
+       мандариновых кнопках: белый на нём не держит контраст. Файл
+       assets/logo.svg — тот же знак для значка окна. */
     logo: `<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-            <linearGradient id="tf-logo-fill" x1="2" y1="2" x2="30" y2="30" gradientUnits="userSpaceOnUse">
-                <stop offset="0" stop-color="#4D7CFF"/>
-                <stop offset="0.55" stop-color="#3366FF"/>
-                <stop offset="1" stop-color="#2149D6"/>
-            </linearGradient>
-            <linearGradient id="tf-logo-sheen" x1="6" y1="2" x2="20" y2="18" gradientUnits="userSpaceOnUse">
-                <stop offset="0" stop-color="#fff" stop-opacity="0.28"/>
-                <stop offset="1" stop-color="#fff" stop-opacity="0"/>
-            </linearGradient>
-        </defs>
-        <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#tf-logo-fill)"/>
-        <rect x="2" y="2" width="28" height="28" rx="9" fill="url(#tf-logo-sheen)"/>
-        <path d="M9.4 11.6h8.2" stroke="#fff" stroke-opacity="0.55" stroke-width="2.2" stroke-linecap="round"/>
-        <path d="M9.4 19.2l3.4 3.4L23 12.4" stroke="#fff" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+        <rect x="2" y="2" width="28" height="28" rx="9" fill="#ff6a3d"/>
+        <circle cx="24.5" cy="7.5" r="2.6" fill="#ffc53d"/>
+        <path d="M9.4 11.6h7.4" stroke="#2a1208" stroke-opacity="0.45" stroke-width="2.4" stroke-linecap="round"/>
+        <path d="M9.4 19.2l3.4 3.4L23 12.4" stroke="#2a1208" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>`,
 
-    /* Монохромная версия знака — наследует currentColor (для мест,
-       где градиент был бы лишним: печать, disabled-состояния). */
+    /* Монохромная версия знака — наследует currentColor (печать,
+       disabled-состояния). */
     logoMono: `<svg viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
         <rect x="3" y="3" width="26" height="26" rx="8.5"/>
         <path d="M10 11.8h7.6" opacity="0.55"/>

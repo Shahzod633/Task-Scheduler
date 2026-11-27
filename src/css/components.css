@@ -31,7 +31,7 @@
     max-height: 84vh;
     overflow-y: auto;
     box-shadow: var(--shadow-xl), var(--highlight-top);
-    animation: scale-in var(--duration-4) var(--ease-spring) both;
+    animation: scale-in var(--duration-4) var(--ease-out) both;
 }
 
 .modal__header {
@@ -418,7 +418,7 @@ select.form-input option {
     border: solid var(--cover-text);
     border-width: 0 2.5px 2.5px 0;
     transform: rotate(45deg);
-    animation: scale-in var(--duration-3) var(--ease-spring) both;
+    animation: scale-in var(--duration-3) var(--ease-out) both;
     filter: var(--cover-mark-shadow);
 }
 
@@ -446,7 +446,7 @@ select.form-input option {
     font-size: var(--font-size-sm);
     font-weight: var(--font-weight-medium);
     box-shadow: var(--shadow-lg), var(--highlight-top);
-    animation: slide-in-right var(--duration-4) var(--ease-spring) both;
+    animation: slide-in-right var(--duration-4) var(--ease-out) both;
     display: flex;
     align-items: center;
     gap: var(--space-sm);
@@ -663,7 +663,7 @@ select.form-input option {
     border-radius: var(--radius-round);
     border: 2px solid var(--bg-secondary);
     box-shadow: 0 0 0 0 var(--danger-glow);
-    animation: pulse-soft 2.4s var(--ease-in-out) infinite;
+    animation: pulse-soft 2.4s var(--ease-in-out) 3;
 }
 
 /* ─── Палитра поиска (Ctrl+K) ─── */
@@ -692,7 +692,7 @@ select.form-input option {
     border-radius: var(--radius-xl);
     box-shadow: var(--shadow-xl), var(--highlight-top);
     overflow: hidden;
-    animation: scale-in var(--duration-4) var(--ease-spring) both;
+    animation: scale-in var(--duration-4) var(--ease-out) both;
 }
 
 .palette__search {

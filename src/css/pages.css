@@ -359,14 +359,17 @@
 }
 
 /* ─── Home Dashboard Page ─── */
+/* `minmax(0, 1fr)`, а не `1fr`: у `1fr` нижняя граница — min-content, и
+   холст графика, однажды отрисованный широким, раздвигал колонку за край окна
+   (27.11: сетка 1392 px в контейнере 958 px). */
 .home-widgets {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--space-xl);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-xl) var(--space-2xl);
 }
 
 @media (max-width: 980px) {
-    .home-widgets { grid-template-columns: 1fr; }
+    .home-widgets { grid-template-columns: minmax(0, 1fr); }
 }
 
 .home-widget--wide {
@@ -1536,7 +1539,7 @@
     height: 7px;
     border-radius: var(--radius-round);
     background: var(--text-secondary);
-    animation: pulse-soft 1.1s var(--ease-in-out) infinite;
+    animation: pulse-soft 1.1s var(--ease-in-out) 3;
 }
 
 .assistant__dot:nth-child(2) { animation-delay: 0.18s; }

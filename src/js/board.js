@@ -306,7 +306,12 @@ function createViewSwitch() {
 }
 
 function createBoardHeader(board) {
-    const header = createElement('div', { className: 'board-header' });
+    // Обложка доски подкрашивает её шапку (world.css, «Тёплое приложение»):
+    // у каждой доски свой оттенок, как у плитки на экране «Доски».
+    const header = createElement('div', {
+        className: 'board-header',
+        style: { '--cover': board.gradient },
+    });
 
     const left = createElement('div', { className: 'board-header__left' });
     const title = createElement('span', {

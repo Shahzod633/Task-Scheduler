@@ -1,0 +1,610 @@
+/* ============================================
+   TaskFlow — грамматика мира «Тёплое приложение»
+   --------------------------------------------
+   Токены (variables.css) задают палитру, радиусы
+   и тени; этот файл подключается последним и
+   добавляет то, что токеном не выразить:
+
+   • карточки «лежат» на тёплом фоне: белая
+     поверхность, крупный радиус, мягкая тень, под
+     курсором — подъём и тень глубже;
+   • нажатие пружинит: сжатие на :active и
+     пружинный возврат;
+   • у каждой доски свой цвет — плитка, шапка
+     доски берут обложку пастелью (`--cover`);
+   • сочный мандарин — только у того, что можно
+     нажать; выбранное — мягкая мандариновая
+     плашка.
+   ============================================ */
+
+/* ─── Поверхности браузера ─── */
+
+::selection {
+    background: var(--accent-light);
+    color: var(--text-primary);
+}
+
+html {
+    caret-color: var(--accent-color);
+    accent-color: var(--accent-color);
+}
+
+body {
+    font-variant-numeric: tabular-nums;
+}
+
+a {
+    text-underline-offset: 3px;
+}
+
+/* ─── Пружина на нажатие: одна для кнопок и плиток ─── */
+
+.btn,
+.header__create-btn,
+.header__icon-btn,
+.sidebar__item,
+.hub__board-card,
+.hub__create-board,
+.hub__template-card,
+.today-row,
+.habit-check,
+.board-view-switch__option,
+.palette__row {
+    transition: background var(--transition-fast),
+                color var(--transition-fast),
+                border-color var(--transition-fast),
+                box-shadow var(--transition-normal),
+                transform var(--duration-4) var(--ease-press);
+}
+
+.btn:active,
+.header__create-btn:active,
+.header__icon-btn:active,
+.hub__create-board:active,
+.hub__template-card:active {
+    transform: scale(0.95);
+    transition-duration: 90ms;
+}
+
+.sidebar__item:active,
+.today-row:active {
+    transform: scale(0.98);
+    transition-duration: 90ms;
+}
+
+/* ─── Шапка ─── */
+
+.header {
+    background: var(--bg-primary);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.header__create-btn {
+    border-radius: var(--radius-pill);
+    box-shadow: var(--shadow-accent);
+}
+
+.header__search {
+    border-radius: var(--radius-pill);
+    background: var(--bg-input);
+}
+
+.header__logo:hover .header__logo-icon {
+    transform: rotate(-8deg) scale(1.06);
+}
+
+/* ─── Сайдбар ─── */
+
+.sidebar {
+    background: var(--bg-sidebar);
+    border-right: 1px solid var(--border-subtle);
+}
+
+.sidebar__item {
+    border-radius: var(--radius-md);
+}
+
+.sidebar__item::before {
+    display: none;
+}
+
+.sidebar__item--active,
+.sidebar__item--active:hover {
+    background: var(--accent-soft);
+    color: var(--accent-on-soft);
+    font-weight: var(--font-weight-semibold);
+}
+
+.sidebar__item--active .sidebar__item-icon {
+    color: var(--accent-text);
+}
+
+.sidebar__item--sub.sidebar__item--active,
+.sidebar__item--sub.sidebar__item--active:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.sidebar__item--sub.sidebar__item--active .sidebar__item-icon {
+    color: var(--text-primary);
+}
+
+.sidebar__workspace-icon {
+    border-radius: var(--radius-sm);
+}
+
+/* ─── Поля и кнопки ─── */
+
+.form-input {
+    border-radius: var(--radius-md);
+}
+
+.form-input:focus,
+.form-input:focus-visible {
+    border-color: var(--accent-border);
+    box-shadow: var(--shadow-focus);
+}
+
+.btn--primary {
+    box-shadow: var(--shadow-accent);
+}
+
+.btn--secondary {
+    background: var(--bg-panel);
+}
+
+/* ─── Модальные окна: мягко появляются, без подпрыгивания ─── */
+
+.modal-overlay,
+.palette-overlay {
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+}
+
+.modal {
+    border-color: var(--border-subtle);
+    animation: warm-pop-in var(--duration-3) var(--ease-out) both;
+}
+
+.palette {
+    border-radius: var(--radius-xl);
+    overflow: hidden;
+}
+
+.palette__row--active {
+    background: var(--accent-soft);
+}
+
+.palette__row--active .palette__row-title {
+    color: var(--accent-on-soft);
+}
+
+.palette__mark {
+    color: var(--accent-text);
+}
+
+/* Подсказка — тёмная пилюля в обеих темах: читается поверх чего угодно. */
+.app-popover-layer > .tooltip {
+    background: #2b211d;
+    border-color: #2b211d;
+    color: #fff7f2;
+    border-radius: var(--radius-sm);
+}
+
+.toast {
+    border-radius: var(--radius-lg);
+}
+
+.context-menu,
+.app-popover-layer > .popover {
+    border-radius: var(--radius-lg);
+}
+
+/* ─── Доска: шапка в цвет обложки ─── */
+
+.board-header {
+    position: relative;
+    isolation: isolate;
+    background: var(--bg-primary);
+}
+
+.board-header::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: var(--cover, transparent);
+    opacity: 0.16;
+    pointer-events: none;
+}
+
+.board-header__title {
+    font-family: var(--font-display);
+    font-weight: var(--font-weight-bold);
+}
+
+/* Колонка — мягкая «лоток»-подложка, карточки на ней белые. */
+.column {
+    border: 0;
+    box-shadow: none;
+}
+
+.column:hover {
+    box-shadow: none;
+}
+
+.column__count {
+    background: var(--bg-panel);
+    color: var(--text-secondary);
+}
+
+.card {
+    border-color: transparent;
+    border-radius: var(--radius-lg);
+}
+
+.card:hover {
+    border-color: var(--border-hover);
+}
+
+.card.sortable-fallback,
+.card.sortable-drag {
+    border-color: var(--accent-border);
+    border-radius: var(--radius-lg);
+}
+
+/* Срок: просрочка — малиновая пилюля, «сегодня/завтра» — янтарь. */
+.card__meta-item--due,
+.due-chip {
+    border-radius: var(--radius-pill);
+}
+
+/* ─── Хаб: плитка доски — белая карточка с цветной шапкой обложки ─── */
+
+.hub__board-card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    box-shadow: var(--shadow-card);
+    padding-top: 0;
+}
+
+.hub__board-card::before {
+    inset: 0 0 auto 0;
+    height: 50%;
+    background: var(--cover, var(--accent-500));
+    opacity: 0.85;
+    z-index: 1;
+}
+
+.hub__board-card::after {
+    display: none;
+}
+
+.hub__board-card:hover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-card-hover);
+    filter: none;
+}
+
+.hub__board-card:active {
+    transform: translateY(-1px) scale(0.98);
+    transition-duration: 90ms;
+}
+
+.hub__board-name {
+    color: var(--text-primary);
+    text-shadow: none;
+    font-weight: var(--font-weight-semibold);
+}
+
+.hub__board-star,
+.hub__board-menu {
+    background: var(--cover-chip);
+    color: #2a211c;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border-radius: var(--radius-pill);
+}
+
+.hub__board-star--active,
+.hub__board-star:hover {
+    color: #e08a00;
+}
+
+.hub__create-board,
+.hub__template-card {
+    background: var(--bg-panel);
+    border-color: var(--border-default);
+    box-shadow: var(--shadow-card);
+}
+
+.hub__create-board:hover,
+.hub__template-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-card-hover);
+    border-color: var(--accent-border);
+}
+
+.hub__workspace-icon {
+    border-radius: var(--radius-lg);
+}
+
+/* ─── Главная: приветствие и сводка словами (home.js) ─── */
+
+.home-hello {
+    margin-bottom: var(--space-xl);
+}
+
+/* Заголовки разделов набраны Nunito (--font-display): его полужирный легче
+   полужирного Segoe, поэтому разделам — жирный, чтобы ступень над текстом
+   читалась. */
+.home-widget__title,
+.hub__section-title,
+.settings-section__title,
+.modal__title {
+    font-weight: var(--font-weight-bold);
+}
+
+.home-hello__title {
+    font-family: var(--font-display);
+    font-size: var(--font-size-3xl);
+    font-weight: var(--font-weight-bold);
+    letter-spacing: var(--tracking-tight);
+    line-height: 1.1;
+    color: var(--text-primary);
+}
+
+.home-hello__date {
+    margin-top: var(--space-xs);
+    font-size: var(--font-size-md);
+    color: var(--text-secondary);
+}
+
+.home-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    margin-top: var(--space-md);
+}
+
+.home-summary__chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: var(--radius-pill);
+    font-size: var(--font-size-ui);
+    font-weight: var(--font-weight-medium);
+    background: var(--bg-panel);
+    color: var(--text-secondary);
+    box-shadow: var(--shadow-sm);
+    animation: warm-rise var(--duration-4) var(--ease-out) both;
+    animation-delay: calc(var(--i, 0) * 60ms);
+}
+
+.home-summary__chip b {
+    font-weight: var(--font-weight-bold);
+}
+
+.home-summary__chip--danger {
+    background: var(--danger-soft);
+    color: var(--color-danger);
+}
+
+.home-summary__chip--warning {
+    background: var(--warning-soft);
+    color: var(--color-warning);
+}
+
+.home-summary__chip--success {
+    background: var(--success-soft);
+    color: var(--color-success);
+}
+
+.home-summary__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+/* Виджеты Главной — белые карточки. */
+.home-widget {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-card);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
+.home-widget:hover {
+    border-color: var(--border-subtle);
+    box-shadow: var(--shadow-card-hover);
+}
+
+.today-row {
+    border-radius: var(--radius-md);
+}
+
+.today-row:hover {
+    background: var(--bg-card-hover);
+}
+
+/* Плитка доски в строке задачи: цвет обложки пастелью и первая буква. */
+.today-row__board {
+    position: relative;
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-bold);
+    color: var(--text-primary);
+    isolation: isolate;
+}
+
+.today-row__board::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: var(--cover, var(--bg-card-active));
+    opacity: 0.35;
+}
+
+/* Полоска «сколько привычек отмечено» — прогресс сделанного, мята. */
+.habit-progress__seg::after {
+    background: var(--color-success);
+}
+
+/* Реплика человека в чате — тёплая пастель, а не мандарин: мандарин только
+   у того, что можно нажать. */
+.assistant__bubble--user {
+    background: #ffe2d6;
+    color: #2b211d;
+}
+
+:root:not([data-theme="light"]) .assistant__bubble--user {
+    background: #3d2a20;
+    color: var(--text-primary);
+}
+
+/* ─── Планировщик: сегодня — солнечный янтарь, цвет времени ─── */
+
+.planner-cell--today .planner-cell__day {
+    align-self: flex-start;
+    background: #ffc53d;
+    color: #3a2600;
+    border-radius: var(--radius-pill);
+    padding: 1px 8px;
+}
+
+.planner-card-chip {
+    border-radius: var(--radius-sm);
+}
+
+/* ─── Привычки: выполненное — мята, лайт-версия — мята вполсилы ─── */
+
+.habit-check {
+    --habit-fill: var(--color-success);
+}
+
+.habit-today--done .habit-check {
+    border-color: var(--color-success);
+    color: #ffffff;
+}
+
+.habit-today--light .habit-check {
+    --habit-fill: color-mix(in srgb, var(--color-success) 32%, transparent);
+    border-color: var(--color-success);
+    color: var(--color-success);
+}
+
+/* Момент отметки (habits.js ставит `--just-done`): стрелка обходит кружок,
+   рисуется галочка, расходится кольцо и по строке пробегает свет — всё в
+   мяте, цвете «сделано». Оранжевый остаётся только у действий. */
+.habit-check::after {
+    border-color: var(--color-success);
+}
+
+.habit-today--just-undo .habit-check {
+    background: conic-gradient(var(--habit-fill) var(--habit-sweep), transparent 0);
+}
+
+.habit-today::before {
+    background: linear-gradient(90deg,
+        transparent 0%,
+        var(--success-soft) 35%,
+        color-mix(in srgb, var(--color-success) 26%, transparent) 50%,
+        var(--success-soft) 65%,
+        transparent 100%) no-repeat;
+    background-size: 45% 100%;
+}
+
+/* Тепловая карта — данные о сделанном, поэтому мята, а не мандарин. */
+.heatmap__cell--l1 { background: color-mix(in srgb, var(--color-success) 26%, transparent); }
+.heatmap__cell--l2 { background: color-mix(in srgb, var(--color-success) 48%, transparent); }
+.heatmap__cell--l3 { background: color-mix(in srgb, var(--color-success) 72%, transparent); }
+.heatmap__cell--l4 { background: var(--color-success); }
+
+.heatmap__cell {
+    border-radius: 4px;
+}
+
+/* Уверенность ИИ и имя привычки в анализе — сведения, а не кнопки. */
+.habit-ai__confidence--high {
+    background: var(--info-soft);
+    color: var(--color-info);
+}
+
+.habit-ai__confidence--medium,
+.habit-ai__habit {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+/* ─── Карточка доски приподнимается под курсором ───
+   Через свойство `translate`, а не `transform`: transform пишет Sortable
+   инлайново при перестановке, и переход по нему дёргал бы карточки
+   (board.css). `translate` складывается с ним независимо. */
+.card {
+    transition: background var(--transition-fast),
+                border-color var(--transition-fast),
+                box-shadow var(--transition-normal),
+                translate var(--duration-4) var(--ease-press);
+}
+
+.card:hover {
+    translate: 0 -2px;
+}
+
+body.is-dragging-card .card:hover,
+.card.sortable-ghost,
+.card.sortable-fallback,
+.card.sortable-drag {
+    translate: none;
+}
+
+/* ─── Движение ─── */
+
+@keyframes warm-pop-in {
+    from { opacity: 0; transform: translateY(8px) scale(0.98); }
+    to { opacity: 1; transform: none; }
+}
+
+@keyframes warm-rise {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+}
+
+@keyframes warm-burst {
+    0% { opacity: 0.9; transform: scale(0.8); }
+    100% { opacity: 0; transform: scale(1.7); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .modal,
+    .home-summary__chip {
+        animation: none;
+    }
+    .card:hover {
+        translate: none;
+    }
+    .btn:active,
+    .header__create-btn:active,
+    .header__icon-btn:active,
+    .hub__create-board:active,
+    .hub__template-card:active,
+    .sidebar__item:active,
+    .today-row:active,
+    .hub__board-card:hover,
+    .hub__board-card:active,
+    .hub__create-board:hover,
+    .hub__template-card:hover {
+        transform: none;
+    }
+}

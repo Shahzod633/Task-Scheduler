@@ -497,7 +497,7 @@ body.is-dragging-card .card:hover {
     border-radius: var(--radius-round);
     background: var(--color-warning);
     pointer-events: none;
-    animation: pulse-soft 1.6s var(--ease-in-out) infinite;
+    animation: pulse-soft 1.6s var(--ease-in-out) 3;
     transition: opacity var(--transition-fast);
 }
 
@@ -716,7 +716,7 @@ body.is-dragging-card .card:hover {
     border: 1px solid var(--border-default);
     border-radius: var(--radius-xl);
     padding: var(--space-sm);
-    animation: scale-in var(--duration-3) var(--ease-spring) both;
+    animation: scale-in var(--duration-3) var(--ease-out) both;
 }
 
 .add-column__input {
@@ -941,7 +941,7 @@ body.is-dragging-card .card:hover {
 .markdown-body blockquote {
     margin: 0 0 var(--space-md);
     padding: var(--space-xs) 0 var(--space-xs) var(--space-md);
-    border-left: 3px solid var(--accent-border);
+    border-left: 3px solid var(--border-strong);
     color: var(--text-secondary);
 }
 

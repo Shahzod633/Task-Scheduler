@@ -305,16 +305,19 @@ export function debounce(fn, delay = 300) {
  * Generate a random gradient from the predefined set
  */
 // Обложки досок. Значения совпадают с --gradient-1…8 в css/variables.css;
-// хранятся строкой в БД, поэтому у уже созданных досок фон не меняется.
+// хранятся строкой в БД, поэтому у уже созданных досок обложка не меняется.
+// С «Тёплого приложения» (27.11) обложка — цветная шапка плитки и оттенок
+// шапки доски, поэтому новые — плоские сочные цвета, которые хорошо
+// выглядят и пастелью. Малинового нет: он значит «просрочено».
 const gradients = [
-    'linear-gradient(135deg, #6c5cff 0%, #b45cff 100%)',
-    'linear-gradient(135deg, #f0567a 0%, #ff9f45 100%)',
-    'linear-gradient(135deg, #2f8bff 0%, #45e0e0 100%)',
-    'linear-gradient(135deg, #12b981 0%, #7ee7a3 100%)',
-    'linear-gradient(135deg, #ff5f8f 0%, #ffc94d 100%)',
-    'linear-gradient(135deg, #8b5cf6 0%, #ec7fd0 100%)',
-    'linear-gradient(135deg, #f97362 0%, #ffb37a 100%)',
-    'linear-gradient(135deg, #3b6dff 0%, #7bb8ff 100%)',
+    '#ff8a5b',
+    '#ffc53d',
+    '#3ccf91',
+    '#4f9dff',
+    '#b18cff',
+    '#ff7aa8',
+    '#23c4b4',
+    '#8b9bb4',
 ];
 
 export function getRandomGradient() {

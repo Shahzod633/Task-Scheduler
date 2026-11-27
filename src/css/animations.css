@@ -70,13 +70,13 @@
 
 .stagger-item--pop {
     animation-name: scale-in;
-    animation-timing-function: var(--ease-spring);
+    animation-timing-function: var(--ease-out);
 }
 
 /* ─── Утилиты ─── */
 .animate-fade-in { animation: fade-in var(--duration-3) var(--ease-out) both; }
 .animate-rise-in { animation: rise-in var(--duration-3) var(--ease-out) both; }
-.animate-pop-in  { animation: scale-in var(--duration-4) var(--ease-spring) both; }
+.animate-pop-in  { animation: scale-in var(--duration-4) var(--ease-out) both; }
 
 /* Микро-отклик на нажатие: применяется к любому интерактивному элементу */
 .press-effect {

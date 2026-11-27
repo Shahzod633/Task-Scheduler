@@ -15,11 +15,53 @@ import { renderHabitsTodayWidget } from './habits.js';
 /** Сколько горящих задач показывать; остальные — в «Списке». */
 const TODAY_LIMIT = 8;
 
+/** «Доброе утро» / «Добрый день» / «Добрый вечер» / «Доброй ночи». */
+function greetingWord(hour = new Date().getHours()) {
+    if (hour >= 5 && hour < 12) return 'Доброе утро';
+    if (hour >= 12 && hour < 18) return 'Добрый день';
+    if (hour >= 18 && hour < 23) return 'Добрый вечер';
+    return 'Доброй ночи';
+}
+
+/** «Пятница, 27 ноября». */
+function todayTitle() {
+    const text = new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+    return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/**
+ * Сводка дня словами — цветные чипы под приветствием («Тёплое приложение»,
+ * 27.11). Каждый чип ведёт туда, где с этим разбираются.
+ */
+function renderSummary(box, items, workspaceId) {
+    box.innerHTML = '';
+    items.forEach((item, i) => {
+        const chip = createElement('button', {
+            type: 'button',
+            className: `home-summary__chip${item.tone ? ` home-summary__chip--${item.tone}` : ''}`,
+            style: { '--i': String(i) },
+        });
+        chip.appendChild(createElement('span', { className: 'home-summary__dot', 'aria-hidden': 'true' }));
+        const text = createElement('span');
+        if (item.value !== undefined) {
+            text.appendChild(createElement('b', {}, String(item.value)));
+            text.appendChild(document.createTextNode(` ${item.label}`));
+        } else {
+            text.textContent = item.label;
+        }
+        chip.appendChild(text);
+        chip.addEventListener('click', () => {
+            window.dispatchEvent(new CustomEvent('navigate', { detail: { view: item.view, workspaceId } }));
+        });
+        box.appendChild(chip);
+    });
+}
+
 /**
  * Строки виджета «Сегодня и просрочено»: срок, название, где лежит, кто
  * делает. Щелчок открывает карточку прямо здесь.
  */
-function renderTodayList(list, cards, workspaceId) {
+function renderTodayList(list, cards, workspaceId, covers = new Map()) {
     list.innerHTML = '';
     if (!cards.length) {
         list.appendChild(createElement('p', { className: 'page__empty' },
@@ -33,6 +75,14 @@ function renderTodayList(list, cards, workspaceId) {
             className: `due-chip due-chip--${state}`,
             innerHTML: `${Icons.clock}<span>${formatDueDate(card.due_date)}</span>`,
         }));
+        // Плитка доски в её цвете — тот же оттенок, что у плитки на экране
+        // «Доски» и у шапки доски («Тёплое приложение», 27.11).
+        const cover = covers.get(card.board_id);
+        row.appendChild(createElement('span', {
+            className: 'today-row__board',
+            style: cover ? { '--cover': cover } : {},
+            'aria-hidden': 'true',
+        }, (card.board_name || '?').trim().charAt(0).toUpperCase()));
         const text = createElement('span', { className: 'today-row__text' });
         text.appendChild(createElement('span', { className: 'today-row__title' }, card.title));
         text.appendChild(createElement('span', { className: 'today-row__where' }, `${card.board_name} · ${card.column_name}`));
@@ -59,8 +109,17 @@ export async function renderHomePage(workspaceId) {
     content.innerHTML = '';
     content.classList.add('view-enter');
 
-    const page = createElement('div', { className: 'page' });
-    page.appendChild(createElement('h2', { className: 'page__title' }, 'Главная страница'));
+    const page = createElement('div', { className: 'page page--home' });
+
+    // Приветствие и сводка словами — вместо заголовка «Главная страница»: с
+    // этого экрана начинают день, и первым делом он говорит, что горит.
+    const hello = createElement('section', { className: 'home-hello' });
+    const helloTitle = createElement('h2', { className: 'home-hello__title page__title' }, `${greetingWord()}!`);
+    hello.appendChild(helloTitle);
+    hello.appendChild(createElement('p', { className: 'home-hello__date' }, todayTitle()));
+    const summary = createElement('div', { className: 'home-summary', 'aria-label': 'Сводка дня' });
+    hello.appendChild(summary);
+    page.appendChild(hello);
 
     const widgets = createElement('div', { className: 'home-widgets' });
 
@@ -109,19 +168,62 @@ export async function renderHomePage(workspaceId) {
     // Сегодня и просрочено. Тот же список, что у «Списка» и палитры: в нём
     // есть доска, колонка и исполнитель каждой задачи, а у досок — какие
     // колонки финальные. Закрытые и архивные задачи не горят.
+    let overdueCount = 0;
+    let soonCount = 0;
+    let openCount = 0;
     try {
-        const data = await api.listAllCardsInWorkspace(workspaceId);
+        const [data, boards] = await Promise.all([
+            api.listAllCardsInWorkspace(workspaceId),
+            api.getBoards(workspaceId).catch(() => []),
+        ]);
+        const covers = new Map(boards.map(b => [b.id, b.gradient]));
         const finalColumns = new Set(
             (data.boards || []).flatMap(b => b.columns.filter(c => c.is_final).map(c => c.id))
         );
-        const urgent = (data.cards || [])
-            .filter(c => !c.archived && c.due_date && !finalColumns.has(c.column_id) && dueState(c.due_date))
+        const live = (data.cards || []).filter(c => !c.archived && !finalColumns.has(c.column_id));
+        const urgent = live
+            .filter(c => c.due_date && dueState(c.due_date))
             .sort((a, b) => a.due_date.localeCompare(b.due_date));
-        renderTodayList(todayList, urgent, workspaceId);
+        overdueCount = urgent.filter(c => dueState(c.due_date) === 'overdue').length;
+        soonCount = urgent.length - overdueCount;
+        openCount = live.length;
+        renderTodayList(todayList, urgent, workspaceId, covers);
     } catch (e) {
         console.error('Не удалось собрать задачи на сегодня:', e);
         todayList.appendChild(createElement('p', { className: 'page__empty' }, 'Ошибка загрузки'));
     }
+
+    // Имя в приветствии и привычки на сегодня — для сводки.
+    try {
+        const profile = await api.getUserProfile();
+        const name = (profile.display_name || '').trim().split(/\s+/)[0];
+        if (name) helloTitle.textContent = `${greetingWord()}, ${name}!`;
+    } catch (e) {
+        console.error('Не удалось прочитать профиль для приветствия:', e);
+    }
+    let habitsItem = null;
+    try {
+        const habits = await api.listHabits(false);
+        const due = habits.filter(h => h.due_today);
+        const marked = due.filter(h => h.today && (h.today.status === 'completed' || h.today.status === 'fallback')).length;
+        if (due.length) {
+            habitsItem = marked === due.length
+                ? { label: 'все привычки на сегодня отмечены', tone: 'success', view: 'habits' }
+                : { value: `${marked} из ${due.length}`, label: 'привычек отмечено', tone: 'success', view: 'habits' };
+        }
+    } catch (e) {
+        console.error('Не удалось прочитать привычки для сводки:', e);
+    }
+    renderSummary(summary, [
+        overdueCount
+            ? { value: overdueCount, label: pluralize(overdueCount, ['задача просрочена', 'задачи просрочены', 'задач просрочено']), tone: 'danger', view: 'list' }
+            : { label: 'просрочек нет', tone: 'success', view: 'list' },
+        soonCount
+            ? { value: soonCount, label: 'со сроком сегодня или завтра', tone: 'warning', view: 'planner' }
+            : null,
+        habitsItem,
+        { value: openCount, label: pluralize(openCount, ['открытая задача', 'открытые задачи', 'открытых задач']), view: 'list' },
+    ].filter(Boolean), workspaceId);
 
     // Recent boards
     try {
@@ -152,8 +254,8 @@ export async function renderHomePage(workspaceId) {
         const days = lastNDays(7);
         const counts = days.map(day => cards.filter(c => (c.mistake_marked_at || '').slice(0, 10) === day).length);
         const labels = days.map(formatShortDay);
-        const openCount = cards.filter(c => !c.mistake_resolved_at).length;
-        mistakeHint.textContent = `Открытых ошибок: ${openCount}`;
+        const openMistakes = cards.filter(c => !c.mistake_resolved_at).length;
+        mistakeHint.textContent = `Открытых ошибок: ${openMistakes}`;
         renderBarChart(chartCanvas, labels, counts, { color: 'danger', label: 'Новые ошибки' });
     } catch (e) {
         mistakeHint.textContent = 'Ошибка загрузки графика';
@@ -200,9 +302,9 @@ function createWorkloadList(rows) {
 /**
  * Полоса разбивки по приоритету.
  *
- * Оттенки — те же `--priority-*`, что у точек в «Списке» (`list.css`): с
- * палитры «Сигнал» это яркость, а не цвет (высокий — светлый, низкий — едва
- * заметный), поэтому второго словаря здесь нет.
+ * Оттенки — те же `--priority-*`, что у точек в «Списке» (`list.css`): это
+ * яркость, а не цвет (высокий — светлый, низкий — едва заметный), поэтому
+ * второго словаря здесь нет.
  * Сначала «Высокий»: полосу читают слева направо, и срочное должно попадаться
  * первым.
  */

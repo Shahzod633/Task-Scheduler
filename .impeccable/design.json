@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-27T19:30:00+05:00",
+  "title": "Design System: TaskFlow",
+  "extensions": {
+    "colorMeta": {
+      "action": { "role": "primary", "displayName": "Мандарин действия", "canonical": "#ff6a3d", "tonalRamp": ["#5a1a05", "#8a2a0a", "#b8430f", "#f25424", "#ff6a3d", "#ff8a5f", "#ffab8a", "#ffe2d6"] },
+      "apricot-ground": { "role": "neutral", "displayName": "Абрикосовый день", "canonical": "#fff3ec", "tonalRamp": ["#5e5049", "#8c7b71", "#d6b19c", "#e3c6b5", "#f0dcd0", "#fbe7dc", "#fdebe1", "#fff3ec"] },
+      "charcoal-ground": { "role": "neutral", "displayName": "Тёплый уголь", "canonical": "#18120f", "tonalRamp": ["#120d0b", "#18120f", "#1d1612", "#221a16", "#2a211c", "#31261f", "#3d3029", "#4a3b33"] },
+      "overdue-light": { "role": "tertiary", "displayName": "Малиновый — просрочка", "canonical": "#c2264b", "tonalRamp": ["#4a0e1d", "#7a1730", "#a51f40", "#c2264b", "#e0456b", "#f2a7b8", "#fbd0da", "#fde3e9"] },
+      "time-dark": { "role": "tertiary", "displayName": "Солнечный янтарь — время", "canonical": "#ffc14d", "tonalRamp": ["#3a2600", "#5e3d00", "#8a5a00", "#c98a10", "#ffc14d", "#ffd77f", "#ffe7b0", "#fff0c7"] },
+      "done-dark": { "role": "tertiary", "displayName": "Мята — сделано", "canonical": "#4fd39a", "tonalRamp": ["#063d27", "#0b5c3b", "#13805a", "#1fa874", "#4fd39a", "#86e3bb", "#bff0d9", "#ddf5ea"] }
+    },
+    "typographyMeta": {
+      "greeting": { "displayName": "Приветствие", "purpose": "Только приветствие на Главной: «Добрый вечер, имя!»." },
+      "page-title": { "displayName": "Заголовок экрана", "purpose": "Название экрана или доски." },
+      "section-title": { "displayName": "Заголовок раздела", "purpose": "Заголовки виджетов и разделов." },
+      "body": { "displayName": "Основной", "purpose": "Названия задач, описания, чат." },
+      "label": { "displayName": "Подпись", "purpose": "Чипы, сроки, мета карточки." },
+      "code": { "displayName": "Код", "purpose": "Только код в Markdown-описаниях и заметках." }
+    },
+    "shadows": [
+      { "name": "card", "value": "0 1px 2px rgba(110, 50, 20, 0.06), 0 4px 12px -6px rgba(110, 50, 20, 0.14)", "purpose": "Карточка в покое на светлой теме (тёмная — чёрные тени той же формы)." },
+      { "name": "card-hover", "value": "0 2px 4px rgba(110, 50, 20, 0.07), 0 14px 28px -12px rgba(110, 50, 20, 0.24)", "purpose": "Карточка под курсором вместе с подъёмом на 2–3 px." },
+      { "name": "popover", "value": "0 4px 10px rgba(110, 50, 20, 0.07), 0 22px 44px -16px rgba(110, 50, 20, 0.22)", "purpose": "Меню, палитра Ctrl+K." },
+      { "name": "modal", "value": "0 8px 20px rgba(110, 50, 20, 0.08), 0 34px 70px -20px rgba(110, 50, 20, 0.26)", "purpose": "Модальное окно." },
+      { "name": "accent", "value": "0 6px 16px -6px rgba(242, 84, 36, 0.5)", "purpose": "Мандариновая кнопка на светлой теме; на тёмной — нейтральная, без свечения." }
+    ],
+    "motion": [
+      { "name": "ease-press", "value": "cubic-bezier(0.34, 1.56, 0.64, 1)", "purpose": "Пружина возврата после нажатия (360 мс). Только для нажатия." },
+      { "name": "ease-out", "value": "cubic-bezier(0.22, 1, 0.36, 1)", "purpose": "Появление: модалки, тосты, меню, чипы сводки (180–240 мс), без перелёта." },
+      { "name": "press", "value": "scale(0.95) за 90 мс", "purpose": "Сжатие кнопок и плиток на :active." },
+      { "name": "lift", "value": "translate 0 -2px / translateY(-3px)", "purpose": "Подъём карточки и плитки под курсором." },
+      { "name": "habit-done", "value": "sweep 320 мс → галочка 240 мс → кольцо 560 мс → полоса света 620 мс", "purpose": "Момент отметки привычки, мятой." }
+    ],
+    "breakpoints": [
+      { "name": "window-min", "value": "900px" },
+      { "name": "home-one-column", "value": "980px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Главная кнопка",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Единственный сочный цвет экрана; сжимается при нажатии и пружиной возвращается.",
+      "html": "<button class=\"ds-btn-primary\">Готово</button>",
+      "css": ".ds-btn-primary { background: var(--accent-fill, #ff6a3d); color: var(--text-on-accent, #2a1208); border: none; border-radius: 12px; padding: 8px 16px; font: 600 14px 'Segoe UI Variable Text', 'Segoe UI', sans-serif; box-shadow: 0 6px 16px -6px rgba(242, 84, 36, 0.5); transition: background 120ms, transform 360ms cubic-bezier(0.34, 1.56, 0.64, 1); } .ds-btn-primary:hover { background: var(--accent-fill-hover, #ff8a5f); } .ds-btn-primary:active { transform: scale(0.95); transition-duration: 90ms; } .ds-btn-primary:focus-visible { outline: 2px solid #ff6a3d; outline-offset: 2px; }"
+    },
+    {
+      "name": "Карточка задачи",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Белая мягкая карточка на лотке колонки; под курсором поднимается.",
+      "html": "<div class=\"ds-card\"><span class=\"ds-label\">учёба</span><div class=\"ds-card-title\">Сдать отчёт по проекту</div><span class=\"ds-due ds-due--overdue\">25 нояб.</span></div>",
+      "css": ".ds-card { background: var(--bg-board-card, #fff); border-radius: 16px; padding: 12px; box-shadow: 0 1px 2px rgba(110,50,20,.06), 0 4px 12px -6px rgba(110,50,20,.14); display: flex; flex-direction: column; gap: 8px; transition: box-shadow 240ms, translate 360ms cubic-bezier(0.34,1.56,0.64,1); } .ds-card:hover { translate: 0 -2px; box-shadow: 0 2px 4px rgba(110,50,20,.07), 0 14px 28px -12px rgba(110,50,20,.24); } .ds-card-title { font: 400 14px 'Segoe UI Variable Text', 'Segoe UI', sans-serif; color: var(--text-primary, #2b211d); } .ds-label { align-self: flex-start; background: #b18cff; color: #2a211c; border-radius: 999px; padding: 1px 8px; font: 500 11px 'Segoe UI', sans-serif; } .ds-due { align-self: flex-start; border-radius: 999px; padding: 2px 8px; font: 600 11px 'Segoe UI', sans-serif; } .ds-due--overdue { background: var(--danger-soft, #fde3e9); color: var(--color-danger, #c2264b); }"
+    },
+    {
+      "name": "Чип сводки",
+      "kind": "chip",
+      "refersTo": "chip-overdue",
+      "description": "Сводка дня словами под приветствием; ведёт на нужный экран.",
+      "html": "<button class=\"ds-summary ds-summary--danger\"><span class=\"ds-dot\"></span><b>2</b>&nbsp;задачи просрочены</button>",
+      "css": ".ds-summary { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border: none; border-radius: 999px; background: var(--bg-panel, #fff); color: var(--text-secondary, #5e5049); font: 500 13px 'Segoe UI', sans-serif; box-shadow: 0 1px 2px rgba(110,50,20,.07); cursor: pointer; transition: transform 360ms cubic-bezier(0.34,1.56,0.64,1); } .ds-summary:active { transform: scale(0.96); } .ds-summary--danger { background: var(--danger-soft, #fde3e9); color: var(--color-danger, #c2264b); } .ds-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }"
+    },
+    {
+      "name": "Пункт навигации",
+      "kind": "nav",
+      "refersTo": "sidebar-item-active",
+      "description": "Выбранный пункт — мягкая мандариновая плашка.",
+      "html": "<nav class=\"ds-nav\"><a class=\"ds-nav-item\">Доски</a><a class=\"ds-nav-item ds-nav-item--active\">Главная страница</a></nav>",
+      "css": ".ds-nav { display: flex; flex-direction: column; gap: 2px; width: 220px; } .ds-nav-item { padding: 8px 11px; border-radius: 12px; color: var(--text-secondary, #5e5049); font: 500 14px 'Segoe UI', sans-serif; cursor: pointer; } .ds-nav-item:hover { background: rgba(120,60,30,.08); color: var(--text-primary, #2b211d); } .ds-nav-item--active { background: rgba(255,106,61,.12); color: #a13a0c; font-weight: 600; }"
+    },
+    {
+      "name": "Плитка доски",
+      "kind": "custom",
+      "description": "Белая карточка, верхняя половина — цвет обложки доски.",
+      "html": "<div class=\"ds-board\" style=\"--cover:#4f9dff\"><span class=\"ds-board-name\">Shady's tasks</span></div>",
+      "css": ".ds-board { position: relative; width: 200px; height: 112px; border-radius: 18px; background: var(--bg-panel, #fff); box-shadow: 0 1px 2px rgba(110,50,20,.06), 0 4px 12px -6px rgba(110,50,20,.14); overflow: hidden; display: flex; align-items: flex-end; padding: 12px 16px; transition: transform 360ms cubic-bezier(0.34,1.56,0.64,1), box-shadow 240ms; } .ds-board::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 50%; background: var(--cover); opacity: .85; } .ds-board:hover { transform: translateY(-3px); box-shadow: 0 2px 4px rgba(110,50,20,.07), 0 14px 28px -12px rgba(110,50,20,.24); } .ds-board-name { position: relative; font: 600 14px 'Segoe UI', sans-serif; color: var(--text-primary, #2b211d); }"
+    },
+    {
+      "name": "Поле ввода",
+      "kind": "input",
+      "description": "Белое поле; в фокусе — мандариновая линия и мягкое кольцо.",
+      "html": "<input class=\"ds-input\" placeholder=\"Новая задача…\">",
+      "css": ".ds-input { width: 260px; background: var(--bg-input, #fff); border: 1px solid var(--border-default, #f0dcd0); border-radius: 12px; padding: 8px 12px; font: 400 14px 'Segoe UI', sans-serif; color: var(--text-primary, #2b211d); transition: border-color 120ms, box-shadow 120ms; } .ds-input:focus-visible { outline: none; border-color: rgba(242,84,36,.5); box-shadow: 0 0 0 3px rgba(255,106,61,.2); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "Тёплое приложение",
+    "overview": "TaskFlow выглядит как дружелюбное потребительское приложение: мягкие белые карточки на тёплом фоне, человеческие подписи и один сочный мандариновый цвет — только у нажимаемого. Обе темы на равных: абрикосовый день и тёплый уголь вечером. Цвета много, но он пастельный: у каждой доски свой оттенок обложки, у состояний свой. Движение живое: нажатия пружинят, карточки поднимаются, отметка привычки «лопается» мятой.",
+    "keyCharacteristics": [
+      "Абрикосовый фон #fff3ec и тёплый уголь #18120f, карточки белые / #2a211c",
+      "Один сочный цвет — мандарин #ff6a3d с тёмным текстом — у нажимаемого",
+      "Цвет доски несут плитка, шапка доски и строка задачи на Главной",
+      "Малиновый — просрочка, солнечный янтарь — время, мята — сделано",
+      "Крупные радиусы 12–22 px и мягкие тёплые тени",
+      "Пружина на нажатие, подъём под курсором, без подпрыгивания при появлении"
+    ],
+    "rules": [
+      { "name": "The One Bright Rule", "body": "Сочный мандарин — только у того, что реагирует на щелчок.", "section": "colors" },
+      { "name": "The Crimson Not Orange Rule", "body": "Просрочка — малиновая, чтобы её нельзя было спутать с мандариновой кнопкой.", "section": "colors" },
+      { "name": "The Mint Means Done Rule", "body": "Всё о сделанном — мята: отметка, тепловая карта, прогресс.", "section": "colors" },
+      { "name": "The Plain Words Rule", "body": "Подписи — человеческими словами, без прописных плакатов над заголовками.", "section": "typography" },
+      { "name": "The Lift Rule", "body": "Под курсором карточка поднимается на 2–3 px, тень глубже; на доске — через translate, не transform.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do держать мандарин только на нажимаемом",
+      "Do нести цвет доски туда, где она упоминается",
+      "Do давать состояниям слово или иконку рядом с цветом",
+      "Do пружинить нажатие; под prefers-reduced-motion — без движения"
+    ],
+    "donts": [
+      "Don't заливать мандарином сведения: чат, прогресс, «сегодня»",
+      "Don't подпрыгивать при появлении — пружина только на нажатие",
+      "Don't пульсировать бесконечно — три импульса и тишина",
+      "Don't делать фон пергаментным и тень серой на светлой теме"
+    ]
+  }
+}
